@@ -252,8 +252,13 @@ def cmd_comments(args: list[str]) -> None:
         data = c.get("data", {})
         who = c.get("memberCreator", {}).get("username", "?")
         date = c.get("date", "")[:10]
-        text = truncate(data.get("text", ""), 80)
-        print(f"  {date}  @{who}: {text}")
+        text = data.get("text", "")
+        lines = text.splitlines()
+        print(f"  {date}  @{who}: {lines[0] if lines else ''}")
+        if len(lines) > 1:
+            pad = " " * (len(date) + len(who) + 6)
+            for line in lines[1:]:
+                print(f"  {pad}{line}")
 
 
 def cmd_my_cards(_args: list[str]) -> None:

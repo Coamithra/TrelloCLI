@@ -69,13 +69,10 @@ def print_card_detail(card: dict) -> None:
 
     desc = card.get("desc", "").strip()
     if desc:
-        # Show first 5 lines of description
-        lines = desc.splitlines()[:5]
+        lines = desc.splitlines()
         print(f"  Desc:    {lines[0]}")
         for line in lines[1:]:
             print(f"           {line}")
-        if len(desc.splitlines()) > 5:
-            print(f"           ... ({len(desc.splitlines())} lines total)")
 
     checklists = card.get("checklists", [])
     for cl in checklists:
