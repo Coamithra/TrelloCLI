@@ -50,6 +50,18 @@ def get_lists(board_id: str) -> list[dict]:
     return _get(f"/boards/{board_id}/lists", fields="id,name", filter="open")
 
 
+def create_list(board_id: str, name: str) -> dict:
+    return _post("/lists", name=name, idBoard=board_id)
+
+
+def archive_list(list_id: str) -> dict:
+    return _put(f"/lists/{list_id}/closed", value="true")
+
+
+def rename_list(list_id: str, name: str) -> dict:
+    return _put(f"/lists/{list_id}", name=name)
+
+
 # --- Cards ---
 
 def get_board_cards(board_id: str) -> list[dict]:

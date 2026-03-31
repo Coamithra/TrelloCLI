@@ -27,12 +27,16 @@ Commands:
   card <card_id>            Show card details
   add <list> <name> [desc]  Create a card
   move <card_id> <list>     Move a card to a list
+  rename card <id> <name>   Rename a card
+  rename list <name> <new>  Rename a list
   archive <card_id>         Archive a card
+  archive-list <list>       Archive a list
   comment <card_id> <text>  Add a comment
   comments <card_id>        Show card comments
   my-cards                  Show cards assigned to me
   labels                    Show board labels
   members                   Show board members
+  add-list <name>           Create a new list on the active board
   activity [n]              Show recent activity
 """
 
@@ -188,6 +192,47 @@ def cmd_archive(args: list[str]) -> None:
     print(f"Archived {short_id(card_id)}.")
 
 
+def cmd_archive_list(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello archive-list <list_name_or_id>")
+    board_id = _require_board()
+    list_id = _resolve_list(board_id, " ".join(args))
+    api.archive_list(list_id)
+    print("Archived list.")
+
+
+def cmd_rename(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello rename <card|list> <id_or_name> <new_name>")
+    target = args[0].lower()
+    if target == "card":
+        if len(args) < 3:
+            raise SystemExit("Usage: trello rename card <card_id> <new_name>")
+        card_id = _resolve_card(args[1])
+        new_name = " ".join(args[2:])
+        api.update_card(card_id, name=new_name)
+        print(f"Renamed card {short_id(card_id)} to: {new_name}")
+    elif target == "list":
+        if len(args) < 3:
+            raise SystemExit("Usage: trello rename list <list_name_or_id> <new_name>")
+        board_id = _require_board()
+        list_id = _resolve_list(board_id, args[1])
+        new_name = " ".join(args[2:])
+        api.rename_list(list_id, new_name)
+        print(f"Renamed list to: {new_name}")
+    else:
+        raise SystemExit("Usage: trello rename <card|list> <id_or_name> <new_name>")
+
+
+def cmd_add_list(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello add-list <name>")
+    board_id = _require_board()
+    name = " ".join(args)
+    lst = api.create_list(board_id, name)
+    print(f"Created list: {lst['name']} ({lst['id'][:8]})")
+
+
 def cmd_comment(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello comment <card_id> <text>")
@@ -269,11 +314,14 @@ COMMANDS = {
     "add": cmd_add,
     "move": cmd_move,
     "archive": cmd_archive,
+    "rename": cmd_rename,
     "comment": cmd_comment,
     "comments": cmd_comments,
     "my-cards": cmd_my_cards,
     "labels": cmd_labels,
     "members": cmd_members,
+    "add-list": cmd_add_list,
+    "archive-list": cmd_archive_list,
     "activity": cmd_activity,
 }
 
