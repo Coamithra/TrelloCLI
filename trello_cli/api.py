@@ -34,6 +34,11 @@ def _put(path: str, **kw: Any) -> Any:
     return r.json()
 
 
+def _delete(path: str) -> None:
+    r = httpx.delete(f"{BASE}{path}", params=_params(), timeout=15)
+    r.raise_for_status()
+
+
 # --- Boards ---
 
 def get_boards() -> list[dict]:
@@ -129,6 +134,14 @@ def get_comments(card_id: str, limit: int = 10) -> list[dict]:
         filter="commentCard",
         limit=str(limit),
     )
+
+
+def update_comment(action_id: str, text: str) -> dict:
+    return _put(f"/actions/{action_id}", text=text)
+
+
+def delete_comment(action_id: str) -> None:
+    _delete(f"/actions/{action_id}")
 
 
 # --- Labels ---
