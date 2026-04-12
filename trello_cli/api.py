@@ -198,3 +198,27 @@ def get_activity(board_id: str, limit: int = 10) -> list[dict]:
 
 def get_checklists(card_id: str) -> list[dict]:
     return _get(f"/cards/{card_id}/checklists")
+
+
+def create_checklist(card_id: str, name: str) -> dict:
+    return _post(f"/cards/{card_id}/checklists", name=name)
+
+
+def delete_checklist(checklist_id: str) -> None:
+    _delete(f"/checklists/{checklist_id}")
+
+
+def rename_checklist(checklist_id: str, name: str) -> dict:
+    return _put(f"/checklists/{checklist_id}", name=name)
+
+
+def add_checkitem(checklist_id: str, name: str) -> dict:
+    return _post(f"/checklists/{checklist_id}/checkItems", name=name)
+
+
+def delete_checkitem(checklist_id: str, item_id: str) -> None:
+    _delete(f"/checklists/{checklist_id}/checkItems/{item_id}")
+
+
+def update_checkitem(card_id: str, item_id: str, **fields: Any) -> dict:
+    return _put(f"/cards/{card_id}/checkItem/{item_id}", **fields)

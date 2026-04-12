@@ -58,6 +58,17 @@ Label:
   label set <card_id> <label>           Add a label to a card
   label unset <card_id> <label>         Remove a label from a card
 
+Checklist:
+  checklist ls <card_id>                              List checklists on a card
+  checklist add <card_id> <name>                      Create a checklist
+  checklist delete <card_id> <checklist>              Delete a checklist
+  checklist rename <card_id> <checklist> <name>       Rename a checklist
+  checklist item add <card_id> <checklist> <text>     Add an item
+  checklist item delete <card_id> <checklist> <item>  Delete an item
+  checklist item rename <card_id> <cl> <item> <text>  Rename an item
+  checklist item check <card_id> <checklist> <item>   Mark item complete
+  checklist item uncheck <card_id> <checklist> <item> Mark item incomplete
+
 Comment:
   comment add <card_id> <text>              Add a comment
   comment ls <card_id>                      Show card comments
@@ -131,6 +142,61 @@ def _resolve_comment(card_id: str, comment_id_prefix: str) -> str:
         ids = ", ".join(short_id(c["id"]) for c in matches[:5])
         raise SystemExit(f"Ambiguous comment ID prefix '{comment_id_prefix}'. Matches: {ids}")
     raise SystemExit(f"Comment not found with prefix: {comment_id_prefix}")
+
+
+def _resolve_checklist(card_id: str, name_or_id: str) -> str:
+    """Resolve a checklist name (case-insensitive prefix) or ID prefix."""
+    checklists = api.get_checklists(card_id)
+    # Exact ID
+    for cl in checklists:
+        if cl["id"] == name_or_id:
+            return cl["id"]
+    # ID prefix
+    id_matches = [cl for cl in checklists if cl["id"].startswith(name_or_id)]
+    if len(id_matches) == 1:
+        return id_matches[0]["id"]
+    # Name prefix (case-insensitive)
+    lower = name_or_id.lower()
+    name_matches = [cl for cl in checklists if cl["name"].lower().startswith(lower)]
+    if len(name_matches) == 1:
+        return name_matches[0]["id"]
+    if len(name_matches) > 1:
+        names = ", ".join(m["name"] for m in name_matches)
+        raise SystemExit(f"Ambiguous checklist '{name_or_id}'. Matches: {names}")
+    if len(id_matches) > 1:
+        ids = ", ".join(short_id(m["id"]) for m in id_matches)
+        raise SystemExit(f"Ambiguous checklist ID prefix '{name_or_id}'. Matches: {ids}")
+    raise SystemExit(f"Checklist not found: {name_or_id}")
+
+
+def _resolve_checkitem(card_id: str, checklist_id: str, name_or_id: str) -> str:
+    """Resolve a check item name (case-insensitive prefix) or ID prefix."""
+    checklists = api.get_checklists(card_id)
+    items = []
+    for cl in checklists:
+        if cl["id"] == checklist_id:
+            items = cl.get("checkItems", [])
+            break
+    # Exact ID
+    for it in items:
+        if it["id"] == name_or_id:
+            return it["id"]
+    # ID prefix
+    id_matches = [it for it in items if it["id"].startswith(name_or_id)]
+    if len(id_matches) == 1:
+        return id_matches[0]["id"]
+    # Name prefix (case-insensitive)
+    lower = name_or_id.lower()
+    name_matches = [it for it in items if it["name"].lower().startswith(lower)]
+    if len(name_matches) == 1:
+        return name_matches[0]["id"]
+    if len(name_matches) > 1:
+        names = ", ".join(m["name"] for m in name_matches)
+        raise SystemExit(f"Ambiguous item '{name_or_id}'. Matches: {names}")
+    if len(id_matches) > 1:
+        ids = ", ".join(short_id(m["id"]) for m in id_matches)
+        raise SystemExit(f"Ambiguous item ID prefix '{name_or_id}'. Matches: {ids}")
+    raise SystemExit(f"Check item not found: {name_or_id}")
 
 
 TRELLO_COLORS = {
@@ -504,6 +570,125 @@ def cmd_label(args: list[str]) -> None:
     }, args)
 
 
+# ── Checklist subcommands ──────────────────────────────────────────
+
+
+def _checklist_ls(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello checklist ls <card_id>")
+    card_id = _resolve_card(args[0])
+    checklists = api.get_checklists(card_id)
+    if not checklists:
+        print("  No checklists.")
+        return
+    for cl in checklists:
+        items = cl.get("checkItems", [])
+        done = sum(1 for it in items if it.get("state") == "complete")
+        print(f"  {short_id(cl['id'])}  {cl['name']} ({done}/{len(items)})")
+        for it in items:
+            mark = "x" if it.get("state") == "complete" else " "
+            print(f"    [{mark}] {short_id(it['id'])}  {it['name']}")
+
+
+def _checklist_add(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello checklist add <card_id> <name>")
+    card_id = _resolve_card(args[0])
+    name = " ".join(args[1:])
+    cl = api.create_checklist(card_id, name)
+    print(f"Created checklist: {cl['name']} ({short_id(cl['id'])})")
+
+
+def _checklist_delete(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello checklist delete <card_id> <checklist>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    api.delete_checklist(cl_id)
+    print(f"Deleted checklist {short_id(cl_id)}.")
+
+
+def _checklist_rename(args: list[str]) -> None:
+    if len(args) < 3:
+        raise SystemExit("Usage: trello checklist rename <card_id> <checklist> <name>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    new_name = " ".join(args[2:])
+    api.rename_checklist(cl_id, new_name)
+    print(f"Renamed checklist {short_id(cl_id)} to: {new_name}")
+
+
+def _checklist_item_add(args: list[str]) -> None:
+    if len(args) < 3:
+        raise SystemExit("Usage: trello checklist item add <card_id> <checklist> <text>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    name = " ".join(args[2:])
+    it = api.add_checkitem(cl_id, name)
+    print(f"Added item: {it['name']} ({short_id(it['id'])})")
+
+
+def _checklist_item_delete(args: list[str]) -> None:
+    if len(args) < 3:
+        raise SystemExit("Usage: trello checklist item delete <card_id> <checklist> <item>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    item_id = _resolve_checkitem(card_id, cl_id, args[2])
+    api.delete_checkitem(cl_id, item_id)
+    print(f"Deleted item {short_id(item_id)}.")
+
+
+def _checklist_item_rename(args: list[str]) -> None:
+    if len(args) < 4:
+        raise SystemExit("Usage: trello checklist item rename <card_id> <checklist> <item> <text>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    item_id = _resolve_checkitem(card_id, cl_id, args[2])
+    new_name = " ".join(args[3:])
+    api.update_checkitem(card_id, item_id, name=new_name)
+    print(f"Renamed item {short_id(item_id)} to: {new_name}")
+
+
+def _checklist_item_check(args: list[str]) -> None:
+    if len(args) < 3:
+        raise SystemExit("Usage: trello checklist item check <card_id> <checklist> <item>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    item_id = _resolve_checkitem(card_id, cl_id, args[2])
+    api.update_checkitem(card_id, item_id, state="complete")
+    print(f"Checked {short_id(item_id)}.")
+
+
+def _checklist_item_uncheck(args: list[str]) -> None:
+    if len(args) < 3:
+        raise SystemExit("Usage: trello checklist item uncheck <card_id> <checklist> <item>")
+    card_id = _resolve_card(args[0])
+    cl_id = _resolve_checklist(card_id, args[1])
+    item_id = _resolve_checkitem(card_id, cl_id, args[2])
+    api.update_checkitem(card_id, item_id, state="incomplete")
+    print(f"Unchecked {short_id(item_id)}.")
+
+
+def _checklist_item(args: list[str]) -> None:
+    _dispatch("checklist item", {
+        "add": _checklist_item_add,
+        "delete": _checklist_item_delete,
+        "rename": _checklist_item_rename,
+        "check": _checklist_item_check,
+        "uncheck": _checklist_item_uncheck,
+    }, args)
+
+
+def cmd_checklist(args: list[str]) -> None:
+    _dispatch("checklist", {
+        "ls": _checklist_ls,
+        "add": _checklist_add,
+        "delete": _checklist_delete,
+        "rename": _checklist_rename,
+        "item": _checklist_item,
+    }, args)
+
+
 # ── Comment subcommands ─────────────────────────────────────────────
 
 
@@ -576,6 +761,7 @@ COMMANDS = {
     "card": cmd_card,
     "list": cmd_list,
     "label": cmd_label,
+    "checklist": cmd_checklist,
     "comment": cmd_comment,
 }
 
