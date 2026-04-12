@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import sys
 
+# Force UTF-8 output on Windows (avoids cp1252 encoding errors with non-ASCII Trello data)
+if sys.platform == "win32":
+    for stream in ("stdout", "stderr"):
+        s = getattr(sys, stream)
+        if hasattr(s, "reconfigure"):
+            s.reconfigure(encoding="utf-8")
+
 from . import api, config
 from .fmt import (
     due_str,
@@ -27,11 +34,12 @@ Global:
   activity [n]                  Show recent activity
 
 Card:
-  card show <card_id>           Show card details
+  card show <card_id> [--no-comments]  Show card details (comments included by default)
   card ls <list>                Show cards in a list
   card add <list> <name> [desc] Create a card
   card move <card_id> <list>    Move a card to a list
   card archive <card_id>        Archive a card
+  card unarchive <card_id>      Restore an archived card
   card rename <card_id> <name>  Rename a card
   card desc <card_id> <text>    Update card description
   card mine                     Show cards assigned to me
@@ -41,6 +49,14 @@ List:
   list add <name>               Create a new list
   list archive <list>           Archive a list
   list rename <list> <new_name> Rename a list
+
+Label:
+  label ls                              Show board labels
+  label add <name> <color>              Create a board label
+  label edit <label> [name] [color]     Update a label
+  label delete <label>                  Delete a board label
+  label set <card_id> <label>           Add a label to a card
+  label unset <card_id> <label>         Remove a label from a card
 
 Comment:
   comment add <card_id> <text>              Add a comment
@@ -78,7 +94,7 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
     raise SystemExit(f"List not found: {name_or_id}")
 
 
-def _resolve_card(card_id_prefix: str) -> str:
+def _resolve_card(card_id_prefix: str, include_closed: bool = False) -> str:
     """Resolve a card ID prefix to a full card ID by searching the active board."""
     # If it looks like a full 24-char ID, use it directly
     if len(card_id_prefix) == 24:
@@ -91,6 +107,15 @@ def _resolve_card(card_id_prefix: str) -> str:
     if len(matches) > 1:
         names = ", ".join(f"{short_id(c['id'])}={c['name']}" for c in matches[:5])
         raise SystemExit(f"Ambiguous card ID prefix '{card_id_prefix}'. Matches: {names}")
+    # Fall back to closed cards if requested
+    if include_closed:
+        closed = api.get_board_cards(board_id, card_filter="closed")
+        matches = [c for c in closed if c["id"].startswith(card_id_prefix)]
+        if len(matches) == 1:
+            return matches[0]["id"]
+        if len(matches) > 1:
+            names = ", ".join(f"{short_id(c['id'])}={c['name']}" for c in matches[:5])
+            raise SystemExit(f"Ambiguous card ID prefix '{card_id_prefix}'. Matches: {names}")
     raise SystemExit(f"Card not found with prefix: {card_id_prefix}")
 
 
@@ -106,6 +131,37 @@ def _resolve_comment(card_id: str, comment_id_prefix: str) -> str:
         ids = ", ".join(short_id(c["id"]) for c in matches[:5])
         raise SystemExit(f"Ambiguous comment ID prefix '{comment_id_prefix}'. Matches: {ids}")
     raise SystemExit(f"Comment not found with prefix: {comment_id_prefix}")
+
+
+TRELLO_COLORS = {
+    "yellow", "purple", "blue", "red", "green", "orange",
+    "black", "sky", "pink", "lime",
+}
+
+
+def _resolve_label(board_id: str, name_or_id: str) -> str:
+    """Resolve a label name (case-insensitive prefix) or ID prefix."""
+    labels = api.get_labels(board_id)
+    # Exact ID
+    for lb in labels:
+        if lb["id"] == name_or_id:
+            return lb["id"]
+    # ID prefix
+    id_matches = [lb for lb in labels if lb["id"].startswith(name_or_id)]
+    if len(id_matches) == 1:
+        return id_matches[0]["id"]
+    # Name prefix (case-insensitive)
+    lower = name_or_id.lower()
+    name_matches = [lb for lb in labels if (lb.get("name") or "").lower().startswith(lower) and lb.get("name")]
+    if len(name_matches) == 1:
+        return name_matches[0]["id"]
+    if len(name_matches) > 1:
+        names = ", ".join(m.get("name", m["id"][:8]) for m in name_matches)
+        raise SystemExit(f"Ambiguous label '{name_or_id}'. Matches: {names}")
+    if len(id_matches) > 1:
+        ids = ", ".join(short_id(m["id"]) for m in id_matches)
+        raise SystemExit(f"Ambiguous label ID prefix '{name_or_id}'. Matches: {ids}")
+    raise SystemExit(f"Label not found: {name_or_id}")
 
 
 def _dispatch(group: str, subcmds: dict, args: list[str]) -> None:
@@ -207,9 +263,12 @@ def cmd_activity(args: list[str]) -> None:
 
 def _card_show(args: list[str]) -> None:
     if not args:
-        raise SystemExit("Usage: trello card show <card_id>")
-    card = api.get_card(_resolve_card(args[0]))
-    print_card_detail(card)
+        raise SystemExit("Usage: trello card show <card_id> [--no-comments]")
+    no_comments = "--no-comments" in args
+    card_args = [a for a in args if not a.startswith("--")]
+    card = api.get_card(_resolve_card(card_args[0]))
+    comments = [] if no_comments else api.get_comments(card["id"], limit=20)
+    print_card_detail(card, comments)
 
 
 def _card_ls(args: list[str]) -> None:
@@ -258,6 +317,14 @@ def _card_archive(args: list[str]) -> None:
     print(f"Archived {short_id(card_id)}.")
 
 
+def _card_unarchive(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello card unarchive <card_id>")
+    card_id = _resolve_card(args[0], include_closed=True)
+    api.unarchive_card(card_id)
+    print(f"Unarchived {short_id(card_id)}.")
+
+
 def _card_rename(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello card rename <card_id> <new_name>")
@@ -296,6 +363,7 @@ def cmd_card(args: list[str]) -> None:
         "add": _card_add,
         "move": _card_move,
         "archive": _card_archive,
+        "unarchive": _card_unarchive,
         "rename": _card_rename,
         "desc": _card_desc,
         "mine": _card_mine,
@@ -346,6 +414,93 @@ def cmd_list(args: list[str]) -> None:
         "add": _list_add,
         "archive": _list_archive,
         "rename": _list_rename,
+    }, args)
+
+
+# ── Label subcommands ──────────────────────────────────────────────
+
+
+def _label_ls(_args: list[str]) -> None:
+    board_id = _require_board()
+    labels = api.get_labels(board_id)
+    rows = [[short_id(lb["id"]), lb.get("name", ""), lb.get("color", "")] for lb in labels]
+    print_table(["ID", "Name", "Color"], rows)
+
+
+def _label_add(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello label add <name> <color>\n"
+                         f"Colors: {', '.join(sorted(TRELLO_COLORS))}")
+    board_id = _require_board()
+    # Last arg may be a color
+    color = None
+    if len(args) >= 2 and args[-1].lower() in TRELLO_COLORS:
+        color = args[-1].lower()
+        name = " ".join(args[:-1])
+    else:
+        name = " ".join(args)
+    lb = api.create_label(board_id, name, color)
+    print(f"Created label: {lb.get('name', '')} ({short_id(lb['id'])})"
+          f"{' [' + lb.get('color', '') + ']' if lb.get('color') else ''}")
+
+
+def _label_edit(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello label edit <label> [name] [color]\n"
+                         f"Colors: {', '.join(sorted(TRELLO_COLORS))}")
+    board_id = _require_board()
+    label_id = _resolve_label(board_id, args[0])
+    fields: dict[str, str] = {}
+    rest = args[1:]
+    # If last arg is a color, treat it as color; rest is name
+    if rest[-1].lower() in TRELLO_COLORS:
+        fields["color"] = rest[-1].lower()
+        rest = rest[:-1]
+    if rest:
+        fields["name"] = " ".join(rest)
+    if not fields:
+        raise SystemExit("Nothing to update. Provide a new name and/or color.")
+    api.update_label(label_id, **fields)
+    print(f"Updated label {short_id(label_id)}.")
+
+
+def _label_delete(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello label delete <label>")
+    board_id = _require_board()
+    label_id = _resolve_label(board_id, args[0])
+    api.delete_label(label_id)
+    print(f"Deleted label {short_id(label_id)}.")
+
+
+def _label_set(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello label set <card_id> <label>")
+    board_id = _require_board()
+    card_id = _resolve_card(args[0])
+    label_id = _resolve_label(board_id, " ".join(args[1:]))
+    api.add_label_to_card(card_id, label_id)
+    print(f"Added label to card {short_id(card_id)}.")
+
+
+def _label_unset(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello label unset <card_id> <label>")
+    board_id = _require_board()
+    card_id = _resolve_card(args[0])
+    label_id = _resolve_label(board_id, " ".join(args[1:]))
+    api.remove_label_from_card(card_id, label_id)
+    print(f"Removed label from card {short_id(card_id)}.")
+
+
+def cmd_label(args: list[str]) -> None:
+    _dispatch("label", {
+        "ls": _label_ls,
+        "add": _label_add,
+        "edit": _label_edit,
+        "delete": _label_delete,
+        "set": _label_set,
+        "unset": _label_unset,
     }, args)
 
 
@@ -420,6 +575,7 @@ COMMANDS = {
     "activity": cmd_activity,
     "card": cmd_card,
     "list": cmd_list,
+    "label": cmd_label,
     "comment": cmd_comment,
 }
 

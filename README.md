@@ -38,6 +38,11 @@ trello comment <card_id> <text>  Add a comment
 trello comments <card_id>        Show card comments
 trello my-cards                  Show cards assigned to me
 trello labels                    Show board labels
+trello label add <name> <color>  Create a board label
+trello label edit <label> [name] [color]  Update a label
+trello label delete <label>      Delete a board label
+trello label set <card> <label>  Add a label to a card
+trello label unset <card> <label> Remove a label from a card
 trello members                   Show board members
 trello activity [n]              Show recent activity
 ```

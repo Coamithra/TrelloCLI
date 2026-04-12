@@ -69,10 +69,11 @@ def rename_list(list_id: str, name: str) -> dict:
 
 # --- Cards ---
 
-def get_board_cards(board_id: str) -> list[dict]:
+def get_board_cards(board_id: str, card_filter: str = "visible") -> list[dict]:
     return _get(
         f"/boards/{board_id}/cards",
         fields="id,name,shortUrl,labels,due,idList,idMembers,shortId",
+        filter=card_filter,
     )
 
 
@@ -118,6 +119,10 @@ def archive_card(card_id: str) -> dict:
     return _put(f"/cards/{card_id}", closed="true")
 
 
+def unarchive_card(card_id: str) -> dict:
+    return _put(f"/cards/{card_id}", closed="false")
+
+
 def update_card(card_id: str, **fields) -> dict:
     return _put(f"/cards/{card_id}", **fields)
 
@@ -148,6 +153,33 @@ def delete_comment(action_id: str) -> None:
 
 def get_labels(board_id: str) -> list[dict]:
     return _get(f"/boards/{board_id}/labels", fields="id,name,color")
+
+
+def create_label(board_id: str, name: str, color: str | None = None) -> dict:
+    kw: dict[str, Any] = {"name": name, "idBoard": board_id}
+    if color:
+        kw["color"] = color
+    return _post("/labels", **kw)
+
+
+def update_label(label_id: str, **fields: Any) -> dict:
+    return _put(f"/labels/{label_id}", **fields)
+
+
+def delete_label(label_id: str) -> None:
+    _delete(f"/labels/{label_id}")
+
+
+def add_label_to_card(card_id: str, label_id: str) -> None:
+    _post(f"/cards/{card_id}/idLabels", value=label_id)
+
+
+def remove_label_from_card(card_id: str, label_id: str) -> None:
+    r = httpx.delete(
+        f"{BASE}/cards/{card_id}/idLabels/{label_id}",
+        params=_params(), timeout=15,
+    )
+    r.raise_for_status()
 
 
 # --- Members ---
