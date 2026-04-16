@@ -10,6 +10,19 @@ from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".trello-cli.json"
 
+_board_override: str | None = None
+
+
+def set_board_override(value: str) -> None:
+    """Set a per-invocation board override (from --board flag)."""
+    global _board_override
+    _board_override = value
+
+
+def get_board_override() -> str | None:
+    """Return board override: --board flag > TRELLO_BOARD env var > None."""
+    return _board_override or os.environ.get("TRELLO_BOARD")
+
 
 def _load() -> dict:
     if CONFIG_PATH.exists():

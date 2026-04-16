@@ -22,12 +22,16 @@ from .fmt import (
 )
 
 USAGE = """\
-Usage: trello <command> [args]
+Usage: trello [--board <name_or_id>] <command> [args]
+
+Global options:
+  --board <name_or_id>          Override active board for this command
+                                (also: TRELLO_BOARD env var)
 
 Global:
   configure <key> <token>       Save API credentials
   boards                        List all boards
-  use <board_name_or_id>        Set active board
+  use <board_name_or_id>        Set active board (default)
   board                         Show active board info
   labels                        Show board labels
   members                       Show board members
@@ -80,10 +84,34 @@ Comment:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _resolve_board_ref(ref: str) -> str:
+    """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD)."""
+    boards = api.get_boards()
+    # Exact ID match
+    for b in boards:
+        if b["id"] == ref or short_id(b["id"]) == ref:
+            return b["id"]
+    # Name prefix match (case-insensitive)
+    lower = ref.lower()
+    matches = [b for b in boards if b["name"].lower().startswith(lower)]
+    if len(matches) == 1:
+        return matches[0]["id"]
+    if len(matches) > 1:
+        names = ", ".join(m["name"] for m in matches)
+        raise SystemExit(f"Ambiguous board name '{ref}'. Matches: {names}")
+    raise SystemExit(f"Board not found: {ref}")
+
+
 def _require_board() -> str:
+    override = config.get_board_override()
+    if override:
+        return _resolve_board_ref(override)
     board_id = config.get_active_board()
     if not board_id:
-        raise SystemExit("No active board. Run: trello use <board_name_or_id>")
+        raise SystemExit(
+            "No active board. Run: trello use <board>, "
+            "or pass --board <name>, or set TRELLO_BOARD."
+        )
     return board_id
 
 
@@ -257,27 +285,12 @@ def cmd_boards(_args: list[str]) -> None:
 def cmd_use(args: list[str]) -> None:
     if not args:
         raise SystemExit("Usage: trello use <board_name_or_id>")
-    query = " ".join(args).lower()
-    boards = api.get_boards()
-
-    # Try exact ID match
-    for b in boards:
-        if b["id"] == query or short_id(b["id"]) == query:
-            config.set_active_board(b["id"], b["name"])
-            print(f"Active board: {b['name']} ({short_id(b['id'])})")
-            return
-
-    # Try name prefix match
-    matches = [b for b in boards if b["name"].lower().startswith(query)]
-    if len(matches) == 1:
-        b = matches[0]
-        config.set_active_board(b["id"], b["name"])
-        print(f"Active board: {b['name']} ({short_id(b['id'])})")
-        return
-    if len(matches) > 1:
-        names = ", ".join(m["name"] for m in matches)
-        raise SystemExit(f"Ambiguous board name. Matches: {names}")
-    raise SystemExit(f"Board not found: {query}")
+    ref = " ".join(args)
+    board_id = _resolve_board_ref(ref)
+    # Fetch the board name for display/storage
+    b = api.get_board(board_id)
+    config.set_active_board(board_id, b["name"])
+    print(f"Active board: {b['name']} ({short_id(board_id)})")
 
 
 def cmd_board(_args: list[str]) -> None:
@@ -768,6 +781,15 @@ COMMANDS = {
 
 def main() -> None:
     args = sys.argv[1:]
+
+    # Extract --board flag before dispatch
+    if "--board" in args:
+        idx = args.index("--board")
+        if idx + 1 >= len(args):
+            raise SystemExit("--board requires a board name or ID.")
+        config.set_board_override(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+
     if not args or args[0] in ("-h", "--help", "help"):
         print(USAGE)
         return
