@@ -16,17 +16,26 @@ from .fmt import (
     due_str,
     label_str,
     print_card_detail,
+    print_json,
     print_table,
     short_id,
     truncate,
 )
 
+_JSON_MODE = False
+
+
+def _is_json() -> bool:
+    return _JSON_MODE
+
 USAGE = """\
-Usage: trello [--board <name_or_id>] <command> [args]
+Usage: trello [--board <name_or_id>] [--json] <command> [args]
 
 Global options:
   --board <name_or_id>          Override active board for this command
                                 (also: TRELLO_BOARD env var)
+  --json                        Emit raw JSON instead of formatted text
+                                (read commands only)
 
 Global:
   configure <key> <token>       Save API credentials
@@ -39,7 +48,8 @@ Global:
 
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
-  card ls <list>                Show cards in a list
+  card ls <list> [--with-comment]      Show cards in a list (Activity column;
+                                       --with-comment adds latest comment)
   card add <list> <name> [desc] Create a card
   card move <card_id> <list>    Move a card to a list
   card archive <card_id>        Archive a card
@@ -278,6 +288,9 @@ def cmd_configure(args: list[str]) -> None:
 
 def cmd_boards(_args: list[str]) -> None:
     boards = api.get_boards()
+    if _is_json():
+        print_json(boards)
+        return
     rows = [[short_id(b["id"]), b["name"], b.get("shortUrl", "")] for b in boards]
     print_table(["ID", "Name", "URL"], rows)
 
@@ -296,6 +309,9 @@ def cmd_use(args: list[str]) -> None:
 def cmd_board(_args: list[str]) -> None:
     board_id = _require_board()
     b = api.get_board(board_id)
+    if _is_json():
+        print_json(b)
+        return
     print(f"  Board: {b['name']}")
     print(f"  ID:    {b['id']}")
     print(f"  URL:   {b.get('shortUrl', '')}")
@@ -307,6 +323,9 @@ def cmd_board(_args: list[str]) -> None:
 def cmd_labels(_args: list[str]) -> None:
     board_id = _require_board()
     labels = api.get_labels(board_id)
+    if _is_json():
+        print_json(labels)
+        return
     rows = [[short_id(lb["id"]), lb.get("name", ""), lb.get("color", "")] for lb in labels]
     print_table(["ID", "Name", "Color"], rows)
 
@@ -314,6 +333,9 @@ def cmd_labels(_args: list[str]) -> None:
 def cmd_members(_args: list[str]) -> None:
     board_id = _require_board()
     members = api.get_members(board_id)
+    if _is_json():
+        print_json(members)
+        return
     rows = [[short_id(m["id"]), m.get("fullName", ""), f"@{m.get('username', '')}"] for m in members]
     print_table(["ID", "Name", "Username"], rows)
 
@@ -322,6 +344,9 @@ def cmd_activity(args: list[str]) -> None:
     board_id = _require_board()
     limit = int(args[0]) if args else 10
     actions = api.get_activity(board_id, limit)
+    if _is_json():
+        print_json(actions)
+        return
     for a in actions:
         date = a.get("date", "")[:10]
         who = a.get("memberCreator", {}).get("username", "?")
@@ -347,24 +372,46 @@ def _card_show(args: list[str]) -> None:
     card_args = [a for a in args if not a.startswith("--")]
     card = api.get_card(_resolve_card(card_args[0]))
     comments = [] if no_comments else api.get_comments(card["id"], limit=20)
+    if _is_json():
+        print_json({**card, "comments": comments})
+        return
     print_card_detail(card, comments)
 
 
 def _card_ls(args: list[str]) -> None:
-    if not args:
-        raise SystemExit("Usage: trello card ls <list_name_or_id>")
+    with_comment = "--with-comment" in args
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        raise SystemExit("Usage: trello card ls <list_name_or_id> [--with-comment]")
     board_id = _require_board()
-    list_id = _resolve_list(board_id, " ".join(args))
-    cards = api.get_cards_in_list(list_id)
+    list_id = _resolve_list(board_id, " ".join(positional))
+    cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
+    if _is_json():
+        print_json(cards)
+        return
     rows = []
     for c in cards:
         rows.append([
             short_id(c["id"]),
+            (c.get("dateLastActivity") or "")[:10],
             truncate(c["name"], 50),
             label_str(c.get("labels", [])),
             due_str(c.get("due")),
         ])
-    print_table(["ID", "Name", "Labels", "Due"], rows)
+    print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
+    if with_comment:
+        print()
+        print("  Latest comments:")
+        for c in cards:
+            actions = c.get("actions") or []
+            if not actions:
+                continue
+            a = actions[0]
+            text = (a.get("data", {}).get("text") or "").splitlines()
+            first = text[0] if text else ""
+            who = a.get("memberCreator", {}).get("username", "?")
+            date = (a.get("date") or "")[:10]
+            print(f"    {short_id(c['id'])}  {date} @{who}: {truncate(first, 70)}")
 
 
 def _card_add(args: list[str]) -> None:
@@ -424,15 +471,19 @@ def _card_desc(args: list[str]) -> None:
 
 def _card_mine(_args: list[str]) -> None:
     cards = api.get_my_cards()
+    if _is_json():
+        print_json(cards)
+        return
     rows = []
     for c in cards:
         rows.append([
             short_id(c["id"]),
+            (c.get("dateLastActivity") or "")[:10],
             truncate(c["name"], 50),
             label_str(c.get("labels", [])),
             due_str(c.get("due")),
         ])
-    print_table(["ID", "Name", "Labels", "Due"], rows)
+    print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
 
 
 def cmd_card(args: list[str]) -> None:
@@ -455,6 +506,9 @@ def cmd_card(args: list[str]) -> None:
 def _list_ls(_args: list[str]) -> None:
     board_id = _require_board()
     lists = api.get_lists(board_id)
+    if _is_json():
+        print_json(lists)
+        return
     rows = [[lst["id"], lst["name"]] for lst in lists]
     print_table(["ID", "Name"], rows)
 
@@ -502,6 +556,9 @@ def cmd_list(args: list[str]) -> None:
 def _label_ls(_args: list[str]) -> None:
     board_id = _require_board()
     labels = api.get_labels(board_id)
+    if _is_json():
+        print_json(labels)
+        return
     rows = [[short_id(lb["id"]), lb.get("name", ""), lb.get("color", "")] for lb in labels]
     print_table(["ID", "Name", "Color"], rows)
 
@@ -591,6 +648,9 @@ def _checklist_ls(args: list[str]) -> None:
         raise SystemExit("Usage: trello checklist ls <card_id>")
     card_id = _resolve_card(args[0])
     checklists = api.get_checklists(card_id)
+    if _is_json():
+        print_json(checklists)
+        return
     if not checklists:
         print("  No checklists.")
         return
@@ -717,6 +777,9 @@ def _comment_ls(args: list[str]) -> None:
     if not args:
         raise SystemExit("Usage: trello comment ls <card_id>")
     comments = api.get_comments(_resolve_card(args[0]))
+    if _is_json():
+        print_json(comments)
+        return
     if not comments:
         print("  No comments.")
         return
@@ -780,7 +843,12 @@ COMMANDS = {
 
 
 def main() -> None:
+    global _JSON_MODE
     args = sys.argv[1:]
+
+    if "--json" in args:
+        _JSON_MODE = True
+        args = [a for a in args if a != "--json"]
 
     # Extract --board flag before dispatch
     if "--board" in args:

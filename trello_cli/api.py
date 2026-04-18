@@ -72,22 +72,25 @@ def rename_list(list_id: str, name: str) -> dict:
 def get_board_cards(board_id: str, card_filter: str = "visible") -> list[dict]:
     return _get(
         f"/boards/{board_id}/cards",
-        fields="id,name,shortUrl,labels,due,idList,idMembers,shortId",
+        fields="id,name,shortUrl,labels,due,idList,idMembers,shortId,dateLastActivity",
         filter=card_filter,
     )
 
 
-def get_cards_in_list(list_id: str) -> list[dict]:
-    return _get(
-        f"/lists/{list_id}/cards",
-        fields="id,name,shortUrl,labels,due,idMembers,shortId",
-    )
+def get_cards_in_list(list_id: str, with_latest_comment: bool = False) -> list[dict]:
+    kw: dict[str, Any] = {
+        "fields": "id,name,shortUrl,labels,due,idMembers,shortId,dateLastActivity",
+    }
+    if with_latest_comment:
+        kw["actions"] = "commentCard"
+        kw["actions_limit"] = "1"
+    return _get(f"/lists/{list_id}/cards", **kw)
 
 
 def get_card(card_id: str) -> dict:
     return _get(
         f"/cards/{card_id}",
-        fields="id,name,desc,shortUrl,labels,due,dueComplete,idList,idMembers,shortId",
+        fields="id,name,desc,shortUrl,labels,due,dueComplete,idList,idMembers,shortId,dateLastActivity",
         checklists="all",
     )
 
@@ -95,7 +98,7 @@ def get_card(card_id: str) -> dict:
 def get_my_cards() -> list[dict]:
     return _get(
         "/members/me/cards",
-        fields="id,name,shortUrl,labels,due,idBoard,idList,shortId",
+        fields="id,name,shortUrl,labels,due,idBoard,idList,shortId,dateLastActivity",
     )
 
 

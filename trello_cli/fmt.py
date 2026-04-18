@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
+
+def print_json(data: object) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
 
 def short_id(full_id: str) -> str:
     """Show first 8 chars of a Trello ID."""
