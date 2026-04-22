@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 # Force UTF-8 output on Windows (avoids cp1252 encoding errors with non-ASCII Trello data)
 if sys.platform == "win32":
@@ -56,6 +58,9 @@ Card:
   card unarchive <card_id>      Restore an archived card
   card rename <card_id> <name>  Rename a card
   card desc <card_id> <text>    Update card description
+  card due <card_id> <date>     Set card due date (ISO 2026-05-01,
+                                relative 1d/2w/1m/1y, 'tomorrow',
+                                'today', or 'clear' to remove)
   card mine                     Show cards assigned to me
 
 List:
@@ -469,6 +474,58 @@ def _card_desc(args: list[str]) -> None:
     print(f"Updated description for {short_id(card_id)}.")
 
 
+def _parse_due(raw: str) -> str | None:
+    """Parse a due-date argument into an ISO string (or None to clear)."""
+    s = raw.strip().lower()
+    if s in ("clear", "none", "remove", "off"):
+        return None
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if s == "today":
+        return today.isoformat()
+    if s == "tomorrow":
+        return (today + timedelta(days=1)).isoformat()
+    m = re.fullmatch(r"(\d+)\s*(d|day|days|w|week|weeks|m|mo|mon|month|months|y|year|years)", s)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("d"):
+            delta = timedelta(days=n)
+        elif unit.startswith("w"):
+            delta = timedelta(weeks=n)
+        elif unit.startswith("y"):
+            delta = timedelta(days=365 * n)
+        else:
+            delta = timedelta(days=30 * n)
+        return (today + delta).isoformat()
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        raise SystemExit(
+            f"Could not parse date: {raw!r}. "
+            "Use ISO (2026-05-01), relative (1d/2w/1m/1y), 'today', 'tomorrow', or 'clear'."
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(hour=9, tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _card_due(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit(
+            "Usage: trello card due <card_id> <date>\n"
+            "  Date: ISO (2026-05-01), relative (1d, 2w, 1m, 1y),\n"
+            "        'today', 'tomorrow', or 'clear' to remove."
+        )
+    card_id = _resolve_card(args[0])
+    due = _parse_due(" ".join(args[1:]))
+    api.update_card(card_id, due=due if due is not None else "")
+    if due is None:
+        print(f"Cleared due date on {short_id(card_id)}.")
+    else:
+        print(f"Set due date on {short_id(card_id)} to {due[:10]}.")
+
+
 def _card_mine(_args: list[str]) -> None:
     cards = api.get_my_cards()
     if _is_json():
@@ -496,6 +553,7 @@ def cmd_card(args: list[str]) -> None:
         "unarchive": _card_unarchive,
         "rename": _card_rename,
         "desc": _card_desc,
+        "due": _card_due,
         "mine": _card_mine,
     }, args)
 
