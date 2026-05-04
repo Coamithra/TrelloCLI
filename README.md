@@ -24,28 +24,91 @@ Get your API key and token from https://trello.com/power-ups/admin.
 
 ## Usage
 
+Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `comment`). Bare nouns default to `ls`, so `trello list` ≡ `trello list ls` and `trello card <list>` ≡ `trello card ls <list>`.
+
+### Global options
+
 ```
-trello boards                    List all boards
-trello use <board>               Set active board (name prefix or ID)
-trello board                     Show active board info
-trello lists                     Show lists on active board
-trello cards <list>              Show cards in a list (name prefix or ID)
-trello card <id>                 Show card details (ID prefix works)
-trello add <list> <name> [desc]  Create a card
-trello move <card_id> <list>     Move a card to a list
-trello archive <card_id>         Archive a card
-trello comment <card_id> <text>  Add a comment
-trello comments <card_id>        Show card comments
-trello my-cards                  Show cards assigned to me
-trello labels                    Show board labels
-trello label add <name> <color>  Create a board label
-trello label edit <label> [name] [color]  Update a label
-trello label delete <label>      Delete a board label
-trello label set <card> <label>  Add a label to a card
-trello label unset <card> <label> Remove a label from a card
-trello members                   Show board members
-trello activity [n]              Show recent activity
+--board <name_or_id>   Override active board for this command
+                       (also: TRELLO_BOARD env var)
+--json                 Emit raw JSON instead of formatted text (read commands)
 ```
+
+### Global
+
+```
+trello configure <key> <token>     Save API credentials
+trello boards                      List all boards
+trello use <board>                 Set active board (name prefix or ID)
+trello board                       Show active board info
+trello board add <name> [desc]     Create a board (--no-default-lists, --use)
+trello labels                      Show board labels
+trello members                     Show board members
+trello activity [n]                Show recent activity
+```
+
+### Card
+
+```
+trello card show <id> [--no-comments]  Show card detail (comments by default)
+trello card ls <list> [--with-comment] Show cards in a list
+trello card add <list> <name> [desc]   Create a card
+trello card move <id> <list>           Move a card to a list
+trello card archive <id>               Archive a card
+trello card unarchive <id>             Restore an archived card
+trello card rename <id> <name>         Rename a card
+trello card desc <id> <text>           Update card description
+trello card due <id> <date>            Set/clear due date (ISO, 1d/2w/1m/1y,
+                                       'today', 'tomorrow', 'clear')
+trello card pos <id> <pos>             Reorder card (top, bottom, number,
+                                       'after <id>', 'before <id>')
+trello card mine                       Show cards assigned to me
+```
+
+### List
+
+```
+trello list ls                     Show lists on active board
+trello list add <name>             Create a new list
+trello list archive <list>         Archive a list
+trello list rename <list> <name>   Rename a list
+```
+
+### Label
+
+```
+trello label ls                          Show board labels
+trello label add <name> <color>          Create a board label
+trello label edit <label> [name] [color] Update a label
+trello label delete <label>              Delete a board label
+trello label set <card> <label>          Add a label to a card
+trello label unset <card> <label>        Remove a label from a card
+```
+
+### Checklist
+
+```
+trello checklist ls <card>                       List checklists on a card
+trello checklist add <card> <name>               Create a checklist
+trello checklist delete <card> <checklist>       Delete a checklist
+trello checklist rename <card> <checklist> <new> Rename a checklist
+trello checklist item add <card> <cl> <text>     Add an item
+trello checklist item delete <card> <cl> <item>  Delete an item
+trello checklist item rename <card> <cl> <item> <text>  Rename an item
+trello checklist item check <card> <cl> <item>   Mark item complete
+trello checklist item uncheck <card> <cl> <item> Mark item incomplete
+```
+
+### Comment
+
+```
+trello comment ls <card>                  Show card comments
+trello comment add <card> <text>          Add a comment
+trello comment edit <card> <id> <text>    Edit a comment
+trello comment delete <card> <id>         Delete a comment
+```
+
+Names accept case-insensitive prefix matches; IDs accept short prefixes.
 
 ## Updating
 
