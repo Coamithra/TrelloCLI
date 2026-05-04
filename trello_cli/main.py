@@ -39,6 +39,9 @@ Global options:
   --json                        Emit raw JSON instead of formatted text
                                 (read commands only)
 
+Tip: bare nouns default to `ls` — e.g. `trello list` ≡ `trello list ls`,
+     `trello card <list>` ≡ `trello card ls <list>`.
+
 Global:
   configure <key> <token>       Save API credentials
   boards                        List all boards
@@ -279,11 +282,16 @@ def _resolve_label(board_id: str, name_or_id: str) -> str:
 
 
 def _dispatch(group: str, subcmds: dict, args: list[str]) -> None:
-    """Dispatch a noun-group subcommand."""
-    if not args or args[0] not in subcmds:
-        verbs = ", ".join(subcmds)
-        raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
-    subcmds[args[0]](args[1:])
+    """Dispatch a noun-group subcommand. If the first arg isn't a known
+    verb and the group has an `ls` verb, treat all args as `ls <args>`."""
+    if args and args[0] in subcmds:
+        subcmds[args[0]](args[1:])
+        return
+    if "ls" in subcmds:
+        subcmds["ls"](args)
+        return
+    verbs = ", ".join(subcmds)
+    raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
 
 
 # ── Global commands ──────────────────────────────────────────────────
