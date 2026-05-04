@@ -44,6 +44,8 @@ Global:
   boards                        List all boards
   use <board_name_or_id>        Set active board (default)
   board                         Show active board info
+  board add <name> [desc]       Create a new board
+                                (--no-default-lists, --use to activate)
   labels                        Show board labels
   members                       Show board members
   activity [n]                  Show recent activity
@@ -311,7 +313,7 @@ def cmd_use(args: list[str]) -> None:
     print(f"Active board: {b['name']} ({short_id(board_id)})")
 
 
-def cmd_board(_args: list[str]) -> None:
+def _board_show(_args: list[str]) -> None:
     board_id = _require_board()
     b = api.get_board(board_id)
     if _is_json():
@@ -323,6 +325,32 @@ def cmd_board(_args: list[str]) -> None:
     desc = b.get("desc", "").strip()
     if desc:
         print(f"  Desc:  {truncate(desc, 80)}")
+
+
+def _board_add(args: list[str]) -> None:
+    if not args:
+        raise SystemExit(
+            "Usage: trello board add <name> [description] [--no-default-lists] [--use]"
+        )
+    no_default = "--no-default-lists" in args
+    use_after = "--use" in args
+    positional = [a for a in args if not a.startswith("--")]
+    name = positional[0]
+    desc = " ".join(positional[1:]) if len(positional) > 1 else None
+    b = api.create_board(name, desc=desc, default_lists=not no_default)
+    print(f"Created board: {b['name']} ({short_id(b['id'])})  {b.get('shortUrl', '')}")
+    if use_after:
+        config.set_active_board(b["id"], b["name"])
+        print(f"Active board: {b['name']} ({short_id(b['id'])})")
+
+
+def cmd_board(args: list[str]) -> None:
+    if args and args[0] == "add":
+        _board_add(args[1:])
+        return
+    if args and args[0] == "show":
+        args = args[1:]
+    _board_show(args)
 
 
 def cmd_labels(_args: list[str]) -> None:

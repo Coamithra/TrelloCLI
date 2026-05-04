@@ -49,6 +49,16 @@ def get_board(board_id: str) -> dict:
     return _get(f"/boards/{board_id}", fields="id,name,shortUrl,desc")
 
 
+def create_board(name: str, desc: str | None = None,
+                 default_lists: bool = True) -> dict:
+    return _post(
+        "/boards/",
+        name=name,
+        desc=desc,
+        defaultLists="true" if default_lists else "false",
+    )
+
+
 # --- Lists ---
 
 def get_lists(board_id: str) -> list[dict]:
