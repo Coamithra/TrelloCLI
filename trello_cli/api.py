@@ -89,7 +89,7 @@ def get_board_cards(board_id: str, card_filter: str = "visible") -> list[dict]:
 
 def get_cards_in_list(list_id: str, with_latest_comment: bool = False) -> list[dict]:
     kw: dict[str, Any] = {
-        "fields": "id,name,shortUrl,labels,due,idMembers,shortId,dateLastActivity",
+        "fields": "id,name,shortUrl,labels,due,idMembers,shortId,dateLastActivity,pos",
     }
     if with_latest_comment:
         kw["actions"] = "commentCard"

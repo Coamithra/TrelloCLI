@@ -63,6 +63,9 @@ Card:
   card due <card_id> <date>     Set card due date (ISO 2026-05-01,
                                 relative 1d/2w/1m/1y, 'tomorrow',
                                 'today', or 'clear' to remove)
+  card pos <card_id> <pos>      Reorder card. Pos: top, bottom, a number,
+                                'after <other_card_id>', or
+                                'before <other_card_id>'
   card mine                     Show cards assigned to me
 
 List:
@@ -554,6 +557,64 @@ def _card_due(args: list[str]) -> None:
         print(f"Set due date on {short_id(card_id)} to {due[:10]}.")
 
 
+def _card_pos(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit(
+            "Usage: trello card pos <card_id> <position>\n"
+            "  Position: top, bottom, a number,\n"
+            "            'after <other_card_id>', or 'before <other_card_id>'"
+        )
+    card_id = _resolve_card(args[0])
+    keyword = args[1].lower()
+
+    if keyword in ("top", "bottom"):
+        api.update_card(card_id, pos=keyword)
+        print(f"Moved {short_id(card_id)} to {keyword}.")
+        return
+
+    if keyword in ("after", "before"):
+        if len(args) < 3:
+            raise SystemExit(
+                f"Usage: trello card pos <card_id> {keyword} <other_card_id>"
+            )
+        other_id = _resolve_card(args[2])
+        if other_id == card_id:
+            raise SystemExit("Cannot position a card relative to itself.")
+        card = api.get_card(card_id)
+        other = api.get_card(other_id)
+        if card["idList"] != other["idList"]:
+            raise SystemExit(
+                "Cards are not in the same list. "
+                "Use 'card move' first, then 'card pos'."
+            )
+        cards = api.get_cards_in_list(card["idList"])
+        cards.sort(key=lambda c: c.get("pos", 0))
+        others = [c for c in cards if c["id"] != card_id]
+        idx = next((i for i, c in enumerate(others) if c["id"] == other_id), None)
+        if idx is None:
+            raise SystemExit("Reference card not found in list.")
+        ref_pos = others[idx]["pos"]
+        if keyword == "after":
+            new_pos = (ref_pos + others[idx + 1]["pos"]) / 2 \
+                if idx + 1 < len(others) else "bottom"
+        else:
+            new_pos = (others[idx - 1]["pos"] + ref_pos) / 2 \
+                if idx > 0 else "top"
+        api.update_card(card_id, pos=new_pos)
+        print(f"Moved {short_id(card_id)} {keyword} {short_id(other_id)}.")
+        return
+
+    try:
+        numeric = float(args[1])
+    except ValueError:
+        raise SystemExit(
+            f"Invalid position: {args[1]!r}. "
+            "Use top, bottom, a number, 'after <id>', or 'before <id>'."
+        )
+    api.update_card(card_id, pos=numeric)
+    print(f"Set position of {short_id(card_id)} to {numeric}.")
+
+
 def _card_mine(_args: list[str]) -> None:
     cards = api.get_my_cards()
     if _is_json():
@@ -582,6 +643,7 @@ def cmd_card(args: list[str]) -> None:
         "rename": _card_rename,
         "desc": _card_desc,
         "due": _card_due,
+        "pos": _card_pos,
         "mine": _card_mine,
     }, args)
 
