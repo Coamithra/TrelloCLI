@@ -24,7 +24,7 @@ Get your API key and token from https://trello.com/power-ups/admin.
 
 ## Usage
 
-Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `comment`). Bare nouns default to `ls`, so `trello list` ≡ `trello list ls` and `trello card <list>` ≡ `trello card ls <list>`.
+Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `comment`, `attachment`). Bare nouns default to `ls`, so `trello list` ≡ `trello list ls` and `trello card <list>` ≡ `trello card ls <list>`.
 
 ### Global options
 
@@ -107,6 +107,19 @@ trello comment add <card> <text>          Add a comment
 trello comment edit <card> <id> <text>    Edit a comment
 trello comment delete <card> <id>         Delete a comment
 ```
+
+### Attachment
+
+```
+trello attachment ls <card>                      List attachments (images flagged IMG)
+trello attachment add <card> <file_or_url> [name] Attach a local file or a URL
+trello attachment open <card> <attachment>       View an attachment (image opens in
+                                                 your viewer; URL link opens in browser)
+trello attachment download <card> <attachment> [dest]  Save an attachment to disk
+trello attachment rm <card> <attachment>         Remove an attachment
+```
+
+`card show` lists a card's attachments and flags images, so you'll notice when there's something to look at.
 
 Names accept case-insensitive prefix matches; IDs accept short prefixes.
 

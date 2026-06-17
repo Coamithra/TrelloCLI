@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
+import tempfile
+import webbrowser
 from datetime import datetime, timedelta, timezone
 
 # Force UTF-8 output on Windows (avoids cp1252 encoding errors with non-ASCII Trello data)
@@ -16,11 +20,13 @@ if sys.platform == "win32":
 from . import api, config
 from .fmt import (
     due_str,
+    is_image,
     label_str,
     print_card_detail,
     print_json,
     print_table,
     short_id,
+    size_str,
     truncate,
 )
 
@@ -57,7 +63,7 @@ Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
   card ls <list> [--with-comment]      Show cards in a list (Activity column;
                                        --with-comment adds latest comment)
-  card add <list> <name> [desc] Create a card
+  card add <list> <name> [desc] Create a card at the top (--bottom to append)
   card move <card_id> <list>    Move a card to a list
   card archive <card_id>        Archive a card
   card unarchive <card_id>      Restore an archived card
@@ -101,6 +107,14 @@ Comment:
   comment ls <card_id>                      Show card comments
   comment edit <card_id> <comment_id> <text> Edit a comment
   comment delete <card_id> <comment_id>      Delete a comment
+
+Attachment:
+  attachment ls <card_id>                       List attachments (images flagged IMG)
+  attachment add <card_id> <file_or_url> [name] Attach a local file or a URL
+  attachment open <card_id> <attachment>        View an attachment (image opens in
+                                                viewer; URL link opens in browser)
+  attachment download <card_id> <attachment> [dest]  Save an attachment to disk
+  attachment rm <card_id> <attachment>          Remove an attachment
 """
 
 
@@ -281,6 +295,32 @@ def _resolve_label(board_id: str, name_or_id: str) -> str:
     raise SystemExit(f"Label not found: {name_or_id}")
 
 
+def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
+    """Resolve an attachment by ID, ID prefix, or case-insensitive name prefix.
+    Returns the full attachment dict (callers need its url/isUpload/mimeType)."""
+    atts = api.get_attachments(card_id)
+    # Exact ID
+    for a in atts:
+        if a["id"] == name_or_id:
+            return a
+    # ID prefix
+    id_matches = [a for a in atts if a["id"].startswith(name_or_id)]
+    if len(id_matches) == 1:
+        return id_matches[0]
+    # Name prefix (case-insensitive)
+    lower = name_or_id.lower()
+    name_matches = [a for a in atts if (a.get("name") or "").lower().startswith(lower)]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        names = ", ".join(a.get("name") or short_id(a["id"]) for a in name_matches)
+        raise SystemExit(f"Ambiguous attachment '{name_or_id}'. Matches: {names}")
+    if len(id_matches) > 1:
+        ids = ", ".join(short_id(a["id"]) for a in id_matches)
+        raise SystemExit(f"Ambiguous attachment ID prefix '{name_or_id}'. Matches: {ids}")
+    raise SystemExit(f"Attachment not found: {name_or_id}")
+
+
 def _dispatch(group: str, subcmds: dict, args: list[str]) -> None:
     """Dispatch a noun-group subcommand. If the first arg isn't a known
     verb and the group has an `ls` verb, treat all args as `ls <args>`."""
@@ -459,13 +499,17 @@ def _card_ls(args: list[str]) -> None:
 
 
 def _card_add(args: list[str]) -> None:
-    if len(args) < 2:
-        raise SystemExit("Usage: trello card add <list_name_or_id> <card_name> [description]")
+    pos = "bottom" if "--bottom" in args else "top"
+    positional = [a for a in args if not a.startswith("--")]
+    if len(positional) < 2:
+        raise SystemExit(
+            "Usage: trello card add <list_name_or_id> <card_name> [description] [--bottom]"
+        )
     board_id = _require_board()
-    list_id = _resolve_list(board_id, args[0])
-    name = args[1]
-    desc = " ".join(args[2:]) if len(args) > 2 else None
-    card = api.create_card(list_id, name, desc=desc)
+    list_id = _resolve_list(board_id, positional[0])
+    name = positional[1]
+    desc = " ".join(positional[2:]) if len(positional) > 2 else None
+    card = api.create_card(list_id, name, desc=desc, pos=pos)
     print(f"Created: {card['name']} ({short_id(card['id'])})")
 
 
@@ -980,6 +1024,122 @@ def cmd_comment(args: list[str]) -> None:
     }, args)
 
 
+# ── Attachment subcommands ──────────────────────────────────────────
+
+
+def _open_local(path: str) -> None:
+    """Open a local file with the OS default application."""
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", path], check=False)
+    else:
+        subprocess.run(["xdg-open", path], check=False)
+
+
+def _attachment_ls(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello attachment ls <card_id>")
+    card_id = _resolve_card(args[0])
+    atts = api.get_attachments(card_id)
+    if _is_json():
+        print_json(atts)
+        return
+    if not atts:
+        print("  No attachments.")
+        return
+    rows = []
+    for a in atts:
+        rows.append([
+            "IMG" if is_image(a) else "",
+            short_id(a["id"]),
+            truncate(a.get("name") or a.get("url") or "(unnamed)", 50),
+            size_str(a.get("bytes")),
+        ])
+    print_table(["Kind", "ID", "Name", "Size"], rows)
+
+
+def _attachment_add(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit(
+            "Usage: trello attachment add <card_id> <file_path_or_url> [name]"
+        )
+    card_id = _resolve_card(args[0])
+    source = args[1]
+    name = " ".join(args[2:]) if len(args) > 2 else None
+    if source.startswith(("http://", "https://")):
+        a = api.add_attachment_url(card_id, source, name=name)
+    else:
+        if not os.path.isfile(source):
+            raise SystemExit(f"File not found: {source}")
+        a = api.add_attachment_file(card_id, source, name=name)
+    print(f"Attached {a.get('name') or source} ({short_id(a['id'])}) to {short_id(card_id)}.")
+
+
+def _attachment_dest(att: dict, dest: str | None) -> str:
+    """Resolve the destination path for download/open of an attachment."""
+    filename = att.get("name") or os.path.basename(att.get("url", "")) or att["id"]
+    if dest is None:
+        tmp = os.path.join(tempfile.gettempdir(), "trello-cli")
+        os.makedirs(tmp, exist_ok=True)
+        return os.path.join(tmp, f"{short_id(att['id'])}-{filename}")
+    if os.path.isdir(dest):
+        return os.path.join(dest, filename)
+    return dest
+
+
+def _attachment_download(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello attachment download <card_id> <attachment> [dest]")
+    card_id = _resolve_card(args[0])
+    att = _resolve_attachment(card_id, args[1])
+    url = att.get("url")
+    if not url:
+        raise SystemExit("Attachment has no downloadable URL.")
+    dest = _attachment_dest(att, args[2] if len(args) > 2 else None)
+    api.download_attachment(url, dest, authed=att.get("isUpload", False))
+    print(f"Downloaded to {dest}")
+
+
+def _attachment_open(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello attachment open <card_id> <attachment>")
+    card_id = _resolve_card(args[0])
+    att = _resolve_attachment(card_id, args[1])
+    url = att.get("url")
+    if not url:
+        raise SystemExit("Attachment has no URL to open.")
+    # URL attachments (external links) open straight in the browser; uploaded
+    # files need the OAuth header to fetch, so download to a temp file first.
+    if not att.get("isUpload", False):
+        webbrowser.open(url)
+        print(f"Opened {att.get('name') or url} in browser.")
+        return
+    dest = _attachment_dest(att, None)
+    api.download_attachment(url, dest, authed=True)
+    _open_local(dest)
+    print(f"Opened {att.get('name') or short_id(att['id'])} ({dest})")
+
+
+def _attachment_rm(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit("Usage: trello attachment rm <card_id> <attachment>")
+    card_id = _resolve_card(args[0])
+    att = _resolve_attachment(card_id, args[1])
+    api.delete_attachment(card_id, att["id"])
+    print(f"Removed attachment {short_id(att['id'])} from {short_id(card_id)}.")
+
+
+def cmd_attachment(args: list[str]) -> None:
+    _dispatch("attachment", {
+        "ls": _attachment_ls,
+        "add": _attachment_add,
+        "open": _attachment_open,
+        "download": _attachment_download,
+        "rm": _attachment_rm,
+    }, args)
+
+
 # ── Command dispatch ────────────────────────────────────────────────
 
 COMMANDS = {
@@ -995,6 +1155,7 @@ COMMANDS = {
     "label": cmd_label,
     "checklist": cmd_checklist,
     "comment": cmd_comment,
+    "attachment": cmd_attachment,
 }
 
 

@@ -38,6 +38,33 @@ def truncate(text: str, length: int = 60) -> str:
     return text[: length - 1] + "\u2026"
 
 
+_IMAGE_EXTS = (
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".bmp", ".svg", ".tif", ".tiff", ".heic",
+)
+
+
+def is_image(att: dict) -> bool:
+    """True if an attachment looks like an image (by mime type, else extension)."""
+    mime = (att.get("mimeType") or "").lower()
+    if mime:
+        return mime.startswith("image/")
+    name = (att.get("name") or att.get("url") or "").lower()
+    return name.endswith(_IMAGE_EXTS)
+
+
+def size_str(num_bytes: int | None) -> str:
+    """Human-readable byte size, e.g. '24.0KB'. Empty string if unknown."""
+    if not num_bytes:
+        return ""
+    n = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{int(n)}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return ""
+
+
 def print_table(headers: list[str], rows: list[list[str]]) -> None:
     """Print a compact aligned table."""
     if not rows:
@@ -88,6 +115,25 @@ def print_card_detail(card: dict, comments: list[dict] | None = None) -> None:
         for it in items:
             mark = "x" if it.get("state") == "complete" else " "
             print(f"    [{mark}] {it['name']}")
+
+    attachments = card.get("attachments", [])
+    if attachments:
+        images = [a for a in attachments if is_image(a)]
+        summary = str(len(attachments))
+        if images:
+            noun = "image" if len(images) == 1 else "images"
+            summary += f", {len(images)} {noun}"
+        print(f"  Attachments ({summary}):")
+        for a in attachments:
+            tag = "IMG" if is_image(a) else "   "
+            name = a.get("name") or a.get("url") or "(unnamed)"
+            size = size_str(a.get("bytes"))
+            line = f"    {tag} {short_id(a['id'])}  {name}"
+            if size:
+                line += f"  ({size})"
+            print(line)
+        if images:
+            print("    -> view an image: trello attachment open <card_id> <attachment>")
 
     if comments:
         print(f"  Comments ({len(comments)}):")

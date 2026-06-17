@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -102,6 +103,8 @@ def get_card(card_id: str) -> dict:
         f"/cards/{card_id}",
         fields="id,name,desc,shortUrl,labels,due,dueComplete,idList,idMembers,shortId,dateLastActivity",
         checklists="all",
+        attachments="true",
+        attachment_fields="id,name,url,mimeType,bytes,isUpload",
     )
 
 
@@ -113,8 +116,9 @@ def get_my_cards() -> list[dict]:
 
 
 def create_card(list_id: str, name: str, desc: str | None = None,
-                due: str | None = None, labels: list[str] | None = None) -> dict:
-    kw = dict(idList=list_id, name=name)
+                due: str | None = None, labels: list[str] | None = None,
+                pos: str = "top") -> dict:
+    kw = dict(idList=list_id, name=name, pos=pos)
     if desc:
         kw["desc"] = desc
     if due:
@@ -235,3 +239,57 @@ def delete_checkitem(checklist_id: str, item_id: str) -> None:
 
 def update_checkitem(card_id: str, item_id: str, **fields: Any) -> dict:
     return _put(f"/cards/{card_id}/checkItem/{item_id}", **fields)
+
+
+# --- Attachments ---
+
+def get_attachments(card_id: str) -> list[dict]:
+    return _get(
+        f"/cards/{card_id}/attachments",
+        fields="id,name,url,mimeType,bytes,date,isUpload",
+    )
+
+
+def add_attachment_url(card_id: str, url: str, name: str | None = None) -> dict:
+    return _post(f"/cards/{card_id}/attachments", url=url, name=name)
+
+
+def add_attachment_file(card_id: str, file_path: str, name: str | None = None) -> dict:
+    key, token = get_auth()
+    params = {"key": key, "token": token}
+    if name:
+        params["name"] = name
+    with open(file_path, "rb") as fh:
+        files = {"file": (os.path.basename(file_path), fh)}
+        r = httpx.post(
+            f"{BASE}/cards/{card_id}/attachments",
+            params=params, files=files, timeout=60,
+        )
+    r.raise_for_status()
+    return r.json()
+
+
+def delete_attachment(card_id: str, attachment_id: str) -> None:
+    r = httpx.delete(
+        f"{BASE}/cards/{card_id}/attachments/{attachment_id}",
+        params=_params(), timeout=15,
+    )
+    r.raise_for_status()
+
+
+def download_attachment(url: str, dest: str, authed: bool = True) -> None:
+    """Stream an attachment to `dest`. Trello-hosted uploads require the OAuth
+    header (`authed=True`); external URL attachments are fetched without it."""
+    headers = {}
+    if authed:
+        key, token = get_auth()
+        headers["Authorization"] = (
+            f'OAuth oauth_consumer_key="{key}", oauth_token="{token}"'
+        )
+    with httpx.stream(
+        "GET", url, headers=headers, timeout=60, follow_redirects=True,
+    ) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as fh:
+            for chunk in r.iter_bytes():
+                fh.write(chunk)

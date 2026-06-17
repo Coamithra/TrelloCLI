@@ -6,8 +6,8 @@ Compact Trello CLI tool — wraps the Trello REST API with concise output format
 
 - `trello_cli/config.py` — credentials, active board, and per-invocation board override stored in `~/.trello-cli.json`
 - `trello_cli/api.py` — thin httpx client over Trello REST API, requests only the fields each command needs
-- `trello_cli/fmt.py` — compact table/detail formatting and small helpers (`short_id`, `truncate`, `due_str`, `label_str`, `print_json`)
-- `trello_cli/main.py` — CLI entry point, noun-group dispatch (`card`, `list`, `label`, `checklist`, `comment`), name/ID prefix resolution
+- `trello_cli/fmt.py` — compact table/detail formatting and small helpers (`short_id`, `truncate`, `due_str`, `label_str`, `is_image`, `size_str`, `print_json`)
+- `trello_cli/main.py` — CLI entry point, noun-group dispatch (`card`, `list`, `label`, `checklist`, `comment`, `attachment`), name/ID prefix resolution
 
 ## Conventions
 
