@@ -111,8 +111,11 @@ Comment:
 Attachment:
   attachment ls <card_id>                       List attachments (images flagged IMG)
   attachment add <card_id> <file_or_url> [name] Attach a local file or a URL
-  attachment open <card_id> <attachment>        View an attachment (image opens in
-                                                viewer; URL link opens in browser)
+  attachment view <card_id> [attachment]        Download image(s) to local paths and
+                                                print them (defaults to all images;
+                                                ready to open/read)
+  attachment open <card_id> <attachment>        Open an attachment (image in your
+                                                viewer; URL link in browser)
   attachment download <card_id> <attachment> [dest]  Save an attachment to disk
   attachment rm <card_id> <attachment>          Remove an attachment
 """
@@ -1101,6 +1104,29 @@ def _attachment_download(args: list[str]) -> None:
     print(f"Downloaded to {dest}")
 
 
+def _attachment_view(args: list[str]) -> None:
+    """Download image(s) to a local cache and print the path(s), one per line.
+    Defaults to every image on the card; pass an attachment to narrow it. The
+    printed paths are what an agent (or `card show` reader) opens/reads."""
+    if not args:
+        raise SystemExit("Usage: trello attachment view <card_id> [attachment]")
+    card_id = _resolve_card(args[0])
+    if len(args) > 1:
+        atts = [_resolve_attachment(card_id, args[1])]
+    else:
+        atts = [a for a in api.get_attachments(card_id) if is_image(a)]
+        if not atts:
+            print("  No image attachments.")
+            return
+    for a in atts:
+        url = a.get("url")
+        if not url:
+            continue
+        dest = _attachment_dest(a, None)
+        api.download_attachment(url, dest, authed=a.get("isUpload", False))
+        print(dest)
+
+
 def _attachment_open(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello attachment open <card_id> <attachment>")
@@ -1134,6 +1160,7 @@ def cmd_attachment(args: list[str]) -> None:
     _dispatch("attachment", {
         "ls": _attachment_ls,
         "add": _attachment_add,
+        "view": _attachment_view,
         "open": _attachment_open,
         "download": _attachment_download,
         "rm": _attachment_rm,

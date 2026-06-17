@@ -113,13 +113,17 @@ trello comment delete <card> <id>         Delete a comment
 ```
 trello attachment ls <card>                      List attachments (images flagged IMG)
 trello attachment add <card> <file_or_url> [name] Attach a local file or a URL
-trello attachment open <card> <attachment>       View an attachment (image opens in
-                                                 your viewer; URL link opens in browser)
+trello attachment view <card> [attachment]       Download image(s) to local paths and
+                                                 print them (defaults to all images)
+trello attachment open <card> <attachment>       Open an attachment (image in your
+                                                 viewer; URL link in browser)
 trello attachment download <card> <attachment> [dest]  Save an attachment to disk
 trello attachment rm <card> <attachment>         Remove an attachment
 ```
 
 `card show` lists a card's attachments and flags images, so you'll notice when there's something to look at.
+
+`attachment view` is the one to reach for when something (a person, or an agent) needs to actually *see* an image: it downloads each image to a local cache and prints the file paths, one per line, ready to open or read. Uploaded images are fetched through the authenticated Trello endpoint; URL attachments are fetched directly.
 
 Names accept case-insensitive prefix matches; IDs accept short prefixes.
 

@@ -133,7 +133,8 @@ def print_card_detail(card: dict, comments: list[dict] | None = None) -> None:
                 line += f"  ({size})"
             print(line)
         if images:
-            print("    -> view an image: trello attachment open <card_id> <attachment>")
+            print("    -> view images: trello attachment view <card_id>"
+                  " (downloads to local paths you can open/read)")
 
     if comments:
         print(f"  Comments ({len(comments)}):")
