@@ -19,7 +19,6 @@ from __future__ import annotations
 import getpass
 import hashlib
 import mimetypes
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -98,10 +97,13 @@ class LocalBackend(Backend):
         ]
 
     def _log(self, board_id: str, action_type: str, data: dict) -> None:
+        user = self._local_user()
         self.store.append_activity(board_id, {
             "id": new_id(),
             "type": action_type,
             "date": now_iso(),
+            "idMemberCreator": user["id"],
+            "memberCreator": user,  # stamped at write time so synced logs attribute correctly
             "data": data,
         })
 
@@ -552,6 +554,13 @@ class LocalBackend(Backend):
 
     # ── Attachments (inline metadata; uploaded blobs under attachments/) ──
 
+    def _blob_path(self, url: str) -> Path:
+        """Absolute path of an uploaded blob. New stores keep `url` relative to
+        the store root (so the folder is portable across machines / Dropbox);
+        older stores may have an absolute path — honour it as-is."""
+        p = Path(url)
+        return p if p.is_absolute() else self.store.root / url
+
     def get_attachments(self, card_id: str) -> list[dict]:
         _, card = self._load_card(card_id)
         return card.get("attachments", [])
@@ -591,7 +600,7 @@ class LocalBackend(Backend):
         return self._add_attachment(card_id, {
             "id": att_id,
             "name": name or src.name,
-            "url": str(dest),
+            "url": dest.relative_to(self.store.root).as_posix(),  # portable, root-relative
             "mimeType": mimetypes.guess_type(src.name)[0] or "",
             "bytes": dest.stat().st_size,
             "isUpload": True,
@@ -612,21 +621,18 @@ class LocalBackend(Backend):
         card["attachments"] = keep
         self._save_card(board_id, card)
         if removed.get("isUpload"):  # URL attachments have nothing local to remove
-            blob = Path(removed.get("url", ""))
+            blob = self._blob_path(removed.get("url", ""))
             try:
                 if blob.is_file():
                     blob.unlink()
+                blob.parent.rmdir()  # drop the card's attachment dir if now empty
             except OSError:
                 pass
 
     def download_attachment(self, url: str, dest: str, authed: bool = True) -> None:
-        """Copy an uploaded blob (local path) to `dest`, or fetch an external
-        URL attachment over http. `authed` is unused locally — the file store has
-        no Trello OAuth."""
-        src = Path(url)
-        if src.is_file():
-            shutil.copyfile(src, dest)
-            return
+        """Fetch an external URL attachment over http, or copy an uploaded blob
+        (its `url` is a root-relative path) to `dest`. `authed` is unused locally
+        — the file store has no Trello OAuth."""
         if url.lower().startswith(("http://", "https://")):
             import httpx
 
@@ -635,5 +641,9 @@ class LocalBackend(Backend):
                 with open(dest, "wb") as fh:
                     for chunk in r.iter_bytes():
                         fh.write(chunk)
+            return
+        src = self._blob_path(url)
+        if src.is_file():
+            shutil.copyfile(src, dest)
             return
         raise SystemExit(f"Cannot download attachment (no local blob or URL): {url}")
