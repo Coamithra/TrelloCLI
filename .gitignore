@@ -4,3 +4,6 @@ dist/
 build/
 *.pyc
 .env
+.venv/
+.trees/
+plans/tracker_*.md
