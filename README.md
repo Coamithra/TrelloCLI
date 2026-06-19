@@ -147,11 +147,18 @@ trello --backend local --board <id> card add "To Do" "Buy milk"
 trello --backend local --board <id> card ls "To Do"
 ```
 
-Layout: `<root>/<boardId>/{board.json, lists.json, cards/<cardId>.json, activity.log}`, with atomic
-writes (so a sync never sees a half-written file), 24-hex ids, and float positions — identical in
-shape to Trello, so every command and `--json` output works the same. Phase 1 covers boards, lists,
-and cards (CRUD + move/pos/archive/rename/desc/due); labels, checklists, comments, attachments, and
-members are coming next and report a clear message until then.
+Layout: `<root>/<boardId>/{board.json, lists.json, labels.json, cards/<cardId>.json,
+attachments/<cardId>/…, activity.log}`, with atomic writes (so a sync never sees a half-written
+file), 24-hex ids, and float positions — identical in shape to Trello, so every command and `--json`
+output works the same. **Every CLI command** now works on the local backend: boards, lists, cards,
+labels, checklists, comments, attachments, members, and `card mine`, plus `activity` / `updates`
+derived from the append-only `activity.log`.
+
+Local specifics: labels, checklists, comments, and attachments live inline in the card JSON (a card
+references labels by id; the full label is resolved from `labels.json`, so `label edit`/`delete`
+reflect everywhere). Uploaded attachment blobs are copied under `attachments/<cardId>/`; URL
+attachments just store the URL. Members are a single local user (your OS username), so `card mine`
+returns every open card across your local boards.
 
 ## Updating
 
