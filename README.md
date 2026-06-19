@@ -69,9 +69,12 @@ trello card mine                       Show cards assigned to me
 
 ```
 trello list ls                     Show lists on active board
-trello list add <name>             Create a new list
+trello list add <name> [--top|--bottom|--pos <n>]  Create a new list
+                                   (defaults to top, like `card add`)
 trello list archive <list>         Archive a list
 trello list rename <list> <name>   Rename a list
+trello list pos <id> <pos>         Reorder list (top, bottom, number,
+                                   'after <id>', 'before <id>')
 ```
 
 ### Label

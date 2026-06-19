@@ -63,19 +63,23 @@ def create_board(name: str, desc: str | None = None,
 # --- Lists ---
 
 def get_lists(board_id: str) -> list[dict]:
-    return _get(f"/boards/{board_id}/lists", fields="id,name", filter="open")
+    return _get(f"/boards/{board_id}/lists", fields="id,name,pos", filter="open")
 
 
-def create_list(board_id: str, name: str) -> dict:
-    return _post("/lists", name=name, idBoard=board_id)
+def create_list(board_id: str, name: str, pos: str | None = None) -> dict:
+    return _post("/lists", name=name, idBoard=board_id, pos=pos)
 
 
 def archive_list(list_id: str) -> dict:
     return _put(f"/lists/{list_id}/closed", value="true")
 
 
+def update_list(list_id: str, **fields: Any) -> dict:
+    return _put(f"/lists/{list_id}", **fields)
+
+
 def rename_list(list_id: str, name: str) -> dict:
-    return _put(f"/lists/{list_id}", name=name)
+    return update_list(list_id, name=name)
 
 
 # --- Cards ---
@@ -209,6 +213,31 @@ def get_members(board_id: str) -> list[dict]:
 
 def get_activity(board_id: str, limit: int = 10) -> list[dict]:
     return _get(f"/boards/{board_id}/actions", limit=str(limit))
+
+
+def get_actions_since(board_id: str, since: str,
+                      action_types: str | None = None,
+                      page: int = 1000) -> list[dict]:
+    """All board actions since `since` (ISO date or Trello id), newest first.
+
+    Trello caps a single response at 1000 actions, so we page backwards with
+    `before` (the oldest id seen) until a short page signals we've drained it.
+    `action_types` is an optional comma-separated Trello action filter
+    (e.g. "commentCard,updateCard")."""
+    out: list[dict] = []
+    before: str | None = None
+    while True:
+        kw: dict[str, Any] = {"limit": str(page), "since": since}
+        if action_types:
+            kw["filter"] = action_types
+        if before:
+            kw["before"] = before
+        batch = _get(f"/boards/{board_id}/actions", **kw)
+        out.extend(batch)
+        if len(batch) < page:
+            break
+        before = batch[-1]["id"]
+    return out
 
 
 # --- Checklists ---

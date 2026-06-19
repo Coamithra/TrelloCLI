@@ -58,6 +58,10 @@ Global:
   labels                        Show board labels
   members                       Show board members
   activity [n]                  Show recent activity
+  updates <since> [type ...]    Show all updates/comments since a date
+                                (ISO 2026-06-01, relative 6h/3d/2w/1m/1y,
+                                'today', 'yesterday'; optional action-type
+                                filter, e.g. commentCard updateCard)
 
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
@@ -79,9 +83,13 @@ Card:
 
 List:
   list ls                       Show lists on active board
-  list add <name>               Create a new list
+  list add <name> [--top|--bottom|--pos <n>]  Create a new list
+                                (defaults to top, like `card add`)
   list archive <list>           Archive a list
   list rename <list> <new_name> Rename a list
+  list pos <list_id> <pos>      Reorder list. Pos: top, bottom, a number,
+                                'after <other_list_id>', or
+                                'before <other_list_id>'
 
 Label:
   label ls                              Show board labels
@@ -156,20 +164,27 @@ def _require_board() -> str:
 
 
 def _resolve_list(board_id: str, name_or_id: str) -> str:
-    """Resolve a list name (case-insensitive prefix match) or ID."""
+    """Resolve a list name (case-insensitive prefix) or ID prefix."""
     lists = api.get_lists(board_id)
-    # Try exact ID match first
+    # Exact ID
     for lst in lists:
         if lst["id"] == name_or_id:
             return lst["id"]
-    # Try case-insensitive prefix match on name
+    # ID prefix
+    id_matches = [lst for lst in lists if lst["id"].startswith(name_or_id)]
+    if len(id_matches) == 1:
+        return id_matches[0]["id"]
+    # Name prefix (case-insensitive)
     lower = name_or_id.lower()
-    matches = [lst for lst in lists if lst["name"].lower().startswith(lower)]
-    if len(matches) == 1:
-        return matches[0]["id"]
-    if len(matches) > 1:
-        names = ", ".join(m["name"] for m in matches)
+    name_matches = [lst for lst in lists if lst["name"].lower().startswith(lower)]
+    if len(name_matches) == 1:
+        return name_matches[0]["id"]
+    if len(name_matches) > 1:
+        names = ", ".join(m["name"] for m in name_matches)
         raise SystemExit(f"Ambiguous list name '{name_or_id}'. Matches: {names}")
+    if len(id_matches) > 1:
+        ids = ", ".join(short_id(m["id"]) for m in id_matches)
+        raise SystemExit(f"Ambiguous list ID prefix '{name_or_id}'. Matches: {ids}")
     raise SystemExit(f"List not found: {name_or_id}")
 
 
@@ -337,6 +352,37 @@ def _dispatch(group: str, subcmds: dict, args: list[str]) -> None:
     raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
 
 
+def _parse_flags(
+    args: list[str],
+    bool_flags: tuple[str, ...] = (),
+    value_flags: tuple[str, ...] = (),
+) -> tuple[list[str], dict[str, str | bool]]:
+    """Split `args` into (positionals, flags), rejecting unknown flags.
+
+    `bool_flags` are valueless (presence → True). `value_flags` consume the
+    following token as their value. Any other `--`-prefixed token raises
+    SystemExit, so a mistyped flag is reported instead of being silently
+    swallowed into a positional argument (e.g. a list/card name)."""
+    positional: list[str] = []
+    flags: dict[str, str | bool] = {}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in bool_flags:
+            flags[a] = True
+        elif a in value_flags:
+            if i + 1 >= len(args):
+                raise SystemExit(f"{a} requires a value.")
+            flags[a] = args[i + 1]
+            i += 1
+        elif a.startswith("--"):
+            raise SystemExit(f"Unknown flag: {a}")
+        else:
+            positional.append(a)
+        i += 1
+    return positional, flags
+
+
 # ── Global commands ──────────────────────────────────────────────────
 
 
@@ -382,18 +428,16 @@ def _board_show(_args: list[str]) -> None:
 
 
 def _board_add(args: list[str]) -> None:
-    if not args:
+    positional, flags = _parse_flags(args, bool_flags=("--no-default-lists", "--use"))
+    if not positional:
         raise SystemExit(
             "Usage: trello board add <name> [description] [--no-default-lists] [--use]"
         )
-    no_default = "--no-default-lists" in args
-    use_after = "--use" in args
-    positional = [a for a in args if not a.startswith("--")]
     name = positional[0]
     desc = " ".join(positional[1:]) if len(positional) > 1 else None
-    b = api.create_board(name, desc=desc, default_lists=not no_default)
+    b = api.create_board(name, desc=desc, default_lists=not flags.get("--no-default-lists"))
     print(f"Created board: {b['name']} ({short_id(b['id'])})  {b.get('shortUrl', '')}")
-    if use_after:
+    if flags.get("--use"):
         config.set_active_board(b["id"], b["name"])
         print(f"Active board: {b['name']} ({short_id(b['id'])})")
 
@@ -453,12 +497,11 @@ def cmd_activity(args: list[str]) -> None:
 
 
 def _card_show(args: list[str]) -> None:
-    if not args:
+    positional, flags = _parse_flags(args, bool_flags=("--no-comments",))
+    if not positional:
         raise SystemExit("Usage: trello card show <card_id> [--no-comments]")
-    no_comments = "--no-comments" in args
-    card_args = [a for a in args if not a.startswith("--")]
-    card = api.get_card(_resolve_card(card_args[0]))
-    comments = [] if no_comments else api.get_comments(card["id"], limit=20)
+    card = api.get_card(_resolve_card(positional[0]))
+    comments = [] if flags.get("--no-comments") else api.get_comments(card["id"], limit=20)
     if _is_json():
         print_json({**card, "comments": comments})
         return
@@ -466,10 +509,10 @@ def _card_show(args: list[str]) -> None:
 
 
 def _card_ls(args: list[str]) -> None:
-    with_comment = "--with-comment" in args
-    positional = [a for a in args if not a.startswith("--")]
+    positional, flags = _parse_flags(args, bool_flags=("--with-comment",))
     if not positional:
         raise SystemExit("Usage: trello card ls <list_name_or_id> [--with-comment]")
+    with_comment = bool(flags.get("--with-comment"))
     board_id = _require_board()
     list_id = _resolve_list(board_id, " ".join(positional))
     cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
@@ -502,12 +545,12 @@ def _card_ls(args: list[str]) -> None:
 
 
 def _card_add(args: list[str]) -> None:
-    pos = "bottom" if "--bottom" in args else "top"
-    positional = [a for a in args if not a.startswith("--")]
+    positional, flags = _parse_flags(args, bool_flags=("--bottom",))
     if len(positional) < 2:
         raise SystemExit(
             "Usage: trello card add <list_name_or_id> <card_name> [description] [--bottom]"
         )
+    pos = "bottom" if flags.get("--bottom") else "top"
     board_id = _require_board()
     list_id = _resolve_list(board_id, positional[0])
     name = positional[1]
@@ -594,6 +637,87 @@ def _parse_due(raw: str) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(hour=9, tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+def _parse_since(raw: str) -> str:
+    """Parse a 'since' argument into an ISO string (a point in the past).
+
+    Accepts ISO dates (2026-06-01), relative look-backs (6h, 3d, 2w, 1m, 1y),
+    and the words 'today' / 'yesterday'. Unlike `_parse_due`, relative values
+    count *backwards* from now."""
+    s = raw.strip().lower()
+    now = datetime.now(timezone.utc)
+    if s == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    if s == "yesterday":
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (midnight - timedelta(days=1)).isoformat()
+    m = re.fullmatch(r"(\d+)\s*(h|hour|hours|d|day|days|w|week|weeks|m|mo|mon|month|months|y|year|years)", s)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("h"):
+            delta = timedelta(hours=n)
+        elif unit.startswith("d"):
+            delta = timedelta(days=n)
+        elif unit.startswith("w"):
+            delta = timedelta(weeks=n)
+        elif unit.startswith("y"):
+            delta = timedelta(days=365 * n)
+        else:
+            delta = timedelta(days=30 * n)
+        return (now - delta).isoformat()
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        raise SystemExit(
+            f"Could not parse date: {raw!r}. "
+            "Use ISO (2026-06-01), relative (6h/3d/2w/1m/1y), 'today', or 'yesterday'."
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _print_action(a: dict) -> None:
+    """One compact line per board action, with comment text inlined."""
+    ts = (a.get("date") or "")[:16].replace("T", " ")
+    who = a.get("memberCreator", {}).get("username", "?")
+    atype = a.get("type", "?")
+    data = a.get("data", {})
+    card_name = (data.get("card") or {}).get("name", "")
+    if atype == "commentCard":
+        first = ((data.get("text") or "").splitlines() or [""])[0]
+        detail = f"{truncate(card_name, 28)}: {truncate(first, 60)}"
+    elif card_name:
+        detail = truncate(card_name, 50)
+    else:
+        detail = (data.get("list") or {}).get("name", "")
+    print(f"  {ts}  @{who:<12}  {atype:<18}  {detail}")
+
+
+def cmd_updates(args: list[str]) -> None:
+    positional, _ = _parse_flags(args)
+    if not positional:
+        raise SystemExit(
+            "Usage: trello updates <since> [action_type ...]\n"
+            "  Since: ISO date (2026-06-01), relative (6h, 3d, 2w, 1m, 1y),\n"
+            "         'today', or 'yesterday'.\n"
+            "  Optionally filter by Trello action types, e.g. commentCard updateCard."
+        )
+    board_id = _require_board()
+    since = _parse_since(positional[0])
+    action_types = ",".join(positional[1:]) if len(positional) > 1 else None
+    actions = api.get_actions_since(board_id, since, action_types=action_types)
+    if _is_json():
+        print_json(actions)
+        return
+    if not actions:
+        print(f"  No activity since {since[:16].replace('T', ' ')}.")
+        return
+    print(f"  {len(actions)} update(s) since {since[:16].replace('T', ' ')}:")
+    for a in actions:
+        _print_action(a)
 
 
 def _card_due(args: list[str]) -> None:
@@ -717,12 +841,78 @@ def _list_ls(_args: list[str]) -> None:
 
 
 def _list_add(args: list[str]) -> None:
-    if not args:
-        raise SystemExit("Usage: trello list add <name>")
+    usage = (
+        "Usage: trello list add <name> [--top | --bottom | --pos <n>]\n"
+        "  Position defaults to top (leftmost), matching `card add`."
+    )
+    positional, flags = _parse_flags(
+        args, bool_flags=("--top", "--bottom"), value_flags=("--pos",)
+    )
+    if not positional:
+        raise SystemExit(usage)
+    chosen = [p for p in ("top", "bottom") if flags.get(f"--{p}")]
+    pos_val = flags.get("--pos")
+    if isinstance(pos_val, str):
+        chosen.append(pos_val)
+    if len(chosen) > 1:
+        raise SystemExit("Use only one of --top, --bottom, or --pos.")
+    pos = chosen[0] if chosen else None
     board_id = _require_board()
-    name = " ".join(args)
-    lst = api.create_list(board_id, name)
+    name = " ".join(positional)
+    lst = api.create_list(board_id, name, pos=pos)
     print(f"Created list: {lst['name']} ({lst['id'][:8]})")
+
+
+def _list_pos(args: list[str]) -> None:
+    if len(args) < 2:
+        raise SystemExit(
+            "Usage: trello list pos <list_id> <position>\n"
+            "  Position: top, bottom, a number,\n"
+            "            'after <other_list_id>', or 'before <other_list_id>'"
+        )
+    board_id = _require_board()
+    list_id = _resolve_list(board_id, args[0])
+    keyword = args[1].lower()
+
+    if keyword in ("top", "bottom"):
+        api.update_list(list_id, pos=keyword)
+        print(f"Moved {short_id(list_id)} to {keyword}.")
+        return
+
+    if keyword in ("after", "before"):
+        if len(args) < 3:
+            raise SystemExit(
+                f"Usage: trello list pos <list_id> {keyword} <other_list_id>"
+            )
+        other_id = _resolve_list(board_id, args[2])
+        if other_id == list_id:
+            raise SystemExit("Cannot position a list relative to itself.")
+        lists = api.get_lists(board_id)
+        lists.sort(key=lambda lst: lst.get("pos", 0))
+        others = [lst for lst in lists if lst["id"] != list_id]
+        idx = next((i for i, lst in enumerate(others) if lst["id"] == other_id), None)
+        if idx is None:
+            raise SystemExit("Reference list not found on board.")
+        ref_pos = others[idx]["pos"]
+        if keyword == "after":
+            new_pos = (ref_pos + others[idx + 1]["pos"]) / 2 \
+                if idx + 1 < len(others) else "bottom"
+        else:
+            new_pos = (others[idx - 1]["pos"] + ref_pos) / 2 \
+                if idx > 0 else "top"
+        api.update_list(list_id, pos=new_pos)
+        print(f"Moved {short_id(list_id)} {keyword} {short_id(other_id)}.")
+        return
+
+    try:
+        numeric = float(args[1])
+    except ValueError:
+        raise SystemExit(
+            f"Invalid position: {args[1]!r}. "
+            "Use top, bottom, a number, 'after <id>', or 'before <id>'."
+        )
+    api.update_list(list_id, pos=numeric)
+    print(f"Set position of {short_id(list_id)} to {numeric}.")
 
 
 def _list_archive(args: list[str]) -> None:
@@ -750,6 +940,7 @@ def cmd_list(args: list[str]) -> None:
         "add": _list_add,
         "archive": _list_archive,
         "rename": _list_rename,
+        "pos": _list_pos,
     }, args)
 
 
@@ -1177,6 +1368,7 @@ COMMANDS = {
     "labels": cmd_labels,
     "members": cmd_members,
     "activity": cmd_activity,
+    "updates": cmd_updates,
     "card": cmd_card,
     "list": cmd_list,
     "label": cmd_label,
