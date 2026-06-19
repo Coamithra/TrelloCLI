@@ -195,7 +195,6 @@ class LocalBackend(Backend):
             "closed": False,
             "shortUrl": "",
             "shortLink": "",
-            "idShort": len(self.store.cards(board_id)) + 1,
             "dateLastActivity": now_iso(),
         }
 

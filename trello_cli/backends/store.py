@@ -50,7 +50,13 @@ def resolve_pos(existing: list[float], pos: Any) -> float:
         return float(pos)
     s = str(pos).strip().lower()
     if s == "top":
-        return min(existing) / 2 if existing else POS_STEP
+        if not existing:
+            return POS_STEP
+        # Always land strictly below the current minimum. min/2 does that while
+        # staying positive in the common case; if a non-positive pos was ever
+        # set explicitly, step below it instead (min/2 wouldn't be "above").
+        m = min(existing)
+        return m / 2 if m > 0 else m - POS_STEP
     if s == "bottom":
         return max(existing) + POS_STEP if existing else POS_STEP
     try:
@@ -64,7 +70,12 @@ def resolve_pos(existing: list[float], pos: Any) -> float:
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        # A store file can be externally corrupted (e.g. a Dropbox conflict copy);
+        # fail with a clean message rather than a traceback.
+        raise SystemExit(f"Corrupt store file {path}: {e}")
 
 
 def atomic_write_json(path: Path, obj: Any) -> None:
