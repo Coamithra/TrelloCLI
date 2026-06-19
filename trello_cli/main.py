@@ -37,11 +37,16 @@ def _is_json() -> bool:
     return _JSON_MODE
 
 USAGE = """\
-Usage: trello [--board <name_or_id>] [--json] <command> [args]
+Usage: trello [--board <name_or_id>] [--backend <trello|local>] [--json] <command> [args]
 
 Global options:
-  --board <name_or_id>          Override active board for this command
+  --board <name_or_id>          Board for this command (required; no active board)
                                 (also: TRELLO_BOARD env var)
+  --backend <trello|local>      Data source for this command (default: trello)
+                                (also: TRELLO_BACKEND env var)
+  --local-root <path>           Local-backend store folder for this command
+                                (also: TRELLO_LOCAL_ROOT env var; persist with
+                                `local init <path>`)
   --json                        Emit raw JSON instead of formatted text
                                 (read commands only)
 
@@ -51,10 +56,10 @@ Tip: bare nouns default to `ls` — e.g. `trello list` ≡ `trello list ls`,
 Global:
   configure <key> <token>       Save API credentials
   boards                        List all boards
-  use <board_name_or_id>        Set active board (default)
-  board                         Show active board info
-  board add <name> [desc]       Create a new board
-                                (--no-default-lists, --use to activate)
+  local init [path]             Set up the local file backend root
+                                (default ~/Dropbox/trello-cli)
+  board                         Show board info (needs --board)
+  board add <name> [desc]       Create a new board (--no-default-lists)
   labels                        Show board labels
   members                       Show board members
   activity [n]                  Show recent activity
@@ -82,7 +87,7 @@ Card:
   card mine                     Show cards assigned to me
 
 List:
-  list ls                       Show lists on active board
+  list ls                       Show lists on the board
   list add <name> [--top|--bottom|--pos <n>]  Create a new list
                                 (defaults to top, like `card add`)
   list archive <list>           Archive a list
@@ -154,13 +159,9 @@ def _require_board() -> str:
     override = config.get_board_override()
     if override:
         return _resolve_board_ref(override)
-    board_id = config.get_active_board()
-    if not board_id:
-        raise SystemExit(
-            "No active board. Run: trello use <board>, "
-            "or pass --board <name>, or set TRELLO_BOARD."
-        )
-    return board_id
+    raise SystemExit(
+        "No board specified. Pass --board <name_or_id> or set TRELLO_BOARD."
+    )
 
 
 def _resolve_list(board_id: str, name_or_id: str) -> str:
@@ -402,17 +403,6 @@ def cmd_boards(_args: list[str]) -> None:
     print_table(["ID", "Name", "URL"], rows)
 
 
-def cmd_use(args: list[str]) -> None:
-    if not args:
-        raise SystemExit("Usage: trello use <board_name_or_id>")
-    ref = " ".join(args)
-    board_id = _resolve_board_ref(ref)
-    # Fetch the board name for display/storage
-    b = api.get_board(board_id)
-    config.set_active_board(board_id, b["name"])
-    print(f"Active board: {b['name']} ({short_id(board_id)})")
-
-
 def _board_show(_args: list[str]) -> None:
     board_id = _require_board()
     b = api.get_board(board_id)
@@ -428,18 +418,15 @@ def _board_show(_args: list[str]) -> None:
 
 
 def _board_add(args: list[str]) -> None:
-    positional, flags = _parse_flags(args, bool_flags=("--no-default-lists", "--use"))
+    positional, flags = _parse_flags(args, bool_flags=("--no-default-lists",))
     if not positional:
         raise SystemExit(
-            "Usage: trello board add <name> [description] [--no-default-lists] [--use]"
+            "Usage: trello board add <name> [description] [--no-default-lists]"
         )
     name = positional[0]
     desc = " ".join(positional[1:]) if len(positional) > 1 else None
     b = api.create_board(name, desc=desc, default_lists=not flags.get("--no-default-lists"))
     print(f"Created board: {b['name']} ({short_id(b['id'])})  {b.get('shortUrl', '')}")
-    if flags.get("--use"):
-        config.set_active_board(b["id"], b["name"])
-        print(f"Active board: {b['name']} ({short_id(b['id'])})")
 
 
 def cmd_board(args: list[str]) -> None:
@@ -1358,12 +1345,29 @@ def cmd_attachment(args: list[str]) -> None:
     }, args)
 
 
+# ── Local-backend setup ─────────────────────────────────────────────
+
+
+def _local_init(args: list[str]) -> None:
+    positional, _ = _parse_flags(args)
+    root = positional[0] if positional else config.get_local_root()
+    os.makedirs(root, exist_ok=True)
+    config.set_local_root(root)
+    print(f"Local backend initialized at {root}")
+    print("Use it with:  trello --backend local <command>"
+          "   (or set TRELLO_BACKEND=local)")
+
+
+def cmd_local(args: list[str]) -> None:
+    _dispatch("local", {"init": _local_init}, args)
+
+
 # ── Command dispatch ────────────────────────────────────────────────
 
 COMMANDS = {
     "configure": cmd_configure,
     "boards": cmd_boards,
-    "use": cmd_use,
+    "local": cmd_local,
     "board": cmd_board,
     "labels": cmd_labels,
     "members": cmd_members,
@@ -1392,6 +1396,22 @@ def main() -> None:
         if idx + 1 >= len(args):
             raise SystemExit("--board requires a board name or ID.")
         config.set_board_override(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+
+    # Extract --backend flag before dispatch (selects the data source)
+    if "--backend" in args:
+        idx = args.index("--backend")
+        if idx + 1 >= len(args):
+            raise SystemExit("--backend requires a name (trello or local).")
+        config.set_backend_override(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+
+    # Extract --local-root flag before dispatch (local file-store folder)
+    if "--local-root" in args:
+        idx = args.index("--local-root")
+        if idx + 1 >= len(args):
+            raise SystemExit("--local-root requires a path.")
+        config.set_local_root_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
     if not args or args[0] in ("-h", "--help", "help"):
