@@ -2,6 +2,11 @@
 
 Compact Trello CLI tool — wraps the Trello REST API with concise output formatting.
 
+## Management
+
+- Trello board with tasks: 6a353ffc
+- When implementing tickets from Trello, use CONTRIBUTING.md for workflow
+
 ## Architecture
 
 - `trello_cli/config.py` — credentials, active board, and per-invocation board override stored in `~/.trello-cli.json`
