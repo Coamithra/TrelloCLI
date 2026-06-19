@@ -1,7 +1,10 @@
 """Config and state management for Trello CLI.
 
-Stores active board/workspace in ~/.trello-cli.json.
-Auth comes from env vars TRELLO_API_KEY and TRELLO_TOKEN.
+Stores credentials and the local-backend root in ~/.trello-cli.json. Board and
+backend *selection* are per-invocation only — the `--board` / `--backend` flags
+and the `TRELLO_BOARD` / `TRELLO_BACKEND` env vars — never persisted. The CLI is
+used by many agents and projects concurrently, so it keeps no shared mutable
+session state (no "active board"); see the Statelessness guideline in CLAUDE.md.
 """
 
 import json
@@ -9,8 +12,11 @@ import os
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".trello-cli.json"
+DEFAULT_LOCAL_ROOT = Path.home() / "Dropbox" / "trello-cli"
 
 _board_override: str | None = None
+_backend_override: str | None = None
+_local_root_override: str | None = None
 
 
 def set_board_override(value: str) -> None:
@@ -22,6 +28,20 @@ def set_board_override(value: str) -> None:
 def get_board_override() -> str | None:
     """Return board override: --board flag > TRELLO_BOARD env var > None."""
     return _board_override or os.environ.get("TRELLO_BOARD")
+
+
+def set_backend_override(value: str) -> None:
+    """Set a per-invocation backend override (from --backend flag)."""
+    global _backend_override
+    _backend_override = value
+
+
+def get_backend_name() -> str:
+    """Return the selected backend: --backend flag > TRELLO_BACKEND env > 'trello'.
+
+    Deliberately not persisted — a stored default would be shared mutable state
+    across concurrent invocations. Selection is always per-invocation."""
+    return (_backend_override or os.environ.get("TRELLO_BACKEND") or "trello").lower()
 
 
 def _load() -> dict:
@@ -48,20 +68,31 @@ def get_auth() -> tuple[str, str]:
     return key, token
 
 
-def get_active_board() -> str | None:
-    return _load().get("active_board")
+def set_local_root_override(value: str) -> None:
+    """Set a per-invocation local-root override (from --local-root flag)."""
+    global _local_root_override
+    _local_root_override = value
 
 
-def set_active_board(board_id: str, board_name: str = "") -> None:
+def get_local_root() -> str:
+    """Root directory for the local file backend.
+
+    --local-root flag > TRELLO_LOCAL_ROOT env > config 'local_root' > ~/Dropbox/
+    trello-cli. The flag/env are per-invocation overrides; the config value is a
+    stable data location (like credentials), not session state, so it persists."""
+    root = (
+        _local_root_override
+        or os.environ.get("TRELLO_LOCAL_ROOT")
+        or _load().get("local_root")
+        or str(DEFAULT_LOCAL_ROOT)
+    )
+    return os.path.expanduser(root)
+
+
+def set_local_root(path: str) -> None:
     cfg = _load()
-    cfg["active_board"] = board_id
-    if board_name:
-        cfg["active_board_name"] = board_name
+    cfg["local_root"] = path
     _save(cfg)
-
-
-def get_active_board_name() -> str:
-    return _load().get("active_board_name", "")
 
 
 def save_credentials(api_key: str, token: str) -> None:

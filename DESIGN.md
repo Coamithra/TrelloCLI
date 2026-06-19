@@ -118,17 +118,21 @@ Documented limitation — not a real-time collab tool.
 
 ## Backend selection
 
-Mirrors the existing `--board` / active-board / env-var pattern, adding a backend
-dimension:
+Mirrors the existing per-invocation `--board` / `TRELLO_BOARD` pattern, adding a
+backend dimension. **Selection is stateless** — the CLI is used by many agents and
+projects concurrently, so nothing about *which* board or backend is persisted
+(that would be shared mutable state and cause cross-invocation conflicts):
 
-- `~/.trello-cli.json` gains `"backend": "trello"|"local"` (default) and
-  `"local_root": "<path>"`.
-- Global `--backend local|trello` overrides per-invocation (parsed in `main()`
-  alongside `--board` / `--json`).
-- `trello local init [path]` sets up the root (default `~/Dropbox/trello-cli`);
-  `trello configure` stays for Trello creds.
-- The active board remembers which backend it lives on, so `trello use <board>`
-  and the resolvers operate within the selected backend.
+- Backend is chosen per-invocation: `--backend trello|local` (parsed in `main()`
+  alongside `--board` / `--json`) or the `TRELLO_BACKEND` env var. Default `trello`.
+  **No persisted "default backend".**
+- `~/.trello-cli.json` persists only stable config: credentials and
+  `"local_root": "<path>"` (a data location, like a credential — not selection state).
+  `TRELLO_LOCAL_ROOT` overrides it per-invocation.
+- `trello local init [path]` sets up the root (default `~/Dropbox/trello-cli`) and
+  records `local_root`; `trello configure` stays for Trello creds.
+- **No "active board".** The legacy active-board state was removed; board scope is
+  always `--board` / `TRELLO_BOARD`. The resolvers operate within the selected backend.
 
 ---
 

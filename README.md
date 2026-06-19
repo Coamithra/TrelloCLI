@@ -29,19 +29,23 @@ Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `
 ### Global options
 
 ```
---board <name_or_id>   Override active board for this command
-                       (also: TRELLO_BOARD env var)
+--board <name_or_id>   Board for this command, required (also: TRELLO_BOARD env var)
+--backend <trello|local>  Data source (default: trello; also: TRELLO_BACKEND env var)
+--local-root <path>    Local store folder (also: TRELLO_LOCAL_ROOT env var)
 --json                 Emit raw JSON instead of formatted text (read commands)
 ```
+
+There is no stored "active board" — pass `--board` (or set `TRELLO_BOARD`) on board-scoped
+commands. The CLI keeps no shared session state so concurrent invocations never conflict.
 
 ### Global
 
 ```
 trello configure <key> <token>     Save API credentials
 trello boards                      List all boards
-trello use <board>                 Set active board (name prefix or ID)
-trello board                       Show active board info
-trello board add <name> [desc]     Create a board (--no-default-lists, --use)
+trello local init [path]           Set up the local file-backend root
+trello board                       Show board info (needs --board)
+trello board add <name> [desc]     Create a board (--no-default-lists)
 trello labels                      Show board labels
 trello members                     Show board members
 trello activity [n]                Show recent activity
@@ -68,7 +72,7 @@ trello card mine                       Show cards assigned to me
 ### List
 
 ```
-trello list ls                     Show lists on active board
+trello list ls                     Show lists on the board
 trello list add <name> [--top|--bottom|--pos <n>]  Create a new list
                                    (defaults to top, like `card add`)
 trello list archive <list>         Archive a list
@@ -129,6 +133,25 @@ trello attachment rm <card> <attachment>         Remove an attachment
 `attachment view` is the one to reach for when something (a person, or an agent) needs to actually *see* an image: it downloads each image to a local cache and prints the file paths, one per line, ready to open or read. Uploaded images are fetched through the authenticated Trello endpoint; URL attachments are fetched directly.
 
 Names accept case-insensitive prefix matches; IDs accept short prefixes.
+
+## Local file backend
+
+Besides Trello, the CLI can drive a self-hosted **file store** — JSON files on disk (e.g. in a
+Dropbox-synced folder) — through the same commands and formatting. Select it per-invocation with
+`--backend local` or `TRELLO_BACKEND=local`.
+
+```bash
+trello local init                         # root at ~/Dropbox/trello-cli (or: local init <path>)
+trello --backend local board add "Home"   # prints the new board id
+trello --backend local --board <id> card add "To Do" "Buy milk"
+trello --backend local --board <id> card ls "To Do"
+```
+
+Layout: `<root>/<boardId>/{board.json, lists.json, cards/<cardId>.json, activity.log}`, with atomic
+writes (so a sync never sees a half-written file), 24-hex ids, and float positions — identical in
+shape to Trello, so every command and `--json` output works the same. Phase 1 covers boards, lists,
+and cards (CRUD + move/pos/archive/rename/desc/due); labels, checklists, comments, attachments, and
+members are coming next and report a clear message until then.
 
 ## Updating
 
