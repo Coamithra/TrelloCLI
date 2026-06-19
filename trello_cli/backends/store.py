@@ -103,11 +103,18 @@ class LocalStore:
     def lists_file(self, board_id: str) -> Path:
         return self.board_dir(board_id) / "lists.json"
 
+    def labels_file(self, board_id: str) -> Path:
+        return self.board_dir(board_id) / "labels.json"
+
     def cards_dir(self, board_id: str) -> Path:
         return self.board_dir(board_id) / "cards"
 
     def card_file(self, board_id: str, card_id: str) -> Path:
         return self.cards_dir(board_id) / f"{card_id}.json"
+
+    def attachments_dir(self, board_id: str, card_id: str) -> Path:
+        """Folder holding a card's uploaded attachment blobs."""
+        return self.board_dir(board_id) / "attachments" / card_id
 
     def activity_file(self, board_id: str) -> Path:
         return self.board_dir(board_id) / "activity.log"
@@ -142,3 +149,20 @@ class LocalStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def read_activity(self, board_id: str) -> list[dict]:
+        """Every activity-log entry, oldest first (file order). Blank or
+        unparseable lines are skipped so a partially-synced log still reads."""
+        path = self.activity_file(board_id)
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
