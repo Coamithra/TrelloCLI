@@ -15,8 +15,19 @@ function setStatus(msg, isError) {
   statusEl.classList.toggle('error', !!isError);
 }
 
+// When the server is started on a non-loopback host it gates the API behind a
+// token, handed to the page as ?token=… on the URL. Thread it onto every API
+// request and the SSE stream — neither browser navigation nor EventSource can
+// set an Authorization header, so the query param is the only channel.
+const AUTH_TOKEN = new URLSearchParams(location.search).get('token');
+
+function withToken(path) {
+  if (!AUTH_TOKEN) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(AUTH_TOKEN);
+}
+
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  const res = await fetch(withToken(path), opts);
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) { /* non-JSON body */ }
@@ -328,7 +339,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetai
 // if the stream drops; skip the reload mid-drag so a card isn't yanked away.
 function initLive() {
   if (typeof EventSource === 'undefined') return;
-  const es = new EventSource('/api/events');
+  const es = new EventSource(withToken('/api/events'));
   es.addEventListener('change', () => {
     if (liveDragging || !picker.value) return;
     loadBoard(picker.value);
