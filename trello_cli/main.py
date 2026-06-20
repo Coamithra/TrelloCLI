@@ -131,6 +131,12 @@ Attachment:
                                                 viewer; URL link in browser)
   attachment download <card_id> <attachment> [dest]  Save an attachment to disk
   attachment rm <card_id> <attachment>          Remove an attachment
+
+Web:
+  serve [--port 8787] [--host 127.0.0.1] [--no-browser]
+                                Launch the drag-drop kanban web app for the
+                                selected backend (pip install trello-cli[web]).
+                                Binds 127.0.0.1 by default (local only).
 """
 
 
@@ -1362,12 +1368,40 @@ def cmd_local(args: list[str]) -> None:
     _dispatch("local", {"init": _local_init}, args)
 
 
+# ── Web server ──────────────────────────────────────────────────────
+
+
+def cmd_serve(args: list[str]) -> None:
+    positional, flags = _parse_flags(
+        args, bool_flags=("--no-browser",), value_flags=("--port", "--host"),
+    )
+    if positional:
+        raise SystemExit(
+            "Usage: trello serve [--port <n>] [--host <addr>] [--no-browser]"
+        )
+    try:
+        from .web.server import serve
+    except ModuleNotFoundError:
+        raise SystemExit(
+            "The web app needs extra dependencies. Install them with:\n"
+            "    pip install trello-cli[web]"
+        )
+    port_raw = flags.get("--port")
+    try:
+        port = int(port_raw) if port_raw is not None else 8787
+    except (TypeError, ValueError):
+        raise SystemExit(f"Invalid --port: {port_raw!r}")
+    host = flags.get("--host") or "127.0.0.1"
+    serve(host=str(host), port=port, open_browser=not flags.get("--no-browser"))
+
+
 # ── Command dispatch ────────────────────────────────────────────────
 
 COMMANDS = {
     "configure": cmd_configure,
     "boards": cmd_boards,
     "local": cmd_local,
+    "serve": cmd_serve,
     "board": cmd_board,
     "labels": cmd_labels,
     "members": cmd_members,

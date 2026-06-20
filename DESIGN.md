@@ -1,6 +1,7 @@
 # Dual-Backend Kanban — Design
 
-Status: **plan / not yet implemented**
+Status: **Phases 0-3 implemented** (Trello + local backends with full CLI parity,
+plus the drag-drop web app). **Phase 4 (niceties) remaining.**
 
 Expand TrelloCLI from a Trello-only CLI into a tool with two interchangeable
 backends — **Trello** (the current REST client) and a **self-hosted file store**
@@ -163,7 +164,7 @@ renders **both** local and Trello boards for free.
 | **0 - Seam** | Extract `Backend` ABC; move Trello code to `backends/trello.py`; route through `get_backend()` | No (pure refactor, Trello still works) |
 | **1 - Local core** | File store, boards/lists/cards CRUD + move/pos/archive/rename/desc/due, `local init`, `--backend` | `trello --backend local ...` = working file-backed kanban via existing CLI |
 | **2 - Local parity** | labels, checklists, comments, attachments (blobs), activity/updates from the log, single-user `mine` | Local backend backs *every* CLI command |
-| **3 - Web app** | FastAPI + JSON API + vanilla-JS drag-drop board + `trello serve` (works for both backends) | The browser kanban |
+| **3 - Web app** | FastAPI + JSON API + vanilla-JS drag-drop board + `trello serve` (works for both backends) | The browser kanban **(delivered)** |
 | **4 - Niceties** | Live refresh (file-watch -> SSE) when Dropbox syncs a change; `trello export <board> --to local` to pull Trello boards into files | Quality-of-life |
 
 The **export/import** bonus (Phase 4) falls out almost for free since both

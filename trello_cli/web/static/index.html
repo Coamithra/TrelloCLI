@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TrelloCLI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>TrelloCLI</h1>
+    <select id="board-picker" aria-label="Select board"></select>
+    <span id="status" class="status"></span>
+  </header>
+
+  <main id="board" class="board"></main>
+
+  <div id="overlay" class="overlay hidden"></div>
+  <aside id="detail" class="detail hidden" aria-label="Card detail"></aside>
+
+  <script src="/static/vendor/Sortable.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

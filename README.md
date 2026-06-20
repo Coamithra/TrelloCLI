@@ -160,6 +160,27 @@ reflect everywhere). Uploaded attachment blobs are copied under `attachments/<ca
 attachments just store the URL. Members are a single local user (your OS username), so `card mine`
 returns every open card across your local boards.
 
+## Web app
+
+An optional local **web UI** — a drag-drop kanban that renders whichever backend you
+select, served by FastAPI over the same `Backend` interface (no build step; vanilla JS +
+SortableJS). Install the extra and launch:
+
+```bash
+pip install -e ".[web]"                 # or: pip install "trello-cli[web]"
+trello --backend local serve            # or --backend trello; opens the browser
+trello serve --port 8787 --host 127.0.0.1 --no-browser
+```
+
+`serve` boots a local server and opens your browser. It binds **127.0.0.1 by default**
+(local-only); a non-loopback `--host` opts into network exposure, but the server has **no
+authentication** — anyone who can reach the port can read and edit the board — so put remote
+access behind a VPN or reverse proxy (`serve` prints a warning when you bind non-loopback). In the UI:
+pick a board from the dropdown, drag cards within/between columns and drag columns to
+reorder (both write straight through the backend, using the same float-`pos` midpoint rule
+as `card pos`), add a card from the composer at the bottom of a column, and click a card
+for a read-only detail panel (description, due, labels, checklist, comments).
+
 ## Updating
 
 ```bash

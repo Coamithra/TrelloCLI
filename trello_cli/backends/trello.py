@@ -83,7 +83,7 @@ class TrelloBackend(Backend):
     def get_board_cards(self, board_id: str, card_filter: str = "visible") -> list[dict]:
         return self._get(
             f"/boards/{board_id}/cards",
-            fields="id,name,shortUrl,labels,due,idList,idMembers,shortId,dateLastActivity",
+            fields="id,name,shortUrl,labels,due,dueComplete,idList,idMembers,shortId,dateLastActivity,pos",
             filter=card_filter,
         )
 

@@ -19,6 +19,9 @@ Compact Trello CLI tool — wraps the Trello REST API with concise output format
   - `__init__.py` — `get_backend()` factory (cached singleton); selects `trello` (default) or `local` from `--backend` / `TRELLO_BACKEND` (see DESIGN.md)
 - `trello_cli/fmt.py` — compact table/detail formatting and small helpers (`short_id`, `truncate`, `due_str`, `label_str`, `is_image`, `size_str`, `print_json`); backend-agnostic (formats plain dicts)
 - `trello_cli/main.py` — CLI entry point, noun-group dispatch (`card`, `list`, `label`, `checklist`, `comment`, `attachment`), name/ID prefix resolution
+- `trello_cli/web/` — optional web app (the `[web]` extra), launched by `trello serve`:
+  - `server.py` — FastAPI JSON API mapping 1:1 onto the `api` facade, so it renders **either** backend with no per-backend code. Endpoints: `GET /api/boards`, `GET /api/boards/{id}` (board+lists+cards), `GET /api/cards/{id}` (detail+comments), `PATCH /api/cards/{id}` (drag move/reorder), `PATCH /api/lists/{id}` (column reorder), `POST /api/lists/{id}/cards` (create). Backend `SystemExit` (not-found) is translated to HTTP 404; mutating fields are whitelisted
+  - `static/` — vanilla JS + SortableJS (vendored under `static/vendor/`, no build step): columns + cards, drag-drop reorder/move computing the float `pos` midpoint client-side, plus a read-only card detail panel
 
 ## Conventions
 
