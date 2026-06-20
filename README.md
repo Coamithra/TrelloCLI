@@ -56,6 +56,9 @@ trello activity [n]                Show recent activity
 trello export [--to local] [--no-attachments]  Pull --board into the local file
                                    store (source backend = --backend, default
                                    trello; uploaded blobs downloaded by default)
+trello export --to trello [--name <name>] [--no-attachments]  Push a local --board
+                                   up to Trello as a new board (source = --backend
+                                   local; create-new-each-time)
 ```
 
 ### Card
@@ -214,6 +217,34 @@ and the stored URL is rewritten root-relative, so the snapshot is usable offline
 Already-downloaded blobs are reused on re-export, and a per-blob download failure is non-fatal —
 it warns and keeps the remote URL. URL attachments are already portable and exported as-is. Only
 open lists are pulled (the API exposes open lists only).
+
+### Pushing a local board up to Trello
+
+`trello --backend local --board <board> export --to trello` does the reverse: it pushes a board
+from the local file store **up to Trello as a brand-new board**, re-creating lists, cards
+(description, due, due-complete, position, labels, archived state), comments, checklists (with
+item completion), and attachments (uploaded blobs are re-uploaded; URL attachments re-linked).
+
+```bash
+trello --backend local --board "My Board" export --to trello                 # local -> a new Trello board
+trello --backend local --board "My Board" export --to trello --name "Copy"   # override the new board's name
+trello --backend local --board "My Board" export --to trello --no-attachments  # skip uploading blobs
+```
+
+Because Trello mints its own ids, ids **cannot** be preserved, so this is **create-new-each-time**:
+every run creates a fresh board (it never updates a previously-pushed one) — the command prints the
+new board's id and URL. A few things change in the cloud copy by necessity:
+
+- **Comments** are re-posted as *you* (the API token's user) with a current timestamp — Trello has
+  no way to set a comment's author or date — so each is prefixed with an `_originally <author>,
+  <date>_` line to preserve the original attribution in the body.
+- **Board members** are not mapped (the new board has different membership), so card member
+  assignments are dropped.
+- Only **open lists** are pushed (same as `--to local`); a card whose list wasn't exported is
+  skipped with a warning. Per-attachment failures warn and continue.
+
+The source must be the local store, so run it with `--backend local`. (A tracked re-sync that
+updates an existing board in place is intentionally out of scope — see `DESIGN.md`.)
 
 ## Web app
 

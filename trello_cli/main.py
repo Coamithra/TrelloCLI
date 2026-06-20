@@ -145,6 +145,11 @@ Data:
                                 Uploaded attachment blobs are downloaded by default
                                 (--no-attachments skips). Browse it with --backend
                                 local, or `serve` it.
+  export --to trello            Push a local --board up to Trello as a brand-new
+         [--name <name>]        board (source must be --backend local). Re-creates
+         [--no-attachments]     lists/labels/cards/comments/checklists/attachments
+                                under fresh ids; --name overrides the board name.
+                                Create-new-each-time: re-running makes another board.
 
 Web:
   serve [--port 8787] [--host 127.0.0.1] [--no-browser]
@@ -1590,39 +1595,18 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
     return counts
 
 
-def cmd_export(args: list[str]) -> None:
-    positional, flags = _parse_flags(
-        args, bool_flags=("--no-attachments",), value_flags=("--to",),
-    )
-    if positional:
-        raise SystemExit(
-            "Usage: trello --board <board> export [--to local] [--no-attachments]\n"
-            "  Pulls the board (from --backend, default trello) into the local file store.\n"
-            "  Uploaded attachment blobs are downloaded by default; --no-attachments skips them."
-        )
-    target = str(flags.get("--to") or "local").lower()
-    if target != "local":
-        raise SystemExit(
-            f"Unsupported export target: {target!r}. Only '--to local' is supported "
-            "(export pulls a board into the local file store)."
-        )
-    if config.get_backend_name() == "local":
-        # Source and target would be the same store (same local_root) — the prune
-        # step would then delete from the very files it just read. Export is a pull
-        # from a remote backend; run it with --backend trello (the default).
-        raise SystemExit(
-            "export pulls a board *into* the local store, so the source must be a "
-            "remote backend. Run it with --backend trello (the default), not local."
-        )
-    board_id = _require_board()
+def _gather_board(board_id: str) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Read a full snapshot of a board from the active backend: board meta, open
+    lists, labels, and every card (visible + closed) merged with its detail and
+    full comment thread. Shared by both export directions.
+
+    Every card, visible + closed. The filtered listings drop the closed flag, so
+    stamp it. board-cards carries `pos` (get_card omits it); get_card supplies
+    desc plus checklists/attachments inline (both backends do); get_comments adds
+    the comment thread."""
     board = api.get_board(board_id)
     lists = api.get_lists(board_id)
     labels = api.get_labels(board_id)
-
-    # Every card, visible + closed. The filtered listings drop the closed flag, so
-    # stamp it. board-cards carries `pos` (get_card omits it); get_card supplies
-    # desc plus checklists/attachments inline — export depends on get_card
-    # returning those (both backends do); get_comments adds the comment thread.
     summaries: list[dict] = []
     for card_filter, closed in (("visible", False), ("closed", True)):
         for c in api.get_board_cards(board_id, card_filter=card_filter):
@@ -1632,6 +1616,221 @@ def cmd_export(args: list[str]) -> None:
         merged = {**api.get_card(c["id"]), **c}  # board-cards wins (pos, closed)
         merged["comments"] = api.get_comments(c["id"], limit=1000)
         cards.append(merged)
+    return board, lists, labels, cards
+
+
+def _card_label_ids(card: dict) -> list[str]:
+    """A card's label ids regardless of source shape: `idLabels` if present
+    (Trello-shaped), else the ids of the resolved `labels` dicts (local-shaped)."""
+    ids = card.get("idLabels")
+    if ids is None:
+        ids = [lb["id"] for lb in card.get("labels", []) if lb.get("id")]
+    return list(ids)
+
+
+def _pos_str(pos) -> str | None:
+    """Stringify a numeric `pos` for the Trello API (which accepts a number to
+    place an item exactly); non-numeric/absent → None (Trello defaults to bottom)."""
+    return str(pos) if isinstance(pos, (int, float)) and not isinstance(pos, bool) else None
+
+
+def _comment_provenance(cm: dict) -> str:
+    """A short Markdown prefix preserving a re-posted comment's original author and
+    date — Trello posts comments as the token user with a fresh timestamp, so the
+    only way to keep the who/when is to fold it into the body."""
+    mc = cm.get("memberCreator") or {}
+    who = mc.get("fullName") or mc.get("username") or cm.get("idMemberCreator") or "unknown"
+    when = str(cm.get("date") or "")[:10]  # YYYY-MM-DD
+    tag = f"_originally {who}" + (f", {when}" if when else "") + "_"
+    return tag + "\n\n"
+
+
+def _push_attachment(dest, source_root: str, card_id: str, att: dict,
+                     with_attachments: bool, counts: dict) -> None:
+    """Re-create one attachment on the new Trello card. Uploaded local blobs are
+    re-uploaded (`add_attachment_file`); external URL attachments are re-linked
+    (`add_attachment_url`). Best-effort: a per-attachment failure warns and bumps
+    `failed` rather than aborting the export."""
+    url = att.get("url")
+    if not url:
+        return
+    name = att.get("name")
+    is_upload = bool(att.get("isUpload"))
+    is_remote = str(url).lower().startswith(("http://", "https://"))
+    try:
+        if is_upload and not is_remote:
+            # Local blob (root-relative or absolute path) → upload the file itself.
+            if not with_attachments:
+                counts["skipped"] += 1
+                return
+            path = url if os.path.isabs(url) else os.path.join(source_root, url)
+            if not os.path.isfile(path):
+                print(f"  warning: attachment blob missing on disk: {url} — skipping",
+                      file=sys.stderr)
+                counts["failed"] += 1
+                return
+            dest.add_attachment_file(card_id, path, name=name)
+            counts["uploaded"] += 1
+        else:
+            # External URL attachment, or an uploaded blob we only have a remote
+            # (auth-gated) url for (source exported --no-attachments) → re-link it.
+            dest.add_attachment_url(card_id, url, name=name)
+            counts["linked"] += 1
+    except Exception as e:
+        print(f"  warning: could not push attachment {short_id(att.get('id', ''))} "
+              f"({name or url}): {e}", file=sys.stderr)
+        counts["failed"] += 1
+
+
+def _push_card(dest, source_root: str, card: dict, new_list: str,
+               label_map: dict, counts: dict, with_attachments: bool) -> None:
+    """Create one card and its children — dueComplete, comments, checklists+items,
+    attachments — on the new Trello board, then archive it if it was archived.
+    Bumps `counts` in place. Raises on a Trello error so the caller can
+    warn-and-continue rather than aborting the whole push."""
+    new_label_ids = [label_map[i] for i in _card_label_ids(card) if i in label_map]
+    created = dest.create_card(
+        new_list, card.get("name", ""),
+        desc=card.get("desc") or None,
+        due=card.get("due") or None,
+        labels=new_label_ids or None,
+        pos=_pos_str(card.get("pos")),
+    )
+    new_card_id = created["id"]
+    counts["cards"] += 1
+    # Trello rejects dueComplete without a due date; the local store doesn't enforce
+    # that invariant, so only set it when there's actually a due date to complete.
+    if card.get("due") and card.get("dueComplete"):
+        dest.update_card(new_card_id, dueComplete="true")
+    # Comments, oldest first, each prefixed with its original author/date.
+    for cm in sorted(card.get("comments", []), key=lambda x: x.get("date", "")):
+        text = (cm.get("data") or {}).get("text") or ""
+        if not text:
+            continue
+        dest.add_comment(new_card_id, _comment_provenance(cm) + text)
+        counts["comments"] += 1
+    # Checklists and their items, preserving order and completion state.
+    for cl in sorted(card.get("checklists", []), key=lambda x: x.get("pos", 0)):
+        new_cl = dest.create_checklist(new_card_id, cl.get("name", ""))
+        counts["checklists"] += 1
+        for it in sorted(cl.get("checkItems", []), key=lambda x: x.get("pos", 0)):
+            new_item = dest.add_checkitem(new_cl["id"], it.get("name", ""))
+            if it.get("state") == "complete":
+                dest.update_checkitem(new_card_id, new_item["id"], state="complete")
+    for att in card.get("attachments", []):
+        _push_attachment(dest, source_root, new_card_id, att, with_attachments,
+                         counts["attachments"])
+    # Archive last: the card (and its children) must exist before it's closed.
+    if card.get("closed"):
+        dest.archive_card(new_card_id)
+
+
+def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict],
+                          labels: list[dict], cards: list[dict], name: str,
+                          with_attachments: bool) -> dict:
+    """Create a brand-new Trello board from a local snapshot and return counts.
+
+    Trello mints its own ids, so we build old→new maps for labels and lists as we
+    create them, then re-create each card and its children (comments,
+    checklists+items, attachments) under the new ids. Create-new-each-time:
+    non-idempotent by design — re-running makes another board (see DESIGN/README)."""
+    new_board = dest.create_board(name, desc=board.get("desc") or None,
+                                  default_lists=False)
+    new_board_id = new_board["id"]
+    # Surface the new board's id/url before the card loop: this is
+    # create-new-each-time, so a mid-push failure (rate-limit, network) can't be
+    # resumed — printing it up front tells the user which half-built board to delete.
+    print(f"  creating Trello board {short_id(new_board_id)} "
+          f"{new_board.get('shortUrl', '')}".rstrip(), file=sys.stderr)
+
+    label_map: dict[str, str] = {}
+    for lb in labels:
+        color = lb.get("color") or None
+        try:
+            created = dest.create_label(new_board_id, lb.get("name", ""), color)
+        except Exception as e:
+            # A locally-invented color Trello rejects shouldn't abort the export;
+            # retry colorless so the label (and its card assignments) still land.
+            if color is None:
+                raise
+            print(f"  warning: label color {color!r} rejected ({e}) — creating "
+                  f"'{lb.get('name', '')}' without a color", file=sys.stderr)
+            created = dest.create_label(new_board_id, lb.get("name", ""), None)
+        label_map[lb["id"]] = created["id"]
+
+    list_map: dict[str, str] = {}
+    for l in sorted(lists, key=lambda x: x.get("pos", 0)):
+        created = dest.create_list(new_board_id, l.get("name", ""),
+                                   pos=_pos_str(l.get("pos")))
+        list_map[l["id"]] = created["id"]
+
+    counts = {
+        "lists": len(list_map), "labels": len(label_map),
+        "cards": 0, "comments": 0, "checklists": 0,
+        "attachments": {"uploaded": 0, "linked": 0, "failed": 0, "skipped": 0},
+    }
+
+    for card in sorted(cards, key=lambda c: c.get("pos", 0)):
+        new_list = list_map.get(card.get("idList") or "")
+        if new_list is None:
+            # Card in a closed/unexported list (only open lists are pushed, mirroring
+            # --to local). Skip it rather than orphan it.
+            print(f"  warning: skipping card {short_id(card['id'])} "
+                  f"({truncate(card.get('name', ''), 40)}) — its list was not exported",
+                  file=sys.stderr)
+            continue
+        # Best-effort, like attachments: a single bad card warns and continues
+        # rather than aborting the push and orphaning the rest of the board.
+        try:
+            _push_card(dest, source_root, card, new_list, label_map, counts,
+                       with_attachments)
+        except Exception as e:
+            print(f"  warning: could not push card {short_id(card['id'])} "
+                  f"({truncate(card.get('name', ''), 40)}): {e}", file=sys.stderr)
+
+    return {"id": new_board_id, "name": name,
+            "shortUrl": new_board.get("shortUrl", ""), **counts}
+
+
+def cmd_export(args: list[str]) -> None:
+    positional, flags = _parse_flags(
+        args, bool_flags=("--no-attachments",), value_flags=("--to", "--name"),
+    )
+    if positional:
+        raise SystemExit(
+            "Usage: trello --board <board> export [--to local|trello] "
+            "[--name <name>] [--no-attachments]\n"
+            "  --to local  (default): pull the board into the local file store "
+            "(source = --backend, default trello).\n"
+            "  --to trello: push a local board up to Trello as a new board "
+            "(source must be --backend local)."
+        )
+    target = str(flags.get("--to") or "local").lower()
+    if target == "local":
+        _export_to_local(flags)
+    elif target == "trello":
+        _export_to_trello(flags)
+    else:
+        raise SystemExit(
+            f"Unsupported export target: {target!r}. Use '--to local' (pull a board "
+            "into the file store) or '--to trello' (push a local board up to Trello)."
+        )
+
+
+def _export_to_local(flags: dict) -> None:
+    if flags.get("--name"):
+        raise SystemExit("--name only applies to export --to trello.")
+    if config.get_backend_name() == "local":
+        # Source and target would be the same store (same local_root) — the prune
+        # step would then delete from the very files it just read. Export is a pull
+        # from a remote backend; run it with --backend trello (the default).
+        raise SystemExit(
+            "export --to local pulls a board *into* the local store, so the source "
+            "must be a remote backend. Run it with --backend trello (the default), "
+            "not local."
+        )
+    board_id = _require_board()
+    board, lists, labels, cards = _gather_board(board_id)
 
     from .backends.local import LocalBackend
 
@@ -1659,6 +1858,49 @@ def cmd_export(args: list[str]) -> None:
         if blobs["failed"]:
             parts.append(f"{blobs['failed']} failed (kept remote url)")
         print(f"  attachment blobs: {', '.join(parts)}")
+
+
+def _export_to_trello(flags: dict) -> None:
+    if config.get_backend_name() != "local":
+        # The reverse pushes the *local* store up to Trello; the source must be the
+        # file store, so the active backend has to be local.
+        raise SystemExit(
+            "export --to trello pushes the *local* store up to Trello, so the source "
+            "must be the local backend. Run it with --backend local."
+        )
+    board_id = _require_board()
+    board, lists, labels, cards = _gather_board(board_id)
+    name = str(flags.get("--name") or board.get("name") or "Exported board")
+    with_attachments = not flags.get("--no-attachments")
+    source_root = config.get_local_root()
+
+    from .backends.trello import TrelloBackend
+
+    dest = TrelloBackend()
+    result = _push_board_to_trello(
+        dest, source_root, board, lists, labels, cards, name, with_attachments,
+    )
+    if _is_json():
+        print_json(result)
+        return
+    att = result["attachments"]
+    print(
+        f"Pushed '{result['name']}' up to Trello as new board {short_id(result['id'])}\n"
+        f"  {result['lists']} lists, {result['cards']} cards, {result['labels']} labels, "
+        f"{result['comments']} comments, {result['checklists']} checklists\n"
+        f"  {result['shortUrl']}".rstrip()
+    )
+    if att["uploaded"] or att["linked"] or att["failed"] or att["skipped"]:
+        parts = []
+        if att["uploaded"]:
+            parts.append(f"{att['uploaded']} uploaded")
+        if att["linked"]:
+            parts.append(f"{att['linked']} linked")
+        if att["skipped"]:
+            parts.append(f"{att['skipped']} skipped (--no-attachments)")
+        if att["failed"]:
+            parts.append(f"{att['failed']} failed")
+        print(f"  attachments: {', '.join(parts)}")
 
 
 # ── Web server ──────────────────────────────────────────────────────

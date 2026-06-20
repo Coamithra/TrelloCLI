@@ -179,10 +179,27 @@ renders **both** local and Trello boards for free.
 | **1 - Local core** | File store, boards/lists/cards CRUD + move/pos/archive/rename/desc/due, `local init`, `--backend` | `trello --backend local ...` = working file-backed kanban via existing CLI |
 | **2 - Local parity** | labels, checklists, comments, attachments (blobs), activity/updates from the log, single-user `mine` | Local backend backs *every* CLI command |
 | **3 - Web app** | FastAPI + JSON API + vanilla-JS drag-drop board + `trello serve` (works for both backends) | The browser kanban **(delivered)** |
-| **4 - Niceties** | Live refresh (file-watch -> SSE) when Dropbox syncs a change; `trello export <board> --to local` to pull Trello boards into files | Quality-of-life **(delivered)** — export downloads uploaded-attachment blobs by default (`--no-attachments` to skip) and supports `--to local`; `--to trello` reverse import is a follow-up |
+| **4 - Niceties** | Live refresh (file-watch -> SSE) when Dropbox syncs a change; `trello export <board> --to local` to pull Trello boards into files | Quality-of-life **(delivered)** — export downloads uploaded-attachment blobs by default (`--no-attachments` to skip) and supports both `--to local` (pull) and `--to trello` (push a local board up as a brand-new board) |
 
 The **export/import** bonus (Phase 4) falls out almost for free since both
 backends share the entity shape.
+
+### `export --to trello` (reverse import) — create-new-each-time
+
+The reverse pushes the local store *up* to Trello. The asymmetry vs `--to local`:
+Trello mints its own ids, so ids **cannot** be preserved and the idempotent
+in-place refresh model doesn't apply. The chosen model is **create-new-each-time**:
+each run creates a brand-new board (old→new id maps for labels/lists are built as
+they're created; cards and their children — comments, checklists+items,
+attachments — are re-created under the new ids). This keeps **statelessness** — no
+`local→trello` id map is persisted anywhere. Necessary lossy bits: comments
+re-post as the token user with a fresh timestamp (provenance folded into the body),
+board members aren't mapped, and only open lists are pushed.
+
+A **tracked-mapping re-sync** (persist the id map, diff-and-update an existing
+board, e.g. `--into <board_id>`) was deliberately deferred: it reintroduces
+cross-invocation state and a full reconciliation engine, which fights the stateless
+design. It's a candidate follow-up card, not part of this one.
 
 ---
 
