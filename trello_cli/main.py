@@ -1390,8 +1390,10 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
     stored card points at the local file. URL attachments (`isUpload` False) are
     already portable and left untouched. Best-effort: a per-blob failure warns,
     drops any partial file, and keeps the remote url so metadata still exports.
-    Trello blobs are immutable by id, so an already-downloaded blob is reused
-    (skipped) on re-export. Mutates `cards` in place; returns per-blob counts."""
+    Trello blobs are immutable by id, so any blob already on disk for that id is
+    reused (skipped) on re-export — even if the attachment was renamed upstream,
+    which avoids a needless re-download. Mutates `cards` in place; returns
+    per-blob counts."""
     counts = {"downloaded": 0, "skipped": 0, "failed": 0}
     root = backend.store.root
     for card in cards:
@@ -1401,26 +1403,35 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
                 continue
             if not str(url).lower().startswith(("http://", "https://")):
                 continue  # already a local path (e.g. re-export of a local source)
-            name = os.path.basename(str(att.get("name") or url).strip())
-            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or att["id"]
             dest_dir = backend.store.attachments_dir(board_id, card["id"])
-            dest = dest_dir / f"{att['id']}-{name}"
-            rel = dest.relative_to(root).as_posix()
-            if dest.is_file() and dest.stat().st_size > 0:
-                att["url"] = rel
+            # Reuse any complete blob already downloaded for this id (the filename
+            # may differ if it was renamed upstream). The ".part" temp below has no
+            # dash after the id, so it never matches this id-prefix glob.
+            cached = next(
+                (p for p in sorted(dest_dir.glob(f"{att['id']}-*"))
+                 if p.is_file() and p.stat().st_size > 0),
+                None,
+            ) if dest_dir.exists() else None
+            if cached is not None:
+                att["url"] = cached.relative_to(root).as_posix()
                 counts["skipped"] += 1
                 continue
+            name = os.path.basename(str(att.get("name") or url).strip())
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or att["id"]  # the regex is the path-safety guard
             dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"{att['id']}-{name}"
+            tmp = dest_dir / f"{att['id']}.part"  # stream here, then os.replace (atomic; no truncated cache)
             try:
-                api.download_attachment(url, str(dest), authed=True)
-                att["url"] = rel
+                api.download_attachment(url, str(tmp), authed=True)
+                os.replace(tmp, dest)
+                att["url"] = dest.relative_to(root).as_posix()
                 counts["downloaded"] += 1
             except Exception as e:
                 print(f"  warning: could not download attachment {short_id(att['id'])} "
                       f"({name}): {e} — keeping remote url", file=sys.stderr)
                 try:
-                    if dest.is_file():
-                        dest.unlink()
+                    if tmp.is_file():
+                        tmp.unlink()
                 except OSError:
                     pass
                 counts["failed"] += 1
@@ -1478,8 +1489,8 @@ def cmd_export(args: list[str]) -> None:
         backend, board["id"], cards,
     )
     result = backend.import_board(board, lists, labels, cards)
-    if blobs is not None:
-        result["attachments"] = blobs
+    # Stable JSON shape: always present, zeroed when --no-attachments skipped it.
+    result["attachments"] = blobs or {"downloaded": 0, "skipped": 0, "failed": 0}
     if _is_json():
         print_json(result)
         return
