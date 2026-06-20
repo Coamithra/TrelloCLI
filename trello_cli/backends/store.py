@@ -178,10 +178,34 @@ class StoreLock:
         if self._depth == 0:
             try:
                 _os_unlock(self._fh)
+            except OSError:
+                pass  # closing the handle below releases the OS lock regardless
             finally:
                 self._fh.close()
                 self._fh = None
         self._rlock.release()
+
+
+_LOCKS: dict[str, StoreLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def get_store_lock(path: str | os.PathLike, timeout: float = LOCK_TIMEOUT) -> StoreLock:
+    """The process-wide `StoreLock` for `path`, created once and shared.
+
+    Sharing one instance per lock-file path makes the lock re-entrant across
+    *every* backend in a process — not just nested calls on one instance. Two
+    `LocalBackend`s built for the same root (e.g. the source + target the
+    `export` command juggles) reuse the same RLock and file handle instead of
+    self-colliding on the OS lock (a second handle to the same byte range fails
+    on Windows). Cross-process exclusion is unaffected — that's the OS lock's job."""
+    key = os.path.abspath(os.path.expanduser(os.fspath(path)))
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = StoreLock(key, timeout)
+            _LOCKS[key] = lock
+        return lock
 
 
 class LocalStore:

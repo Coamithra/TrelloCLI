@@ -29,8 +29,8 @@ from .base import Backend
 from .store import (
     POS_STEP,
     LocalStore,
-    StoreLock,
     atomic_write_json,
+    get_store_lock,
     new_id,
     now_iso,
     read_json,
@@ -66,9 +66,10 @@ class LocalBackend(Backend):
     def __init__(self, root: str) -> None:
         self.store = LocalStore(root)
         # One lock per store root serializes every mutator across processes and
-        # threads (see StoreLock). Reads stay lock-free — atomic writes already
-        # give each file a consistent point-in-time view.
-        self._lock = StoreLock(self.store.root / ".lock")
+        # threads (see StoreLock). Shared per-path so two backends on the same
+        # root in one process (e.g. export) don't self-collide. Reads stay
+        # lock-free — atomic writes already give each file a consistent view.
+        self._lock = get_store_lock(self.store.root / ".lock")
 
     # ── internal helpers ────────────────────────────────────────────
 
