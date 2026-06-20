@@ -200,7 +200,7 @@ function renderBoard(data) {
   boardEl.innerHTML = '';
   const byList = {};
   (data.cards || []).forEach((c) => { (byList[c.idList] = byList[c.idList] || []).push(c); });
-  Object.values(byList).forEach((arr) => arr.sort((a, b) => a.pos - b.pos));
+  Object.values(byList).forEach((arr) => arr.sort((a, b) => (Number(a.pos) || 0) - (Number(b.pos) || 0)));
   (data.lists || []).forEach((list) => boardEl.appendChild(columnEl(list, byList[list.id] || [])));
   initDragging();
 }

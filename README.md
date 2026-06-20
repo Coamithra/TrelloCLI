@@ -173,7 +173,9 @@ trello serve --port 8787 --host 127.0.0.1 --no-browser
 ```
 
 `serve` boots a local server and opens your browser. It binds **127.0.0.1 by default**
-(local-only); a non-loopback `--host` is the explicit opt-in for remote access. In the UI:
+(local-only); a non-loopback `--host` opts into network exposure, but the server has **no
+authentication** — anyone who can reach the port can read and edit the board — so put remote
+access behind a VPN or reverse proxy (`serve` prints a warning when you bind non-loopback). In the UI:
 pick a board from the dropdown, drag cards within/between columns and drag columns to
 reorder (both write straight through the backend, using the same float-`pos` midpoint rule
 as `card pos`), add a card from the composer at the bottom of a column, and click a card
