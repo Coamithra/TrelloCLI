@@ -1390,14 +1390,23 @@ def cmd_export(args: list[str]) -> None:
             f"Unsupported export target: {target!r}. Only '--to local' is supported "
             "(export pulls a board into the local file store)."
         )
+    if config.get_backend_name() == "local":
+        # Source and target would be the same store (same local_root) — the prune
+        # step would then delete from the very files it just read. Export is a pull
+        # from a remote backend; run it with --backend trello (the default).
+        raise SystemExit(
+            "export pulls a board *into* the local store, so the source must be a "
+            "remote backend. Run it with --backend trello (the default), not local."
+        )
     board_id = _require_board()
     board = api.get_board(board_id)
     lists = api.get_lists(board_id)
     labels = api.get_labels(board_id)
 
     # Every card, visible + closed. The filtered listings drop the closed flag, so
-    # stamp it. board-cards carries `pos`; per-card get_card adds desc / checklists
-    # / attachments; get_comments adds the comment thread.
+    # stamp it. board-cards carries `pos` (get_card omits it); get_card supplies
+    # desc plus checklists/attachments inline — export depends on get_card
+    # returning those (both backends do); get_comments adds the comment thread.
     summaries: list[dict] = []
     for card_filter, closed in (("visible", False), ("closed", True)):
         for c in api.get_board_cards(board_id, card_filter=card_filter):

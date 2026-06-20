@@ -22,7 +22,6 @@ from pathlib import Path
 _lock = threading.Lock()
 _version = 0
 _observer = None  # the running watchdog Observer (started at most once)
-_watched_root: str | None = None
 
 
 def _bump() -> None:
@@ -40,10 +39,10 @@ def get_version() -> int:
 def start_watching(root: str) -> bool:
     """Start watching `root` for changes (idempotent).
 
-    Returns True if a watcher is active for this root afterwards. No-ops if the
-    root doesn't exist yet, if watchdog isn't installed, or if a watcher is
-    already running (the first root wins — the web server watches one store)."""
-    global _observer, _watched_root
+    Returns True if a watcher is active afterwards. No-ops if the root doesn't
+    exist yet, if watchdog isn't installed, or if a watcher is already running
+    (the web server watches a single store for its lifetime)."""
+    global _observer
     if _observer is not None:
         return True
     p = Path(root).expanduser()
@@ -64,5 +63,4 @@ def start_watching(root: str) -> bool:
     obs.daemon = True
     obs.start()
     _observer = obs
-    _watched_root = str(p)
     return True

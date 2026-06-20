@@ -206,7 +206,7 @@ class LocalBackend(Backend):
             "desc": card.get("desc", "") or "",
             "pos": card.get("pos", 0),
             "due": card.get("due"),
-            "dueComplete": bool(card.get("dueComplete", False)),
+            "dueComplete": _as_bool(card.get("dueComplete", False)),
             "idLabels": list(label_ids),
             "idMembers": list(card.get("idMembers", [])),
             "checklists": card.get("checklists", []) or [],

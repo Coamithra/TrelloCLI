@@ -204,8 +204,9 @@ for a read-only detail panel (description, due, labels, checklist, comments).
 **Live refresh (local backend):** when serving a `--backend local` board, the page reloads itself
 as the store changes on disk — a Dropbox sync from another machine, or another `--backend local`
 CLI command — via a file-watch (`watchdog`) and a Server-Sent-Events stream. No polling, no manual
-refresh; a drag in progress is never interrupted. The Trello backend has no local files to watch,
-so its board doesn't live-refresh.
+refresh; a reload that lands mid-drag is skipped (the next change re-syncs), so a drag is never
+yanked out from under you. The Trello backend has no local files to watch, so its board doesn't
+live-refresh.
 
 ### Remote access
 

@@ -112,19 +112,19 @@ def create_app() -> FastAPI:
         `--backend local` CLI mutation) so the browser reloads the board. The
         Trello backend has no local files, so its stream is keep-alive only.
         EventSource on the client auto-reconnects if the connection drops."""
-        watching = (
-            live.start_watching(config.get_local_root())
-            if config.get_backend_name() == "local"
-            else False
-        )
+        is_local = config.get_backend_name() == "local"
 
         async def gen() -> AsyncIterator[str]:
+            # Runs until the client disconnects: Starlette cancels the task, which
+            # raises CancelledError at the await below and ends the generator.
             yield ": connected\n\n"
             last = live.get_version()
             idle = 0
             while True:
                 await asyncio.sleep(1.0)
-                if watching:
+                # Re-arm each tick (idempotent): if the store root didn't exist at
+                # connect time, the watcher starts as soon as it appears.
+                if is_local and live.start_watching(config.get_local_root()):
                     cur = live.get_version()
                     if cur != last:
                         last = cur
