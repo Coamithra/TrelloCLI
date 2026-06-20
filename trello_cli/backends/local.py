@@ -16,18 +16,20 @@ the OS username; `card mine` therefore returns every open card.
 
 from __future__ import annotations
 
+import functools
 import getpass
 import hashlib
 import mimetypes
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from .base import Backend
 from .store import (
     POS_STEP,
     LocalStore,
+    StoreLock,
     atomic_write_json,
     new_id,
     now_iso,
@@ -36,6 +38,21 @@ from .store import (
 )
 
 DEFAULT_LISTS = ("To Do", "Doing", "Done")
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _locked(method: _F) -> _F:
+    """Run a mutator under the backend's store lock, so its whole
+    load→modify→save is serialized against other processes and threads — no
+    concurrent writer can clobber it (lost update) or land a colliding `pos`.
+    The lock is re-entrant, so mutators that delegate to other mutators
+    (`archive_card` → `update_card`) just nest harmlessly."""
+    @functools.wraps(method)
+    def wrapper(self: "LocalBackend", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper  # type: ignore[return-value]
 
 
 def _as_bool(value: Any) -> bool:
@@ -48,6 +65,10 @@ def _as_bool(value: Any) -> bool:
 class LocalBackend(Backend):
     def __init__(self, root: str) -> None:
         self.store = LocalStore(root)
+        # One lock per store root serializes every mutator across processes and
+        # threads (see StoreLock). Reads stay lock-free — atomic writes already
+        # give each file a consistent point-in-time view.
+        self._lock = StoreLock(self.store.root / ".lock")
 
     # ── internal helpers ────────────────────────────────────────────
 
@@ -734,3 +755,24 @@ class LocalBackend(Backend):
             shutil.copyfile(src, dest)
             return
         raise SystemExit(f"Cannot download attachment (no local blob or URL): {url}")
+
+
+# Every mutating operation runs under the store lock (see `_locked` / StoreLock):
+# this single list is the authoritative set of writers, wrapped once here rather
+# than scattering a decorator across ~30 methods. Reads are deliberately absent —
+# they stay lock-free (atomic writes already give each file a consistent view).
+# Delegating mutators (e.g. move_card → update_card) nest harmlessly because the
+# lock is re-entrant.
+_MUTATORS = (
+    "create_board", "import_board",
+    "create_list", "update_list", "archive_list", "rename_list",
+    "create_card", "move_card", "archive_card", "unarchive_card", "update_card",
+    "add_comment", "update_comment", "delete_comment",
+    "create_label", "update_label", "delete_label",
+    "add_label_to_card", "remove_label_from_card",
+    "create_checklist", "delete_checklist", "rename_checklist",
+    "add_checkitem", "delete_checkitem", "update_checkitem",
+    "add_attachment_url", "add_attachment_file", "delete_attachment",
+)
+for _name in _MUTATORS:
+    setattr(LocalBackend, _name, _locked(getattr(LocalBackend, _name)))

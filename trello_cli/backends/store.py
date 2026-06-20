@@ -19,6 +19,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -84,6 +87,101 @@ def atomic_write_json(path: Path, obj: Any) -> None:
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
     tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
+
+
+# ── Cross-process store lock ─────────────────────────────────────────
+#
+# Atomic writes stop a reader from seeing a half-written file, but they do
+# nothing for two *writers*: every mutator is a read-modify-write over a whole
+# file, so concurrent CLI processes both load, edit, and save — and the second
+# save silently clobbers the first (a lost update). The fix is to serialize the
+# whole load→modify→save of each mutation behind an advisory lock on a per-store
+# `.lock` file. OS advisory locks are released automatically when the holding
+# process dies, so a crash never strands a stale lock.
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _os_trylock(fh) -> bool:
+        try:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+
+    def _os_unlock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _os_trylock(fh) -> bool:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def _os_unlock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+LOCK_TIMEOUT = 15.0  # seconds to wait for the store lock before giving up
+_LOCK_POLL = 0.05
+
+
+class StoreLock:
+    """A re-entrant, cross-process advisory lock guarding a store root.
+
+    Cross-process exclusion comes from an OS advisory lock on a `.lock` file
+    (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) — the OS drops it if
+    the holder dies, so a crashed process never leaves a stale lock behind.
+    In-process re-entrancy and thread-safety come from a `threading.RLock`, so
+    nested mutators (`archive_card` → `update_card`) and the multi-threaded web
+    server don't self-deadlock on a second handle to the same file. Acquisition
+    blocks, polling until `timeout`, then raises `SystemExit` — bounded
+    "locking and waiting" rather than an unbounded hang.
+
+    One instance per backend, reused across every `with lock:` — the recursion
+    depth and the held file handle live on it.
+    """
+
+    def __init__(self, path: str | os.PathLike, timeout: float = LOCK_TIMEOUT) -> None:
+        self._path = Path(path)
+        self._timeout = timeout
+        self._rlock = threading.RLock()
+        self._fh: Any = None
+        self._depth = 0
+
+    def __enter__(self) -> "StoreLock":
+        self._rlock.acquire()  # same thread re-enters freely; other threads wait
+        if self._depth == 0:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self._path, "a+")
+            deadline = time.monotonic() + self._timeout
+            while not _os_trylock(fh):
+                if time.monotonic() >= deadline:
+                    fh.close()
+                    self._rlock.release()
+                    raise SystemExit(
+                        f"Timed out after {self._timeout:g}s waiting for the store lock "
+                        f"({self._path}). Another process may be stuck holding it."
+                    )
+                time.sleep(_LOCK_POLL)
+            self._fh = fh
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._depth -= 1
+        if self._depth == 0:
+            try:
+                _os_unlock(self._fh)
+            finally:
+                self._fh.close()
+                self._fh = None
+        self._rlock.release()
 
 
 class LocalStore:
