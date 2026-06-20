@@ -758,18 +758,22 @@ class LocalBackend(Backend):
         aroot = self.store.attachments_root(board_id)
         if not aroot.is_dir():
             return 0
-        live = {c["id"] for c in self.store.cards(board_id)}
         freed = 0
         for cdir in sorted(aroot.iterdir()):
             if not cdir.is_dir():
                 continue
-            if cdir.name not in live:  # card was deleted/pruned — whole dir orphaned
+            # Orphan = the card *file* is gone. Keyed on file existence, not a
+            # loaded-cards set, so a present-but-unreadable card (empty/partial
+            # sync, a `{}`/`null` conflict copy) never gets its blobs wiped.
+            if not self.store.card_file(board_id, cdir.name).exists():
                 freed += _dir_size(cdir)
                 orphan_dirs.append(str(cdir))
                 if apply:
                     shutil.rmtree(cdir, ignore_errors=True)
                 continue
-            card = read_json(self.store.card_file(board_id, cdir.name)) or {}
+            card = read_json(self.store.card_file(board_id, cdir.name))
+            if not card:  # file exists but unreadable/empty — don't risk its blobs
+                continue
             referenced = {
                 self._blob_path(a.get("url", "")).name
                 for a in card.get("attachments", [])

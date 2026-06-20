@@ -1401,11 +1401,16 @@ def _resolve_local_board(backend, ref: str) -> str:
     against the *local* store, closed boards included. Mirrors
     `_resolve_board_ref` but targets the file store directly (the `local`
     commands operate on the store regardless of --backend selection)."""
+    # Every board on disk — get_board reads board.json without the closed filter
+    # get_boards applies, so an archived board is still reachable here (you may
+    # well want to `local rm` one).
+    boards = []
     for bid in backend.store.board_ids():
         if bid == ref or short_id(bid) == ref:
             return bid
+        boards.append(backend.get_board(bid))
     lower = ref.lower()
-    matches = [b for b in backend.get_boards() if (b.get("name") or "").lower().startswith(lower)]
+    matches = [b for b in boards if (b.get("name") or "").lower().startswith(lower)]
     if len(matches) == 1:
         return matches[0]["id"]
     if len(matches) > 1:
@@ -1467,6 +1472,8 @@ def _local_gc(args: list[str]) -> None:
     if _is_json():
         print_json(report)
         return
+    if board_id:
+        print(f"(scope: board {short_id(board_id)} — temp cache is global)")
     _print_gc_report(report, apply)
 
 
