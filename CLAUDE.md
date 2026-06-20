@@ -5,7 +5,8 @@ Compact Trello CLI tool — wraps the Trello REST API with concise output format
 ## Management
 
 - Trello board with tasks: 6a353ffc
-- When implementing tickets from Trello, use CONTRIBUTING.md for workflow
+
+> **IMPORTANT - mandatory workflow, not a suggestion.** If your task involves a Trello card from board `6a353ffc` (picking one up, implementing it, or closing it out), you MUST follow [`CONTRIBUTING.md`](CONTRIBUTING.md) end to end BEFORE writing any code. In particular: claim the card with the two-phase handshake FIRST (move to Doing, post the claim comment, wait, earliest comment wins), work in a git worktree branched off `master` (never commit on `master` directly), then go research -> design -> implement -> verify -> PR + self-merge -> move the card to Done. Do not improvise your own workflow or skip the claim handshake. If you have not read CONTRIBUTING.md yet, stop and read it now.
 
 ## Architecture
 
