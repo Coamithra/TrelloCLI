@@ -44,6 +44,10 @@ commands. The CLI keeps no shared session state so concurrent invocations never 
 trello configure <key> <token>     Save API credentials
 trello boards                      List all boards
 trello local init [path]           Set up the local file-backend root
+trello local gc [--apply]          Clean stale local data (orphaned blobs,
+                                   temp cache; --activity-keep <n>, --cache-days
+                                   <n>). Dry run unless --apply
+trello local rm <board> --yes      Delete a local board folder + blobs (no undo)
 trello board                       Show board info (needs --board)
 trello board add <name> [desc]     Create a board (--no-default-lists)
 trello labels                      Show board labels
@@ -161,6 +165,32 @@ references labels by id; the full label is resolved from `labels.json`, so `labe
 reflect everywhere). Uploaded attachment blobs are copied under `attachments/<cardId>/`; URL
 attachments just store the URL. Members are a single local user (your OS username), so `card mine`
 returns every open card across your local boards.
+
+### Cleaning up local data
+
+`attachment rm` deletes its own blob, but a few paths can leave stale files behind — a card pruned by
+re-`export`, a `local rm`'d board, the append-only `activity.log`, or the `attachment view/open`
+temp cache. `trello local gc` sweeps them up:
+
+```bash
+trello local gc                          # dry run — report orphaned blobs + old cache, delete nothing
+trello local gc --apply                  # actually delete them
+trello local gc --board <id> --apply     # scope the store sweep to one board
+trello local gc --activity-keep 500 --apply   # also trim each log to its newest 500 lines
+trello local gc --cache-days 0 --apply         # also clear the whole temp cache (default: older than 7 days)
+```
+
+It removes attachment blob dirs whose card no longer exists and blob files a live card no longer
+references, prunes the temp download cache by age, and — only when you pass `--activity-keep` — trims
+the activity log (it's an audit trail, so retention is opt-in). Everything is a **dry run unless
+`--apply`**, printing exactly what would go.
+
+To remove a whole local board (folder, cards, blobs, log — there's no undo):
+
+```bash
+trello local rm <board>          # dry run — show what would be deleted
+trello local rm <board> --yes    # delete it
+```
 
 ### Pulling a Trello board into files
 

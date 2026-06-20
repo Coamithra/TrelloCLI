@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
@@ -58,6 +59,12 @@ Global:
   boards                        List all boards
   local init [path]             Set up the local file backend root
                                 (default ~/Dropbox/trello-cli)
+  local gc [--apply]            Clean stale local data: orphaned attachment
+                                blobs + temp download cache (--cache-days <n>,
+                                default 7; --activity-keep <n> trims the log).
+                                Dry run unless --apply. Scope with --board
+  local rm <board> --yes        Delete a local board folder + blobs (no undo;
+                                dry run unless --yes)
   board                         Show board info (needs --board)
   board add <name> [desc]       Create a new board (--no-default-lists)
   labels                        Show board labels
@@ -1269,11 +1276,17 @@ def _attachment_add(args: list[str]) -> None:
     print(f"Attached {a.get('name') or source} ({short_id(a['id'])}) to {short_id(card_id)}.")
 
 
+def _temp_cache_dir() -> str:
+    """Shared cache for `attachment view/open/download` with no explicit dest.
+    Regenerable scratch — `local gc` prunes it by age."""
+    return os.path.join(tempfile.gettempdir(), "trello-cli")
+
+
 def _attachment_dest(att: dict, dest: str | None) -> str:
     """Resolve the destination path for download/open of an attachment."""
     filename = att.get("name") or os.path.basename(att.get("url", "")) or att["id"]
     if dest is None:
-        tmp = os.path.join(tempfile.gettempdir(), "trello-cli")
+        tmp = _temp_cache_dir()
         os.makedirs(tmp, exist_ok=True)
         return os.path.join(tmp, f"{short_id(att['id'])}-{filename}")
     if os.path.isdir(dest):
@@ -1370,8 +1383,140 @@ def _local_init(args: list[str]) -> None:
           "   (or set TRELLO_BACKEND=local)")
 
 
+def _opt_int(value: str | bool | None, flag: str) -> int | None:
+    """Parse an optional non-negative int flag value (None if absent)."""
+    if value is None:
+        return None
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise SystemExit(f"{flag} requires an integer, got {value!r}")
+    if n < 0:
+        raise SystemExit(f"{flag} must be >= 0")
+    return n
+
+
+def _resolve_local_board(backend, ref: str) -> str:
+    """Resolve a board ref (full/short id, or case-insensitive name prefix)
+    against the *local* store, closed boards included. Mirrors
+    `_resolve_board_ref` but targets the file store directly (the `local`
+    commands operate on the store regardless of --backend selection)."""
+    for bid in backend.store.board_ids():
+        if bid == ref or short_id(bid) == ref:
+            return bid
+    lower = ref.lower()
+    matches = [b for b in backend.get_boards() if (b.get("name") or "").lower().startswith(lower)]
+    if len(matches) == 1:
+        return matches[0]["id"]
+    if len(matches) > 1:
+        names = ", ".join(m["name"] for m in matches)
+        raise SystemExit(f"Ambiguous board name '{ref}'. Matches: {names}")
+    raise SystemExit(f"Board not found in local store: {ref}")
+
+
+def _prune_temp_cache(days: int, apply: bool) -> dict:
+    """Prune the attachment temp cache of files older than `days` (0 = all).
+    Reports {files, bytes}; deletes only when `apply`."""
+    tmp = _temp_cache_dir()
+    files: list[str] = []
+    freed = 0
+    if not os.path.isdir(tmp):
+        return {"files": files, "bytes": freed}
+    cutoff = time.time() - days * 86400
+    for name in sorted(os.listdir(tmp)):
+        path = os.path.join(tmp, name)
+        if not os.path.isfile(path):
+            continue
+        if days == 0 or os.path.getmtime(path) < cutoff:
+            freed += os.path.getsize(path)
+            files.append(path)
+            if apply:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    return {"files": files, "bytes": freed}
+
+
+def _local_gc(args: list[str]) -> None:
+    positional, flags = _parse_flags(
+        args,
+        bool_flags=("--apply",),
+        value_flags=("--activity-keep", "--cache-days"),
+    )
+    if positional:
+        raise SystemExit(
+            "Usage: trello [--board <board>] local gc "
+            "[--apply] [--activity-keep <n>] [--cache-days <n>]"
+        )
+    apply = bool(flags.get("--apply"))
+    activity_keep = _opt_int(flags.get("--activity-keep"), "--activity-keep")
+    cache_days = _opt_int(flags.get("--cache-days"), "--cache-days")
+    if cache_days is None:
+        cache_days = 7
+
+    from .backends.local import LocalBackend
+
+    backend = LocalBackend(config.get_local_root())
+    override = config.get_board_override()
+    board_id = _resolve_local_board(backend, override) if override else None
+    report = backend.gc(board_id=board_id, apply=apply, activity_keep=activity_keep)
+    cache = _prune_temp_cache(cache_days, apply)
+    report["cache_files"] = len(cache["files"])
+    report["cache_bytes"] = cache["bytes"]
+    if _is_json():
+        print_json(report)
+        return
+    _print_gc_report(report, apply)
+
+
+def _print_gc_report(report: dict, apply: bool) -> None:
+    removed = (len(report["orphan_dirs"]) + len(report["orphan_files"])
+               + report["cache_files"] + report["activity_trimmed"])
+    if not removed:
+        print("Nothing to clean.")
+        return
+    print("Removed:" if apply else "Would remove:")
+    print(f"  {len(report['orphan_dirs'])} orphaned attachment dir(s)")
+    print(f"  {len(report['orphan_files'])} orphaned blob file(s)")
+    print(f"  {report['cache_files']} temp-cache file(s)")
+    if report["activity_trimmed"]:
+        print(f"  {report['activity_trimmed']} activity-log line(s) trimmed")
+    print(f"  {size_str(report['bytes'] + report['cache_bytes']) or '0B'} reclaimed")
+    if not apply:
+        print("\nDry run — re-run with --apply to delete.")
+
+
+def _local_rm(args: list[str]) -> None:
+    positional, flags = _parse_flags(args, bool_flags=("--yes",))
+    if len(positional) != 1:
+        raise SystemExit("Usage: trello local rm <board> --yes")
+
+    from .backends.local import LocalBackend
+
+    backend = LocalBackend(config.get_local_root())
+    board_id = _resolve_local_board(backend, positional[0])
+    apply = bool(flags.get("--yes"))
+    report = backend.delete_board(board_id, apply=apply)
+    if _is_json():
+        print_json(report)
+        return
+    verb = "Deleted" if apply else "Would delete"
+    print(
+        f"{verb} board '{report['name']}' ({short_id(report['id'])}): "
+        f"{report['cards']} card(s), {report['attachments']} attachment(s), "
+        f"{size_str(report['bytes'])}"
+    )
+    if not apply:
+        print("\nNot deleted — re-run with --yes to confirm.")
+
+
 def cmd_local(args: list[str]) -> None:
-    _dispatch("local", {"init": _local_init}, args)
+    _dispatch("local", {
+        "init": _local_init,
+        "gc": _local_gc,
+        "rm": _local_rm,
+    }, args)
 
 
 # ── Export (pull a board into the local file store) ─────────────────

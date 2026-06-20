@@ -45,6 +45,13 @@ def _as_bool(value: Any) -> bool:
     return str(value).strip().lower() == "true"
 
 
+def _dir_size(path: Path) -> int:
+    """Total size in bytes of every file under `path` (0 if it doesn't exist)."""
+    if not path.exists():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
 class LocalBackend(Backend):
     def __init__(self, root: str) -> None:
         self.store = LocalStore(root)
@@ -262,6 +269,11 @@ class LocalBackend(Backend):
             for p in cdir.glob("*.json"):
                 if p.stem not in kept:
                     p.unlink()
+                    # Drop the pruned card's attachment blobs too — otherwise the
+                    # dir lingers as an orphan (also reachable later by `local gc`).
+                    adir = self.store.attachments_dir(bid, p.stem)
+                    if adir.is_dir():
+                        shutil.rmtree(adir, ignore_errors=True)
         self._log(bid, "importBoard",
                   {"board": {"id": bid, "name": board.get("name", "")}})
         return {
@@ -734,3 +746,94 @@ class LocalBackend(Backend):
             shutil.copyfile(src, dest)
             return
         raise SystemExit(f"Cannot download attachment (no local blob or URL): {url}")
+
+    # ── Maintenance (local-only; not on the Backend ABC) ─────────────
+
+    def _gc_board_attachments(self, board_id: str, apply: bool,
+                              orphan_dirs: list[str], orphan_files: list[str]) -> int:
+        """Find (and, if `apply`, delete) orphaned attachment data on one board:
+        whole `attachments/<cardId>/` dirs whose card is gone, plus blob files a
+        live card no longer references. Appends absolute paths to the given lists
+        and returns bytes reclaimed; prunes emptied dirs when `apply`."""
+        aroot = self.store.attachments_root(board_id)
+        if not aroot.is_dir():
+            return 0
+        live = {c["id"] for c in self.store.cards(board_id)}
+        freed = 0
+        for cdir in sorted(aroot.iterdir()):
+            if not cdir.is_dir():
+                continue
+            if cdir.name not in live:  # card was deleted/pruned — whole dir orphaned
+                freed += _dir_size(cdir)
+                orphan_dirs.append(str(cdir))
+                if apply:
+                    shutil.rmtree(cdir, ignore_errors=True)
+                continue
+            card = read_json(self.store.card_file(board_id, cdir.name)) or {}
+            referenced = {
+                self._blob_path(a.get("url", "")).name
+                for a in card.get("attachments", [])
+                if a.get("isUpload")
+            }
+            for f in sorted(cdir.iterdir()):
+                if f.is_file() and f.name not in referenced:
+                    freed += f.stat().st_size
+                    orphan_files.append(str(f))
+                    if apply:
+                        f.unlink(missing_ok=True)
+            if apply and not any(cdir.iterdir()):
+                cdir.rmdir()
+        if apply and aroot.is_dir() and not any(aroot.iterdir()):
+            aroot.rmdir()
+        return freed
+
+    def gc(self, board_id: str | None = None, apply: bool = False,
+           activity_keep: int | None = None) -> dict:
+        """Sweep stale data from the store; report what is (or would be) removed,
+        deleting only when `apply`. Cleans orphaned attachment blob dirs (no
+        owning card), orphaned blob files (not referenced by a live card's
+        attachment metadata), and resulting empty dirs; trims each board's
+        activity.log to its newest `activity_keep` lines when that is given.
+        Scoped to `board_id` if set, else every board. Local-only."""
+        if board_id is not None:
+            self._load_board(board_id)  # 404 if missing
+            boards = [board_id]
+        else:
+            boards = self.store.board_ids()
+        orphan_dirs: list[str] = []
+        orphan_files: list[str] = []
+        freed = 0
+        activity_trimmed = 0
+        for bid in boards:
+            freed += self._gc_board_attachments(bid, apply, orphan_dirs, orphan_files)
+            if activity_keep is not None:
+                drop = max(0, self.store.activity_line_count(bid) - activity_keep)
+                activity_trimmed += drop
+                if apply and drop:
+                    self.store.tail_activity(bid, activity_keep)
+        return {
+            "orphan_dirs": orphan_dirs,
+            "orphan_files": orphan_files,
+            "bytes": freed,
+            "activity_trimmed": activity_trimmed,
+            "applied": apply,
+        }
+
+    def delete_board(self, board_id: str, apply: bool = False) -> dict:
+        """Delete a whole board's folder — board.json, lists, labels, every card,
+        attachment blobs, and activity.log. Reports the board + counts; removes
+        the folder only when `apply`. Local-only (Trello has no board delete)."""
+        board = self._load_board(board_id)  # 404 if missing
+        bdir = self.store.board_dir(board_id)
+        cards = self.store.cards(board_id)
+        report = {
+            "id": board_id,
+            "name": board.get("name", ""),
+            "cards": len(cards),
+            "attachments": sum(len(c.get("attachments", [])) for c in cards),
+            "bytes": _dir_size(bdir),
+            "applied": apply,
+        }
+        if apply:
+            shutil.rmtree(bdir, ignore_errors=True)
+        return report
