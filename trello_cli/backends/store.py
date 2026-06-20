@@ -25,6 +25,15 @@ from typing import Any
 
 POS_STEP = 65536.0  # Trello's default spacing between adjacent positions
 
+# Rebalance a list once any two adjacent positions get this close. Float `pos`
+# has finite precision: dropping a card into the same gap halves it each time,
+# and after ~50 halvings two adjacent positions collapse to the *same* float,
+# making order undefined. MIN_GAP is enormous next to that floor (~2^35 ULPs of
+# headroom near the working range), so we respread long before a true collapse —
+# which also means a requested midpoint is always strictly between its
+# neighbours, never equal to one, keeping insertion order unambiguous.
+MIN_GAP = 1.0
+
 
 def new_id() -> str:
     """A fresh 24-char hex id — matches Trello's id length, so `short_id` and the
@@ -65,6 +74,20 @@ def resolve_pos(existing: list[float], pos: Any) -> float:
         # Unknown keyword: append at the bottom rather than raise — keeps a
         # mutation from hard-failing on a stray value.
         return max(existing) + POS_STEP if existing else POS_STEP
+
+
+def needs_rebalance(positions: list[float]) -> bool:
+    """True if any two adjacent positions (once sorted) are closer than MIN_GAP,
+    i.e. the gap math is approaching the float-collapse floor and the list should
+    be respread to even spacing. False for an empty or single-element list."""
+    s = sorted(positions)
+    return any(b - a < MIN_GAP for a, b in zip(s, s[1:]))
+
+
+def even_positions(n: int) -> list[float]:
+    """`n` evenly-spaced positions (POS_STEP, 2*POS_STEP, ...) — the target layout
+    a rebalance assigns, in the caller's already-sorted order."""
+    return [POS_STEP * (i + 1) for i in range(n)]
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -119,7 +142,7 @@ class LocalStore:
         return self.cards_dir(board_id) / f"{card_id}.json"
 
     def attachments_root(self, board_id: str) -> Path:
-        """The board's attachments parent dir (holds per-card blob subdirs)."""
+        """Folder holding every card's uploaded attachment blobs on a board."""
         return self.board_dir(board_id) / "attachments"
 
     def attachments_dir(self, board_id: str, card_id: str) -> Path:

@@ -53,8 +53,9 @@ trello board add <name> [desc]     Create a board (--no-default-lists)
 trello labels                      Show board labels
 trello members                     Show board members
 trello activity [n]                Show recent activity
-trello export [--to local]         Pull --board into the local file store
-                                   (source backend = --backend, default trello)
+trello export [--to local] [--no-attachments]  Pull --board into the local file
+                                   store (source backend = --backend, default
+                                   trello; uploaded blobs downloaded by default)
 ```
 
 ### Card
@@ -196,19 +197,23 @@ trello local rm <board> --yes    # delete it
 
 `trello --board <board> export` snapshots a board from the selected `--backend` (default Trello)
 into the local file store — lists, cards (description, due, position, labels, closed state),
-comments, checklists, and attachment metadata — under `<local-root>/<boardId>/`. Source ids are
+comments, checklists, and attachments — under `<local-root>/<boardId>/`. Source ids are
 preserved, so re-running `export` is an idempotent refresh (cards deleted upstream are pruned from
 the snapshot). Then browse it offline with `--backend local`, or render it in the web app:
 
 ```bash
-trello --board "My Board" export                 # Trello -> local files
+trello --board "My Board" export                 # Trello -> local files (+ blobs)
+trello --board "My Board" export --no-attachments  # metadata only, skip blob download
 trello --backend local --board "My Board" list ls
 trello --backend local serve                     # drag-drop kanban over the files
 ```
 
-Uploaded-attachment *blobs* aren't downloaded yet — their metadata is exported, but the file keeps
-its auth-required Trello URL; URL attachments export fully. Only open lists are pulled (the API
-exposes open lists only).
+Uploaded-attachment **blobs are downloaded by default** into `<boardId>/attachments/<cardId>/`
+and the stored URL is rewritten root-relative, so the snapshot is usable offline. Pass
+`--no-attachments` to export metadata only (the blob then keeps its auth-required Trello URL).
+Already-downloaded blobs are reused on re-export, and a per-blob download failure is non-fatal —
+it warns and keeps the remote URL. URL attachments are already portable and exported as-is. Only
+open lists are pulled (the API exposes open lists only).
 
 ## Web app
 
@@ -219,13 +224,14 @@ SortableJS). Install the extra and launch:
 ```bash
 pip install -e ".[web]"                 # or: pip install "trello-cli[web]"
 trello --backend local serve            # or --backend trello; opens the browser
-trello serve --port 8787 --host 127.0.0.1 --no-browser
+trello serve --port 8787 --host 127.0.0.1 --token <t> --no-browser
 ```
 
 `serve` boots a local server and opens your browser. It binds **127.0.0.1 by default**
-(local-only); a non-loopback `--host` opts into network exposure, but the server has **no
-authentication** — anyone who can reach the port can read and edit the board — so put remote
-access behind a VPN or reverse proxy (`serve` prints a warning when you bind non-loopback). In the UI:
+(local-only, no auth needed). A non-loopback `--host` opts into network exposure and is
+**token-gated**: pass `--token <t>` or let `serve` mint one for you, and that token is then
+required on every API request (the browser is opened on a `?token=…` URL automatically). Even
+so, keep remote access behind a VPN or reverse proxy. In the UI:
 pick a board from the dropdown, drag cards within/between columns and drag columns to
 reorder (both write straight through the backend, using the same float-`pos` midpoint rule
 as `card pos`), add a card from the composer at the bottom of a column, and click a card
@@ -240,17 +246,23 @@ live-refresh.
 
 ### Remote access
 
-`serve` binds `127.0.0.1` and has **no authentication**, so never expose it on a public interface
-directly. To reach your board from another device, put it behind something that provides identity
-and transport security:
+On loopback `serve` runs with **no authentication** (it's local-only). The moment you bind a
+non-loopback `--host`, the API is **token-gated**: supply `--token <t>` or `serve` auto-generates
+one and prints it. The token must accompany every API request, either as `?token=<t>` (how the
+browser is launched) or an `Authorization: Bearer <t>` header (handy for scripts/automation); the
+static page shell loads without it but shows nothing until an API call succeeds. A bad or missing
+token gets a `401`.
+
+The token gates the port, but it is **not** TLS and **not** an identity system — so still front
+remote access with something stronger:
 
 - **Tailscale (recommended):** keep `serve` on `127.0.0.1` and reach it over your private tailnet —
   no port is published to the public internet.
 - **Reverse proxy + auth:** run `serve` on loopback and front it with caddy/nginx terminating TLS
-  and enforcing a token or basic-auth, proxying to `127.0.0.1:8787`.
+  and enforcing auth, proxying to `127.0.0.1:8787`.
 
-Binding a non-loopback `--host` works (and prints a warning) but is only safe *inside* one of the
-above — on its own it publishes a fully read/write board to anyone who can reach the port.
+Binding a non-loopback `--host` is safe-by-default (token required) but is best used *inside* one of
+the above — the token alone publishes a read/write board, in cleartext, to anyone who has it.
 
 ## Updating
 
