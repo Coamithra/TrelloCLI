@@ -56,6 +56,14 @@ def start_watching(root: str) -> bool:
 
     class _Handler(FileSystemEventHandler):
         def on_any_event(self, event: object) -> None:
+            # The store lock file lives inside the watched root, but acquiring it
+            # isn't a data change — the mutator holding it also writes the real
+            # card/list file, which fires its own event. Skip pure `.lock` churn
+            # so it doesn't trigger spurious board reloads. (dest_path first so a
+            # rename *onto* a real file — the atomic-write os.replace — still counts.)
+            path = getattr(event, "dest_path", "") or getattr(event, "src_path", "")
+            if Path(path).name == ".lock":
+                return
             _bump()
 
     obs = Observer()
