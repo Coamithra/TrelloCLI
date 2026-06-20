@@ -1661,6 +1661,7 @@ def _push_attachment(dest, source_root: str, card_id: str, att: dict,
         if is_upload and not is_remote:
             # Local blob (root-relative or absolute path) → upload the file itself.
             if not with_attachments:
+                counts["skipped"] += 1
                 return
             path = url if os.path.isabs(url) else os.path.join(source_root, url)
             if not os.path.isfile(path):
@@ -1681,6 +1682,49 @@ def _push_attachment(dest, source_root: str, card_id: str, att: dict,
         counts["failed"] += 1
 
 
+def _push_card(dest, source_root: str, card: dict, new_list: str,
+               label_map: dict, counts: dict, with_attachments: bool) -> None:
+    """Create one card and its children — dueComplete, comments, checklists+items,
+    attachments — on the new Trello board, then archive it if it was archived.
+    Bumps `counts` in place. Raises on a Trello error so the caller can
+    warn-and-continue rather than aborting the whole push."""
+    new_label_ids = [label_map[i] for i in _card_label_ids(card) if i in label_map]
+    created = dest.create_card(
+        new_list, card.get("name", ""),
+        desc=card.get("desc") or None,
+        due=card.get("due") or None,
+        labels=new_label_ids or None,
+        pos=_pos_str(card.get("pos")),
+    )
+    new_card_id = created["id"]
+    counts["cards"] += 1
+    # Trello rejects dueComplete without a due date; the local store doesn't enforce
+    # that invariant, so only set it when there's actually a due date to complete.
+    if card.get("due") and card.get("dueComplete"):
+        dest.update_card(new_card_id, dueComplete="true")
+    # Comments, oldest first, each prefixed with its original author/date.
+    for cm in sorted(card.get("comments", []), key=lambda x: x.get("date", "")):
+        text = (cm.get("data") or {}).get("text") or ""
+        if not text:
+            continue
+        dest.add_comment(new_card_id, _comment_provenance(cm) + text)
+        counts["comments"] += 1
+    # Checklists and their items, preserving order and completion state.
+    for cl in sorted(card.get("checklists", []), key=lambda x: x.get("pos", 0)):
+        new_cl = dest.create_checklist(new_card_id, cl.get("name", ""))
+        counts["checklists"] += 1
+        for it in sorted(cl.get("checkItems", []), key=lambda x: x.get("pos", 0)):
+            new_item = dest.add_checkitem(new_cl["id"], it.get("name", ""))
+            if it.get("state") == "complete":
+                dest.update_checkitem(new_card_id, new_item["id"], state="complete")
+    for att in card.get("attachments", []):
+        _push_attachment(dest, source_root, new_card_id, att, with_attachments,
+                         counts["attachments"])
+    # Archive last: the card (and its children) must exist before it's closed.
+    if card.get("closed"):
+        dest.archive_card(new_card_id)
+
+
 def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict],
                           labels: list[dict], cards: list[dict], name: str,
                           with_attachments: bool) -> dict:
@@ -1693,6 +1737,11 @@ def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict]
     new_board = dest.create_board(name, desc=board.get("desc") or None,
                                   default_lists=False)
     new_board_id = new_board["id"]
+    # Surface the new board's id/url before the card loop: this is
+    # create-new-each-time, so a mid-push failure (rate-limit, network) can't be
+    # resumed — printing it up front tells the user which half-built board to delete.
+    print(f"  creating Trello board {short_id(new_board_id)} "
+          f"{new_board.get('shortUrl', '')}".rstrip(), file=sys.stderr)
 
     label_map: dict[str, str] = {}
     for lb in labels:
@@ -1718,7 +1767,7 @@ def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict]
     counts = {
         "lists": len(list_map), "labels": len(label_map),
         "cards": 0, "comments": 0, "checklists": 0,
-        "attachments": {"uploaded": 0, "linked": 0, "failed": 0},
+        "attachments": {"uploaded": 0, "linked": 0, "failed": 0, "skipped": 0},
     }
 
     for card in sorted(cards, key=lambda c: c.get("pos", 0)):
@@ -1730,39 +1779,14 @@ def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict]
                   f"({truncate(card.get('name', ''), 40)}) — its list was not exported",
                   file=sys.stderr)
             continue
-        new_label_ids = [label_map[i] for i in _card_label_ids(card) if i in label_map]
-        created = dest.create_card(
-            new_list, card.get("name", ""),
-            desc=card.get("desc") or None,
-            due=card.get("due") or None,
-            labels=new_label_ids or None,
-            pos=_pos_str(card.get("pos")),
-        )
-        new_card_id = created["id"]
-        counts["cards"] += 1
-        if card.get("dueComplete"):
-            dest.update_card(new_card_id, dueComplete="true")
-        # Comments, oldest first, each prefixed with its original author/date.
-        for cm in sorted(card.get("comments", []), key=lambda x: x.get("date", "")):
-            text = (cm.get("data") or {}).get("text") or ""
-            if not text:
-                continue
-            dest.add_comment(new_card_id, _comment_provenance(cm) + text)
-            counts["comments"] += 1
-        # Checklists and their items, preserving order and completion state.
-        for cl in sorted(card.get("checklists", []), key=lambda x: x.get("pos", 0)):
-            new_cl = dest.create_checklist(new_card_id, cl.get("name", ""))
-            counts["checklists"] += 1
-            for it in sorted(cl.get("checkItems", []), key=lambda x: x.get("pos", 0)):
-                new_item = dest.add_checkitem(new_cl["id"], it.get("name", ""))
-                if it.get("state") == "complete":
-                    dest.update_checkitem(new_card_id, new_item["id"], state="complete")
-        for att in card.get("attachments", []):
-            _push_attachment(dest, source_root, new_card_id, att, with_attachments,
-                             counts["attachments"])
-        # Archive last: the card (and its children) must exist before it's closed.
-        if card.get("closed"):
-            dest.archive_card(new_card_id)
+        # Best-effort, like attachments: a single bad card warns and continues
+        # rather than aborting the push and orphaning the rest of the board.
+        try:
+            _push_card(dest, source_root, card, new_list, label_map, counts,
+                       with_attachments)
+        except Exception as e:
+            print(f"  warning: could not push card {short_id(card['id'])} "
+                  f"({truncate(card.get('name', ''), 40)}): {e}", file=sys.stderr)
 
     return {"id": new_board_id, "name": name,
             "shortUrl": new_board.get("shortUrl", ""), **counts}
@@ -1866,12 +1890,14 @@ def _export_to_trello(flags: dict) -> None:
         f"{result['comments']} comments, {result['checklists']} checklists\n"
         f"  {result['shortUrl']}".rstrip()
     )
-    if att["uploaded"] or att["linked"] or att["failed"]:
+    if att["uploaded"] or att["linked"] or att["failed"] or att["skipped"]:
         parts = []
         if att["uploaded"]:
             parts.append(f"{att['uploaded']} uploaded")
         if att["linked"]:
             parts.append(f"{att['linked']} linked")
+        if att["skipped"]:
+            parts.append(f"{att['skipped']} skipped (--no-attachments)")
         if att["failed"]:
             parts.append(f"{att['failed']} failed")
         print(f"  attachments: {', '.join(parts)}")
