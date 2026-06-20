@@ -49,8 +49,9 @@ trello board add <name> [desc]     Create a board (--no-default-lists)
 trello labels                      Show board labels
 trello members                     Show board members
 trello activity [n]                Show recent activity
-trello export [--to local]         Pull --board into the local file store
-                                   (source backend = --backend, default trello)
+trello export [--to local] [--no-attachments]  Pull --board into the local file
+                                   store (source backend = --backend, default
+                                   trello; uploaded blobs downloaded by default)
 ```
 
 ### Card
@@ -166,19 +167,23 @@ returns every open card across your local boards.
 
 `trello --board <board> export` snapshots a board from the selected `--backend` (default Trello)
 into the local file store — lists, cards (description, due, position, labels, closed state),
-comments, checklists, and attachment metadata — under `<local-root>/<boardId>/`. Source ids are
+comments, checklists, and attachments — under `<local-root>/<boardId>/`. Source ids are
 preserved, so re-running `export` is an idempotent refresh (cards deleted upstream are pruned from
 the snapshot). Then browse it offline with `--backend local`, or render it in the web app:
 
 ```bash
-trello --board "My Board" export                 # Trello -> local files
+trello --board "My Board" export                 # Trello -> local files (+ blobs)
+trello --board "My Board" export --no-attachments  # metadata only, skip blob download
 trello --backend local --board "My Board" list ls
 trello --backend local serve                     # drag-drop kanban over the files
 ```
 
-Uploaded-attachment *blobs* aren't downloaded yet — their metadata is exported, but the file keeps
-its auth-required Trello URL; URL attachments export fully. Only open lists are pulled (the API
-exposes open lists only).
+Uploaded-attachment **blobs are downloaded by default** into `<boardId>/attachments/<cardId>/`
+and the stored URL is rewritten root-relative, so the snapshot is usable offline. Pass
+`--no-attachments` to export metadata only (the blob then keeps its auth-required Trello URL).
+Already-downloaded blobs are reused on re-export, and a per-blob download failure is non-fatal —
+it warns and keeps the remote URL. URL attachments are already portable and exported as-is. Only
+open lists are pulled (the API exposes open lists only).
 
 ## Web app
 

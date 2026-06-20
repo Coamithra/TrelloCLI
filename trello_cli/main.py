@@ -134,8 +134,10 @@ Attachment:
 
 Data:
   export [--to local]           Pull the --board board (from --backend, default
-                                trello) into the local file store, preserving ids
-                                (browse it with --backend local, or `serve` it).
+         [--no-attachments]     trello) into the local file store, preserving ids.
+                                Uploaded attachment blobs are downloaded by default
+                                (--no-attachments skips). Browse it with --backend
+                                local, or `serve` it.
 
 Web:
   serve [--port 8787] [--host 127.0.0.1] [--no-browser]
@@ -1377,12 +1379,63 @@ def cmd_local(args: list[str]) -> None:
 # ── Export (pull a board into the local file store) ─────────────────
 
 
+def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
+    """Pull uploaded attachment blobs from the source backend into the target local
+    store so the exported copy is usable offline.
+
+    For every attachment with `isUpload` and an http(s) `url`, the blob is fetched
+    via the *source* backend (`api.download_attachment`, authed — Trello uploads
+    need the OAuth header) into `<root>/<boardId>/attachments/<cardId>/` and its
+    `url` is rewritten root-relative (matching `add_attachment_file`), so the
+    stored card points at the local file. URL attachments (`isUpload` False) are
+    already portable and left untouched. Best-effort: a per-blob failure warns,
+    drops any partial file, and keeps the remote url so metadata still exports.
+    Trello blobs are immutable by id, so an already-downloaded blob is reused
+    (skipped) on re-export. Mutates `cards` in place; returns per-blob counts."""
+    counts = {"downloaded": 0, "skipped": 0, "failed": 0}
+    root = backend.store.root
+    for card in cards:
+        for att in card.get("attachments", []):
+            url = att.get("url")
+            if not att.get("isUpload") or not url:
+                continue
+            if not str(url).lower().startswith(("http://", "https://")):
+                continue  # already a local path (e.g. re-export of a local source)
+            name = os.path.basename(str(att.get("name") or url).strip())
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or att["id"]
+            dest_dir = backend.store.attachments_dir(board_id, card["id"])
+            dest = dest_dir / f"{att['id']}-{name}"
+            rel = dest.relative_to(root).as_posix()
+            if dest.is_file() and dest.stat().st_size > 0:
+                att["url"] = rel
+                counts["skipped"] += 1
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                api.download_attachment(url, str(dest), authed=True)
+                att["url"] = rel
+                counts["downloaded"] += 1
+            except Exception as e:
+                print(f"  warning: could not download attachment {short_id(att['id'])} "
+                      f"({name}): {e} — keeping remote url", file=sys.stderr)
+                try:
+                    if dest.is_file():
+                        dest.unlink()
+                except OSError:
+                    pass
+                counts["failed"] += 1
+    return counts
+
+
 def cmd_export(args: list[str]) -> None:
-    positional, flags = _parse_flags(args, value_flags=("--to",))
+    positional, flags = _parse_flags(
+        args, bool_flags=("--no-attachments",), value_flags=("--to",),
+    )
     if positional:
         raise SystemExit(
-            "Usage: trello --board <board> export [--to local]\n"
-            "  Pulls the board (from --backend, default trello) into the local file store."
+            "Usage: trello --board <board> export [--to local] [--no-attachments]\n"
+            "  Pulls the board (from --backend, default trello) into the local file store.\n"
+            "  Uploaded attachment blobs are downloaded by default; --no-attachments skips them."
         )
     target = str(flags.get("--to") or "local").lower()
     if target != "local":
@@ -1419,7 +1472,14 @@ def cmd_export(args: list[str]) -> None:
 
     from .backends.local import LocalBackend
 
-    result = LocalBackend(config.get_local_root()).import_board(board, lists, labels, cards)
+    backend = LocalBackend(config.get_local_root())
+    # Download blobs before import so import_board persists the rewritten (local) urls.
+    blobs = None if flags.get("--no-attachments") else _export_attachment_blobs(
+        backend, board["id"], cards,
+    )
+    result = backend.import_board(board, lists, labels, cards)
+    if blobs is not None:
+        result["attachments"] = blobs
     if _is_json():
         print_json(result)
         return
@@ -1429,6 +1489,13 @@ def cmd_export(args: list[str]) -> None:
         f"{result['labels']} labels, {result['comments']} comments\n"
         f"Browse it:  trello --backend local --board {short_id(result['id'])} list ls"
     )
+    if blobs and (blobs["downloaded"] or blobs["skipped"] or blobs["failed"]):
+        parts = [f"{blobs['downloaded']} downloaded"]
+        if blobs["skipped"]:
+            parts.append(f"{blobs['skipped']} cached")
+        if blobs["failed"]:
+            parts.append(f"{blobs['failed']} failed (kept remote url)")
+        print(f"  attachment blobs: {', '.join(parts)}")
 
 
 # ── Web server ──────────────────────────────────────────────────────

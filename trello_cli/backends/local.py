@@ -227,8 +227,10 @@ class LocalBackend(Backend):
         24-hex ids), so a re-export overwrites the same board in place and every
         cross-reference (label / comment / checklist id) stays valid. Stale card
         files from a prior export of this board are pruned, so the result is a
-        clean snapshot. Attachment blobs are not downloaded (uploaded attachments
-        keep their source url). Returns counts for the caller to print."""
+        clean snapshot. Cards are written as-is: the `export` command downloads
+        uploaded attachment blobs and rewrites their urls root-relative *before*
+        calling this, so those local urls get persisted here. Returns counts for
+        the caller to print."""
         bid = board["id"]
         atomic_write_json(self.store.board_file(bid), {
             "id": bid,

@@ -165,7 +165,7 @@ renders **both** local and Trello boards for free.
 | **1 - Local core** | File store, boards/lists/cards CRUD + move/pos/archive/rename/desc/due, `local init`, `--backend` | `trello --backend local ...` = working file-backed kanban via existing CLI |
 | **2 - Local parity** | labels, checklists, comments, attachments (blobs), activity/updates from the log, single-user `mine` | Local backend backs *every* CLI command |
 | **3 - Web app** | FastAPI + JSON API + vanilla-JS drag-drop board + `trello serve` (works for both backends) | The browser kanban **(delivered)** |
-| **4 - Niceties** | Live refresh (file-watch -> SSE) when Dropbox syncs a change; `trello export <board> --to local` to pull Trello boards into files | Quality-of-life **(delivered)** — export does metadata-only attachments and `--to local` only; uploaded-blob pull and `--to trello` are follow-ups |
+| **4 - Niceties** | Live refresh (file-watch -> SSE) when Dropbox syncs a change; `trello export <board> --to local` to pull Trello boards into files | Quality-of-life **(delivered)** — export downloads uploaded-attachment blobs by default (`--no-attachments` to skip) and supports `--to local`; `--to trello` reverse import is a follow-up |
 
 The **export/import** bonus (Phase 4) falls out almost for free since both
 backends share the entity shape.
