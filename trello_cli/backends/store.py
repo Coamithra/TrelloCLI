@@ -104,12 +104,18 @@ def read_json(path: Path, default: Any = None) -> Any:
         raise SystemExit(f"Corrupt store file {path}: {e}")
 
 
-def atomic_write_json(path: Path, obj: Any) -> None:
-    """Write `obj` as pretty JSON to `path` atomically (temp + os.replace)."""
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically (temp file in the same dir + os.replace),
+    so a Dropbox-synced folder never observes a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def atomic_write_json(path: Path, obj: Any) -> None:
+    """Write `obj` as pretty JSON to `path` atomically (temp + os.replace)."""
+    atomic_write_text(path, json.dumps(obj, indent=2, ensure_ascii=False))
 
 
 # ── Cross-process store lock ─────────────────────────────────────────
@@ -315,3 +321,27 @@ class LocalStore:
             except json.JSONDecodeError:
                 continue
         return out
+
+    def activity_line_count(self, board_id: str) -> int:
+        """Number of non-blank lines in the activity log (0 if none)."""
+        path = self.activity_file(board_id)
+        if not path.exists():
+            return 0
+        return sum(
+            1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+
+    def tail_activity(self, board_id: str, keep: int) -> int:
+        """Trim the activity log to its newest `keep` non-blank lines (atomic
+        rewrite; `keep=0` clears it). Returns how many lines were dropped."""
+        path = self.activity_file(board_id)
+        if keep < 0 or not path.exists():
+            return 0
+        lines = [
+            line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        if len(lines) <= keep:
+            return 0
+        kept = lines[len(lines) - keep:] if keep else []
+        atomic_write_text(path, "".join(line + "\n" for line in kept))
+        return len(lines) - keep
