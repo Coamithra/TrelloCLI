@@ -174,18 +174,21 @@ function initDragging() {
     onStart: () => { liveDragging = true; },
     onEnd: async (evt) => {
       const col = evt.item;
+      let rebalanced = false;
       try {
         const updated = await patch(`/api/lists/${col.dataset.listId}`, { pos: neighborPos(col) });
         col.dataset.pos = updated.pos;
+        rebalanced = !!updated.rebalanced;
         setStatus('Column moved');
-        // A server-side rebalance respread the *other* columns too, so their DOM
-        // data-pos is now stale; reload the board to refresh every position.
-        if (updated.rebalanced) await loadBoard(picker.value);
       } catch (err) {
         setStatus('Move failed: ' + err.message, true);
       } finally {
         liveDragging = false;
       }
+      // A server-side rebalance respread the *other* columns too, so their DOM
+      // data-pos is now stale; reload to refresh every position. Done after the
+      // finally clears liveDragging so we don't tear down this Sortable mid-onEnd.
+      if (rebalanced) await loadBoard(picker.value);
     },
   });
 
@@ -199,6 +202,7 @@ function initDragging() {
         const item = evt.item;
         const toList = evt.to.dataset.listId;
         if (evt.from !== evt.to) { countFor(evt.from); countFor(evt.to); }
+        let rebalanced = false;
         try {
           const updated = await patch(`/api/cards/${item.dataset.id}`, {
             idList: toList,
@@ -206,15 +210,17 @@ function initDragging() {
           });
           item.dataset.pos = updated.pos;
           item.dataset.list = updated.idList;
+          rebalanced = !!updated.rebalanced;
           setStatus('Card moved');
-          // A server-side rebalance respread the *other* cards too, so their DOM
-          // data-pos is now stale; reload the board to refresh every position.
-          if (updated.rebalanced) await loadBoard(picker.value);
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
         } finally {
           liveDragging = false;
         }
+        // A server-side rebalance respread the *other* cards too, so their DOM
+        // data-pos is now stale; reload to refresh every position. Done after the
+        // finally clears liveDragging so we don't tear down this Sortable mid-onEnd.
+        if (rebalanced) await loadBoard(picker.value);
       },
     }));
   });

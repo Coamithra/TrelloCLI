@@ -390,9 +390,9 @@ class LocalBackend(Backend):
         self._save_lists(board_id, lists)
         self._log(board_id, "updateList", {"list": {"id": list_id, "name": target["name"]}})
         if rebalanced:
-            # Transient signal (set after the save, never persisted): a respread
-            # moved the *other* columns too, so the web client must reload to
-            # refresh their stale data-pos. See plans/web-rebalance-refresh.md.
+            # Transient signal, set after the save so it is never persisted: a
+            # respread moved the *other* columns too, so the web client must
+            # reload to refresh their now-stale data-pos. CLI callers ignore it.
             target = {**target, "rebalanced": True}
         return target
 
@@ -519,10 +519,10 @@ class LocalBackend(Backend):
             _, card = self._load_card(card_id)
         self._log(board_id, "updateCard", {"card": {"id": card_id, "name": card["name"]}})
         if rebalanced:
-            # Transient signal (set after the save, never persisted): the respread
-            # rewrote the *other* cards' pos too, so the web client must reload to
-            # refresh their stale data-pos. See plans/web-rebalance-refresh.md.
-            card["rebalanced"] = True
+            # Transient signal, set after the save so it is never persisted: the
+            # respread rewrote the *other* cards' pos too, so the web client must
+            # reload to refresh their now-stale data-pos. CLI callers ignore it.
+            card = {**card, "rebalanced": True}
         return card
 
     # ── Comments (inline in the card JSON, action-shaped) ────────────

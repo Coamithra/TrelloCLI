@@ -5,6 +5,12 @@ never touch a concrete backend or its transport. Both the Trello REST client
 and the planned local file store return the same Trello-shaped dicts, so all
 formatting and command logic stay backend-agnostic. The method set is exactly
 the operations `main.py` invokes — nothing more. See DESIGN.md.
+
+A backend may add *transient* keys to a returned dict that aren't part of the
+stored shape, as long as consumers treat them as optional. The only one today:
+`local`'s `update_card` / `update_list` set `rebalanced: True` when a `pos`
+update respread the list, so the web client reloads the now-stale siblings;
+it is never persisted, the CLI ignores it, and `trello` never sets it.
 """
 
 from __future__ import annotations
