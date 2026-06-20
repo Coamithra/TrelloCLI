@@ -178,6 +178,9 @@ function initDragging() {
         const updated = await patch(`/api/lists/${col.dataset.listId}`, { pos: neighborPos(col) });
         col.dataset.pos = updated.pos;
         setStatus('Column moved');
+        // A server-side rebalance respread the *other* columns too, so their DOM
+        // data-pos is now stale; reload the board to refresh every position.
+        if (updated.rebalanced) await loadBoard(picker.value);
       } catch (err) {
         setStatus('Move failed: ' + err.message, true);
       } finally {
@@ -204,6 +207,9 @@ function initDragging() {
           item.dataset.pos = updated.pos;
           item.dataset.list = updated.idList;
           setStatus('Card moved');
+          // A server-side rebalance respread the *other* cards too, so their DOM
+          // data-pos is now stale; reload the board to refresh every position.
+          if (updated.rebalanced) await loadBoard(picker.value);
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
         } finally {

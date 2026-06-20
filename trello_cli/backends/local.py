@@ -340,18 +340,20 @@ class LocalBackend(Backend):
         lists.sort(key=lambda l: l.get("pos", 0))
         return lists
 
-    def _rebalance_lists_inplace(self, lists: list[dict]) -> None:
+    def _rebalance_lists_inplace(self, lists: list[dict]) -> bool:
         """Respread open columns to even POS_STEP spacing in place when their
         positions have crept too close — same float-collapse guard as cards (see
-        `needs_rebalance`). Mutates the given dicts; the caller saves once."""
+        `needs_rebalance`). Mutates the given dicts; the caller saves once. Returns
+        True if it respread, so a caller can signal that other columns moved too."""
         open_lists = sorted(
             (l for l in lists if not l.get("closed")),
             key=lambda l: l.get("pos", 0),
         )
         if not needs_rebalance([l["pos"] for l in open_lists]):
-            return
+            return False
         for lst, pos in zip(open_lists, even_positions(len(open_lists))):
             lst["pos"] = pos
+        return True
 
     def create_list(self, board_id: str, name: str, pos: str | None = None) -> dict:
         self._load_board(board_id)
@@ -378,14 +380,20 @@ class LocalBackend(Backend):
         target = next(l for l in lists if l["id"] == list_id)
         if "name" in fields:
             target["name"] = fields["name"]
+        rebalanced = False
         if "pos" in fields:
             existing = [l["pos"] for l in lists if l["id"] != list_id and not l.get("closed")]
             target["pos"] = resolve_pos(existing, fields["pos"])
-            self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
+            rebalanced = self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
         if "closed" in fields:
             target["closed"] = _as_bool(fields["closed"])
         self._save_lists(board_id, lists)
         self._log(board_id, "updateList", {"list": {"id": list_id, "name": target["name"]}})
+        if rebalanced:
+            # Transient signal (set after the save, never persisted): a respread
+            # moved the *other* columns too, so the web client must reload to
+            # refresh their stale data-pos. See plans/web-rebalance-refresh.md.
+            target = {**target, "rebalanced": True}
         return target
 
     def rename_list(self, list_id: str, name: str) -> dict:
@@ -505,10 +513,16 @@ class LocalBackend(Backend):
         self._save_card(board_id, card)
         # A reorder can squeeze the gap below the float-collapse floor; respread
         # the destination list and reload so the returned `pos` is the new one.
-        if pos_touched and not card.get("closed") \
-                and self._rebalance_cards(board_id, card["idList"]):
+        rebalanced = pos_touched and not card.get("closed") \
+            and self._rebalance_cards(board_id, card["idList"])
+        if rebalanced:
             _, card = self._load_card(card_id)
         self._log(board_id, "updateCard", {"card": {"id": card_id, "name": card["name"]}})
+        if rebalanced:
+            # Transient signal (set after the save, never persisted): the respread
+            # rewrote the *other* cards' pos too, so the web client must reload to
+            # refresh their stale data-pos. See plans/web-rebalance-refresh.md.
+            card["rebalanced"] = True
         return card
 
     # ── Comments (inline in the card JSON, action-shaped) ────────────
