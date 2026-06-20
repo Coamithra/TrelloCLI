@@ -49,6 +49,8 @@ trello board add <name> [desc]     Create a board (--no-default-lists)
 trello labels                      Show board labels
 trello members                     Show board members
 trello activity [n]                Show recent activity
+trello export [--to local]         Pull --board into the local file store
+                                   (source backend = --backend, default trello)
 ```
 
 ### Card
@@ -160,6 +162,24 @@ reflect everywhere). Uploaded attachment blobs are copied under `attachments/<ca
 attachments just store the URL. Members are a single local user (your OS username), so `card mine`
 returns every open card across your local boards.
 
+### Pulling a Trello board into files
+
+`trello --board <board> export` snapshots a board from the selected `--backend` (default Trello)
+into the local file store — lists, cards (description, due, position, labels, closed state),
+comments, checklists, and attachment metadata — under `<local-root>/<boardId>/`. Source ids are
+preserved, so re-running `export` is an idempotent refresh (cards deleted upstream are pruned from
+the snapshot). Then browse it offline with `--backend local`, or render it in the web app:
+
+```bash
+trello --board "My Board" export                 # Trello -> local files
+trello --backend local --board "My Board" list ls
+trello --backend local serve                     # drag-drop kanban over the files
+```
+
+Uploaded-attachment *blobs* aren't downloaded yet — their metadata is exported, but the file keeps
+its auth-required Trello URL; URL attachments export fully. Only open lists are pulled (the API
+exposes open lists only).
+
 ## Web app
 
 An optional local **web UI** — a drag-drop kanban that renders whichever backend you
@@ -180,6 +200,27 @@ pick a board from the dropdown, drag cards within/between columns and drag colum
 reorder (both write straight through the backend, using the same float-`pos` midpoint rule
 as `card pos`), add a card from the composer at the bottom of a column, and click a card
 for a read-only detail panel (description, due, labels, checklist, comments).
+
+**Live refresh (local backend):** when serving a `--backend local` board, the page reloads itself
+as the store changes on disk — a Dropbox sync from another machine, or another `--backend local`
+CLI command — via a file-watch (`watchdog`) and a Server-Sent-Events stream. No polling, no manual
+refresh; a reload that lands mid-drag is skipped (the next change re-syncs), so a drag is never
+yanked out from under you. The Trello backend has no local files to watch, so its board doesn't
+live-refresh.
+
+### Remote access
+
+`serve` binds `127.0.0.1` and has **no authentication**, so never expose it on a public interface
+directly. To reach your board from another device, put it behind something that provides identity
+and transport security:
+
+- **Tailscale (recommended):** keep `serve` on `127.0.0.1` and reach it over your private tailnet —
+  no port is published to the public internet.
+- **Reverse proxy + auth:** run `serve` on loopback and front it with caddy/nginx terminating TLS
+  and enforcing a token or basic-auth, proxying to `127.0.0.1:8787`.
+
+Binding a non-loopback `--host` works (and prints a warning) but is only safe *inside* one of the
+above — on its own it publishes a fully read/write board to anyone who can reach the port.
 
 ## Updating
 

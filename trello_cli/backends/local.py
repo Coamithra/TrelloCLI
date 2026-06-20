@@ -186,6 +186,93 @@ class LocalBackend(Backend):
         self._log(bid, "createBoard", {"board": {"id": bid, "name": name}})
         return {"id": bid, "name": name, "shortUrl": "", "desc": desc or ""}
 
+    # ── Import (local-only; target of `trello export`) ───────────────
+
+    def _to_store_card(self, board_id: str, card: dict) -> dict:
+        """Map a source backend's Trello-shaped card to the on-disk store shape.
+
+        Full `labels` collapse to `idLabels` (resolved back from labels.json on
+        read); comments / checklists / attachments stay inline. Mirrors the field
+        set `_new_card` writes so every read path (`_enrich_card`, commands) finds
+        what it expects rather than `KeyError`-ing on a missing key."""
+        label_ids = card.get("idLabels")
+        if label_ids is None:
+            label_ids = [lb["id"] for lb in card.get("labels", []) if lb.get("id")]
+        return {
+            "id": card["id"],
+            "idBoard": board_id,
+            "idList": card.get("idList", ""),
+            "name": card.get("name", ""),
+            "desc": card.get("desc", "") or "",
+            "pos": card.get("pos", 0),
+            "due": card.get("due"),
+            "dueComplete": _as_bool(card.get("dueComplete", False)),
+            "idLabels": list(label_ids),
+            "idMembers": list(card.get("idMembers", [])),
+            "checklists": card.get("checklists", []) or [],
+            "attachments": card.get("attachments", []) or [],
+            "comments": card.get("comments", []) or [],
+            "closed": _as_bool(card.get("closed", False)),
+            "shortUrl": card.get("shortUrl", ""),
+            "shortLink": card.get("shortLink", ""),
+            "dateLastActivity": card.get("dateLastActivity") or now_iso(),
+        }
+
+    def import_board(self, board: dict, lists: list[dict], labels: list[dict],
+                     cards: list[dict]) -> dict:
+        """Write a board pulled from another backend into the local store.
+
+        Local-only — not part of the `Backend` ABC; the `export` command targets
+        the file store explicitly. Source ids are preserved (both backends use
+        24-hex ids), so a re-export overwrites the same board in place and every
+        cross-reference (label / comment / checklist id) stays valid. Stale card
+        files from a prior export of this board are pruned, so the result is a
+        clean snapshot. Attachment blobs are not downloaded (uploaded attachments
+        keep their source url). Returns counts for the caller to print."""
+        bid = board["id"]
+        atomic_write_json(self.store.board_file(bid), {
+            "id": bid,
+            "name": board.get("name", ""),
+            "desc": board.get("desc", "") or "",
+            "closed": _as_bool(board.get("closed", False)),
+            "shortUrl": board.get("shortUrl", ""),
+        })
+        self._save_lists(bid, [
+            {
+                "id": l["id"],
+                "name": l.get("name", ""),
+                "pos": l.get("pos", 0),
+                "closed": _as_bool(l.get("closed", False)),
+            }
+            for l in lists
+        ])
+        self._save_labels(bid, [
+            {"id": lb["id"], "name": lb.get("name", ""), "color": lb.get("color", "")}
+            for lb in labels
+        ])
+        kept: set[str] = set()
+        n_comments = 0
+        for card in cards:
+            stored = self._to_store_card(bid, card)
+            kept.add(stored["id"])
+            n_comments += len(stored["comments"])
+            self._save_card(bid, stored)
+        cdir = self.store.cards_dir(bid)
+        if cdir.exists():
+            for p in cdir.glob("*.json"):
+                if p.stem not in kept:
+                    p.unlink()
+        self._log(bid, "importBoard",
+                  {"board": {"id": bid, "name": board.get("name", "")}})
+        return {
+            "id": bid,
+            "name": board.get("name", ""),
+            "lists": len(lists),
+            "labels": len(labels),
+            "cards": len(cards),
+            "comments": n_comments,
+        }
+
     # ── Lists ────────────────────────────────────────────────────────
 
     def get_lists(self, board_id: str) -> list[dict]:

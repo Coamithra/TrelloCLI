@@ -8,6 +8,7 @@ const overlayEl = document.getElementById('overlay');
 
 let cardSortables = [];
 let boardSortable = null;
+let liveDragging = false;  // true mid-drag, so a live refresh won't yank a card
 
 function setStatus(msg, isError) {
   statusEl.textContent = msg || '';
@@ -159,6 +160,7 @@ function initDragging() {
     draggable: '.column',
     handle: '.column-header',
     animation: 150,
+    onStart: () => { liveDragging = true; },
     onEnd: async (evt) => {
       const col = evt.item;
       try {
@@ -167,6 +169,8 @@ function initDragging() {
         setStatus('Column moved');
       } catch (err) {
         setStatus('Move failed: ' + err.message, true);
+      } finally {
+        liveDragging = false;
       }
     },
   });
@@ -176,6 +180,7 @@ function initDragging() {
     cardSortables.push(Sortable.create(wrap, {
       group: 'cards',
       animation: 150,
+      onStart: () => { liveDragging = true; },
       onEnd: async (evt) => {
         const item = evt.item;
         const toList = evt.to.dataset.listId;
@@ -190,6 +195,8 @@ function initDragging() {
           setStatus('Card moved');
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
+        } finally {
+          liveDragging = false;
         }
       },
     }));
@@ -314,6 +321,20 @@ async function openDetail(cardId) {
 overlayEl.addEventListener('click', closeDetail);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetail(); });
 
+// ── live refresh ───────────────────────────────────────────────────
+
+// Reload the current board when the server signals a store change (a Dropbox
+// sync, or another `--backend local` CLI mutation). EventSource auto-reconnects
+// if the stream drops; skip the reload mid-drag so a card isn't yanked away.
+function initLive() {
+  if (typeof EventSource === 'undefined') return;
+  const es = new EventSource('/api/events');
+  es.addEventListener('change', () => {
+    if (liveDragging || !picker.value) return;
+    loadBoard(picker.value);
+  });
+}
+
 // ── boot ───────────────────────────────────────────────────────────
 
 async function init() {
@@ -332,6 +353,7 @@ async function init() {
     });
     picker.addEventListener('change', () => loadBoard(picker.value));
     loadBoard(boards[0].id);
+    initLive();
   } catch (err) {
     setStatus('Could not load boards: ' + err.message, true);
   }
