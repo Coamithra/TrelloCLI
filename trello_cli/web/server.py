@@ -11,13 +11,14 @@ module requires them. See DESIGN.md.
 from __future__ import annotations
 
 import asyncio
+import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, config
@@ -33,6 +34,16 @@ _LIST_PATCH_FIELDS = {"pos"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
+
+
+def _request_token(request: Request) -> str | None:
+    """The token a request presents, via `Authorization: Bearer <t>` (clean for
+    CLI/automation) or a `?token=<t>` query param (the only channel a browser's
+    initial navigation and EventSource can use, since neither can set headers)."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip()
+    return request.query_params.get("token")
 
 
 def _guard(fields: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
@@ -65,8 +76,29 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
 
 
-def create_app() -> FastAPI:
+def create_app(token: str | None = None) -> FastAPI:
     app = FastAPI(title="TrelloCLI Web", docs_url=None, redoc_url=None)
+
+    if token:
+        @app.middleware("http")
+        async def require_token(request: Request, call_next: Any) -> Any:
+            # Gate the data plane (`/api/*`, incl. the SSE stream) only — the
+            # static shell (index.html/app.js/style.css) carries no board data,
+            # so leaving it public lets the browser load app.js without a token,
+            # which then supplies the token on every API call.
+            if request.url.path.startswith("/api"):
+                supplied = _request_token(request)
+                # Compare as bytes: secrets.compare_digest rejects non-ASCII str
+                # with a TypeError, which a hostile `?token=` could otherwise turn
+                # into a 500 instead of a clean 401.
+                if not supplied or not secrets.compare_digest(
+                    supplied.encode(), token.encode()
+                ):
+                    return JSONResponse(
+                        {"detail": "Unauthorized: missing or invalid token."},
+                        status_code=401,
+                    )
+            return await call_next(request)
 
     # ── JSON API (1:1 with the api facade / Backend ABC) ─────────────
 
@@ -152,27 +184,37 @@ def create_app() -> FastAPI:
     return app
 
 
-def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
+          token: str | None = None) -> None:
     """Boot the web server (blocking).
 
     Single-process — no uvicorn reload/workers — so the in-process `--backend`
     selection (a module global set by `main()`) stays valid for every request.
     Opens the browser shortly after start unless disabled. Binds 127.0.0.1 by
-    default; a non-loopback host exposes the read/write API with no auth, so it
-    warns loudly (put remote access behind a VPN / reverse proxy)."""
+    default. A non-loopback bind exposes the read/write API to the network, so it
+    is token-gated: if no `token` is given for such a bind one is auto-generated,
+    and the token is required (Bearer header or `?token=`) on every API request.
+    Loopback stays token-free unless a token is passed explicitly."""
     import threading
     import webbrowser
 
     import uvicorn
 
-    app = create_app()
+    is_loopback = host in _LOOPBACK_HOSTS
+    if not is_loopback and not token:
+        token = secrets.token_urlsafe(16)
+
+    app = create_app(token=token)
     browse_host = "127.0.0.1" if host in _WILDCARD_HOSTS else host
     browse_url = f"http://{browse_host}:{port}/"
-    if host not in _LOOPBACK_HOSTS:
+    if token:
+        browse_url += f"?token={token}"
+    if not is_loopback:
         print(
-            f"WARNING: binding {host!r} exposes this board on the network with NO "
-            "authentication — anyone who can reach the port can read and edit it. "
-            "Prefer 127.0.0.1 and reach it remotely via a VPN / reverse proxy."
+            f"Binding {host!r} exposes this board on the network — access is "
+            "token-gated; the token below is required on every API request "
+            "(put remote access behind a VPN / reverse proxy too). Token: "
+            f"{token}"
         )
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(browse_url)).start()

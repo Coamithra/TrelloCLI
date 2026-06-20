@@ -29,6 +29,8 @@ from .store import (
     POS_STEP,
     LocalStore,
     atomic_write_json,
+    even_positions,
+    needs_rebalance,
     new_id,
     now_iso,
     read_json,
@@ -95,6 +97,25 @@ class LocalBackend(Backend):
             c["pos"] for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed") and c["id"] != exclude
         ]
+
+    def _rebalance_cards(self, board_id: str, list_id: str) -> bool:
+        """Respread the open cards of a list to even POS_STEP spacing when their
+        positions have crept too close (see `needs_rebalance`). Preserves current
+        order and rewrites only the cards whose `pos` actually changed, so a
+        Dropbox-synced folder sees the minimum churn. Returns True if it
+        rebalanced (so a caller holding a stale card dict knows to reload)."""
+        open_cards = sorted(
+            (c for c in self.store.cards(board_id)
+             if c.get("idList") == list_id and not c.get("closed")),
+            key=lambda c: c.get("pos", 0),
+        )
+        if not needs_rebalance([c["pos"] for c in open_cards]):
+            return False
+        for card, pos in zip(open_cards, even_positions(len(open_cards))):
+            if card["pos"] != pos:
+                card["pos"] = pos
+                self._save_card(board_id, card)
+        return True
 
     def _log(self, board_id: str, action_type: str, data: dict) -> None:
         user = self._local_user()
@@ -290,6 +311,19 @@ class LocalBackend(Backend):
         lists.sort(key=lambda l: l.get("pos", 0))
         return lists
 
+    def _rebalance_lists_inplace(self, lists: list[dict]) -> None:
+        """Respread open columns to even POS_STEP spacing in place when their
+        positions have crept too close — same float-collapse guard as cards (see
+        `needs_rebalance`). Mutates the given dicts; the caller saves once."""
+        open_lists = sorted(
+            (l for l in lists if not l.get("closed")),
+            key=lambda l: l.get("pos", 0),
+        )
+        if not needs_rebalance([l["pos"] for l in open_lists]):
+            return
+        for lst, pos in zip(open_lists, even_positions(len(open_lists))):
+            lst["pos"] = pos
+
     def create_list(self, board_id: str, name: str, pos: str | None = None) -> dict:
         self._load_board(board_id)
         lists = self._load_lists(board_id)
@@ -301,6 +335,7 @@ class LocalBackend(Backend):
             "closed": False,
         }
         lists.append(new)
+        self._rebalance_lists_inplace(lists)
         self._save_lists(board_id, lists)
         self._log(board_id, "createList", {"list": {"id": new["id"], "name": name}})
         return new
@@ -317,6 +352,7 @@ class LocalBackend(Backend):
         if "pos" in fields:
             existing = [l["pos"] for l in lists if l["id"] != list_id and not l.get("closed")]
             target["pos"] = resolve_pos(existing, fields["pos"])
+            self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
         if "closed" in fields:
             target["closed"] = _as_bool(fields["closed"])
         self._save_lists(board_id, lists)
@@ -400,6 +436,8 @@ class LocalBackend(Backend):
         board_id, _ = self._locate_list(list_id)
         card = self._new_card(board_id, list_id, name, desc, due, pos, labels)
         self._save_card(board_id, card)
+        if self._rebalance_cards(board_id, list_id):
+            _, card = self._load_card(card["id"])
         self._log(board_id, "createCard",
                   {"card": {"id": card["id"], "name": name}, "list": {"id": list_id}})
         return self._enrich_card(board_id, card)
@@ -421,18 +459,26 @@ class LocalBackend(Backend):
             card["desc"] = fields["desc"] or ""
         if "due" in fields:
             card["due"] = fields["due"] or None  # "" clears the due date
+        pos_touched = False
         if "idList" in fields:
             card["idList"] = fields["idList"]
             # Land at the bottom of the destination list; reorder with `card pos`.
             existing = self._list_positions(board_id, card["idList"], exclude=card_id)
             card["pos"] = resolve_pos(existing, "bottom")
+            pos_touched = True
         if "pos" in fields:
             existing = self._list_positions(board_id, card["idList"], exclude=card_id)
             card["pos"] = resolve_pos(existing, fields["pos"])
+            pos_touched = True
         if "closed" in fields:
             card["closed"] = _as_bool(fields["closed"])
         card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        # A reorder can squeeze the gap below the float-collapse floor; respread
+        # the destination list and reload so the returned `pos` is the new one.
+        if pos_touched and not card.get("closed") \
+                and self._rebalance_cards(board_id, card["idList"]):
+            _, card = self._load_card(card_id)
         self._log(board_id, "updateCard", {"card": {"id": card_id, "name": card["name"]}})
         return card
 

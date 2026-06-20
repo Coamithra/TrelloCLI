@@ -1514,11 +1514,13 @@ def cmd_export(args: list[str]) -> None:
 
 def cmd_serve(args: list[str]) -> None:
     positional, flags = _parse_flags(
-        args, bool_flags=("--no-browser",), value_flags=("--port", "--host"),
+        args, bool_flags=("--no-browser",),
+        value_flags=("--port", "--host", "--token"),
     )
     if positional:
         raise SystemExit(
-            "Usage: trello serve [--port <n>] [--host <addr>] [--no-browser]"
+            "Usage: trello serve [--port <n>] [--host <addr>] [--token <t>] "
+            "[--no-browser]"
         )
     try:
         from .web.server import serve
@@ -1533,7 +1535,10 @@ def cmd_serve(args: list[str]) -> None:
     except (TypeError, ValueError):
         raise SystemExit(f"Invalid --port: {port_raw!r}")
     host = flags.get("--host") or "127.0.0.1"
-    serve(host=str(host), port=port, open_browser=not flags.get("--no-browser"))
+    token_raw = flags.get("--token")
+    token = str(token_raw) if token_raw else None
+    serve(host=str(host), port=port, token=token,
+          open_browser=not flags.get("--no-browser"))
 
 
 # ── Command dispatch ────────────────────────────────────────────────
