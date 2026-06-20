@@ -101,7 +101,8 @@ rewrites only that card's file, so conflict scope stays tiny and isolated.
 - **Comments & checklists live inline** in the card JSON (matches Trello's
   `get_card(checklists=all)` shape; everything for a card in one file).
 - **Atomic writes** (temp file + `os.replace`) so Dropbox never syncs a
-  half-written file.
+  half-written file. Atomicity stops *torn reads*, not *lost writes* — for that
+  see the store lock below.
 - **Activity log**: every mutating op appends a JSONL line -> gives
   `activity` / `updates` a real local equivalent, plus a free audit trail
   (diff-friendly if the folder is also a git repo).
@@ -111,9 +112,22 @@ rewrites only that card's file, so conflict scope stays tiny and isolated.
   user (default = OS username); `mine` returns cards tagged to it. This is where
   "parity with the CLI, not Trello" lets us stub lightly.
 
-Conflict model: last-write-wins with per-card granularity. Genuine simultaneous
-two-machine edits produce a Dropbox "conflicted copy" the user resolves manually.
-Documented limitation — not a real-time collab tool.
+Concurrency (same machine): the CLI is run by many agents at once, so every
+mutator — a read-modify-write over a whole file — is serialized behind a
+**store lock** (`StoreLock` in `store.py`). It's a cross-process OS advisory lock
+on `<root>/.lock` (`fcntl.flock` / `msvcrt.locking`, auto-released if the holder
+dies) plus an in-process re-entrant `threading.RLock`, acquired around the whole
+load→modify→save with a bounded blocking wait. Without it, concurrent writers lose
+updates (the second save clobbers the first) and concurrent inserts compute
+colliding `pos` values — and on Windows the racing `os.replace` calls outright
+crash with `PermissionError`. A file lock (not a DB) keeps the human-readable,
+Dropbox-friendly per-file layout intact. Reads stay lock-free — atomic writes
+already give each file a consistent point-in-time view.
+
+Conflict model (cross machine): last-write-wins with per-card granularity. OS
+locks don't cross machines, so genuine simultaneous two-machine edits still
+produce a Dropbox "conflicted copy" the user resolves manually — a documented
+limitation; this is not a real-time collab tool.
 
 ---
 
