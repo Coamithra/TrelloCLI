@@ -132,11 +132,17 @@ Attachment:
   attachment download <card_id> <attachment> [dest]  Save an attachment to disk
   attachment rm <card_id> <attachment>          Remove an attachment
 
+Data:
+  export [--to local]           Pull the --board board (from --backend, default
+                                trello) into the local file store, preserving ids
+                                (browse it with --backend local, or `serve` it).
+
 Web:
   serve [--port 8787] [--host 127.0.0.1] [--no-browser]
                                 Launch the drag-drop kanban web app for the
                                 selected backend (pip install trello-cli[web]).
-                                Binds 127.0.0.1 by default (local only).
+                                Binds 127.0.0.1 by default (local only). Live-
+                                refreshes a local board as its files change.
 """
 
 
@@ -1368,6 +1374,54 @@ def cmd_local(args: list[str]) -> None:
     _dispatch("local", {"init": _local_init}, args)
 
 
+# ── Export (pull a board into the local file store) ─────────────────
+
+
+def cmd_export(args: list[str]) -> None:
+    positional, flags = _parse_flags(args, value_flags=("--to",))
+    if positional:
+        raise SystemExit(
+            "Usage: trello --board <board> export [--to local]\n"
+            "  Pulls the board (from --backend, default trello) into the local file store."
+        )
+    target = str(flags.get("--to") or "local").lower()
+    if target != "local":
+        raise SystemExit(
+            f"Unsupported export target: {target!r}. Only '--to local' is supported "
+            "(export pulls a board into the local file store)."
+        )
+    board_id = _require_board()
+    board = api.get_board(board_id)
+    lists = api.get_lists(board_id)
+    labels = api.get_labels(board_id)
+
+    # Every card, visible + closed. The filtered listings drop the closed flag, so
+    # stamp it. board-cards carries `pos`; per-card get_card adds desc / checklists
+    # / attachments; get_comments adds the comment thread.
+    summaries: list[dict] = []
+    for card_filter, closed in (("visible", False), ("closed", True)):
+        for c in api.get_board_cards(board_id, card_filter=card_filter):
+            summaries.append({**c, "closed": closed})
+    cards = []
+    for c in summaries:
+        merged = {**api.get_card(c["id"]), **c}  # board-cards wins (pos, closed)
+        merged["comments"] = api.get_comments(c["id"], limit=1000)
+        cards.append(merged)
+
+    from .backends.local import LocalBackend
+
+    result = LocalBackend(config.get_local_root()).import_board(board, lists, labels, cards)
+    if _is_json():
+        print_json(result)
+        return
+    print(
+        f"Exported '{result['name']}' ({short_id(result['id'])}) to {config.get_local_root()}\n"
+        f"  {result['lists']} lists, {result['cards']} cards, "
+        f"{result['labels']} labels, {result['comments']} comments\n"
+        f"Browse it:  trello --backend local --board {short_id(result['id'])} list ls"
+    )
+
+
 # ── Web server ──────────────────────────────────────────────────────
 
 
@@ -1401,6 +1455,7 @@ COMMANDS = {
     "configure": cmd_configure,
     "boards": cmd_boards,
     "local": cmd_local,
+    "export": cmd_export,
     "serve": cmd_serve,
     "board": cmd_board,
     "labels": cmd_labels,

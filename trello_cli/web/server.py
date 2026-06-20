@@ -10,15 +10,18 @@ module requires them. See DESIGN.md.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import api, config
+from . import live
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -99,6 +102,45 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Card name is required.")
         # The composer only sends a name; new cards land at the bottom.
         return _ok(api.create_card, list_id, name, pos="bottom")
+
+    @app.get("/api/events")
+    async def events() -> StreamingResponse:
+        """Server-Sent Events stream powering live refresh.
+
+        For the local backend, watch the store root and emit `event: change`
+        whenever a file under it changes (a Dropbox sync, or another
+        `--backend local` CLI mutation) so the browser reloads the board. The
+        Trello backend has no local files, so its stream is keep-alive only.
+        EventSource on the client auto-reconnects if the connection drops."""
+        watching = (
+            live.start_watching(config.get_local_root())
+            if config.get_backend_name() == "local"
+            else False
+        )
+
+        async def gen() -> AsyncIterator[str]:
+            yield ": connected\n\n"
+            last = live.get_version()
+            idle = 0
+            while True:
+                await asyncio.sleep(1.0)
+                if watching:
+                    cur = live.get_version()
+                    if cur != last:
+                        last = cur
+                        idle = 0
+                        yield "event: change\ndata: {}\n\n"
+                        continue
+                idle += 1
+                if idle >= 15:  # ~15s keep-alive holds the connection open
+                    idle = 0
+                    yield ": keep-alive\n\n"
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ── Static frontend ──────────────────────────────────────────────
 
