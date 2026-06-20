@@ -234,9 +234,13 @@ class LocalStore:
     def card_file(self, board_id: str, card_id: str) -> Path:
         return self.cards_dir(board_id) / f"{card_id}.json"
 
+    def attachments_root(self, board_id: str) -> Path:
+        """Folder holding every card's uploaded attachment blobs on a board."""
+        return self.board_dir(board_id) / "attachments"
+
     def attachments_dir(self, board_id: str, card_id: str) -> Path:
         """Folder holding a card's uploaded attachment blobs."""
-        return self.board_dir(board_id) / "attachments" / card_id
+        return self.attachments_root(board_id) / card_id
 
     def activity_file(self, board_id: str) -> Path:
         return self.board_dir(board_id) / "activity.log"
