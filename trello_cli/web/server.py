@@ -27,11 +27,13 @@ from . import live
 STATIC_DIR = Path(__file__).parent / "static"
 
 # The board and detail panel let the browser move/reorder cards, rename them,
-# edit the description, and set/clear the due date. The API accepts exactly those
-# fields — nothing that could (un)archive via the raw PATCH endpoint (delete has
-# its own DELETE route). Widen this only alongside a matching UI control.
+# edit the description, and set/clear the due date; the board also archives a
+# column (`closed`) and sets a column's persisted sort (`sort`). The API accepts
+# exactly those fields — nothing that could (un)archive a card via the raw PATCH
+# endpoint (card delete has its own DELETE route). Widen these only alongside a
+# matching UI control.
 _CARD_PATCH_FIELDS = {"idList", "pos", "name", "desc", "due", "dueComplete"}
-_LIST_PATCH_FIELDS = {"pos"}
+_LIST_PATCH_FIELDS = {"pos", "closed", "sort"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
@@ -114,6 +116,15 @@ def create_app(token: str | None = None) -> FastAPI:
             "lists": _ok(api.get_lists, board_id),
             "cards": _ok(api.get_board_cards, board_id),
         }
+
+    @app.post("/api/boards/{board_id}/lists")
+    def add_list(board_id: str, body: dict[str, Any]) -> dict:
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="List name is required.")
+        # New columns land at the bottom (rightmost), matching Trello's
+        # "Add another list" affordance.
+        return _ok(api.create_list, board_id, name, pos="bottom")
 
     @app.get("/api/boards/{board_id}/labels")
     def list_labels(board_id: str) -> list[dict]:
