@@ -51,12 +51,15 @@ function setBoardInUrl(boardId) {
 const STAR_KEY = 'trellno:starredBoards';
 
 function getStarredSet() {
-  try { return new Set(JSON.parse(localStorage.getItem(STAR_KEY)) || []); }
-  catch (e) { return new Set(); }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STAR_KEY));
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch (e) { return new Set(); }
 }
 
 function saveStarred(arr) {
-  try { localStorage.setItem(STAR_KEY, JSON.stringify(arr)); } catch (e) { /* private mode */ }
+  try { localStorage.setItem(STAR_KEY, JSON.stringify(arr)); return true; }
+  catch (e) { return false; }  // private mode / quota — caller surfaces it
 }
 
 // Rebuild the top-bar nav from allBoards + the starred set + currentBoardId.
@@ -76,6 +79,9 @@ function renderNav() {
     btn.addEventListener('click', () => selectBoard(b.id));
     navEl.appendChild(btn);
   });
+  // Hide the landmark entirely when nothing is starred (the common first-run
+  // state) so screen readers don't announce an empty "Starred boards" nav.
+  navEl.classList.toggle('hidden', navEl.children.length === 0);
 
   // Dropdown holds the non-starred boards. A disabled "More boards…"
   // placeholder is the selected value when the current board is starred (so it
@@ -122,7 +128,7 @@ function toggleStarCurrent() {
   const set = getStarredSet();
   if (set.has(currentBoardId)) set.delete(currentBoardId);
   else set.add(currentBoardId);
-  saveStarred([...set]);
+  if (!saveStarred([...set])) setStatus('Could not save stars (storage unavailable)', true);
   renderNav();
 }
 

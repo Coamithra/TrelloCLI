@@ -44,6 +44,7 @@ body { display: flex; flex-direction: column; }
   flex: 0 1 auto;
   overflow: hidden;
 }
+.board-nav.hidden { display: none; }
 .board-nav-btn {
   flex: 0 1 auto;
   min-width: 0;
@@ -92,7 +93,15 @@ body { display: flex; flex-direction: column; }
 }
 #board-picker.hidden { display: none; }
 
-.status { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+.status {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .status.error, .error { color: var(--error); }
 
 /* ── Board ── */
