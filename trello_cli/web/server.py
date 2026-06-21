@@ -26,10 +26,13 @@ from . import live
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# The browser moves/reorders cards and reorders columns; it also archives a
-# column (`closed`) and sets a column's persisted sort (`sort`). The whitelist is
-# the exact set the UI drives — widen it only alongside a matching UI control.
-_CARD_PATCH_FIELDS = {"idList", "pos"}
+# The board and detail panel let the browser move/reorder cards, rename them,
+# edit the description, and set/clear the due date; the board also archives a
+# column (`closed`) and sets a column's persisted sort (`sort`). The API accepts
+# exactly those fields — nothing that could (un)archive a card via the raw PATCH
+# endpoint (card delete has its own DELETE route). Widen these only alongside a
+# matching UI control.
+_CARD_PATCH_FIELDS = {"idList", "pos", "name", "desc", "due", "dueComplete"}
 _LIST_PATCH_FIELDS = {"pos", "closed", "sort"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -77,7 +80,7 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def create_app(token: str | None = None) -> FastAPI:
-    app = FastAPI(title="TrelloCLI Web", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Trellno Web", docs_url=None, redoc_url=None)
 
     if token:
         @app.middleware("http")
@@ -123,6 +126,20 @@ def create_app(token: str | None = None) -> FastAPI:
         # "Add another list" affordance.
         return _ok(api.create_list, board_id, name, pos="bottom")
 
+    @app.get("/api/boards/{board_id}/labels")
+    def list_labels(board_id: str) -> list[dict]:
+        return _ok(api.get_labels, board_id)
+
+    @app.post("/api/boards/{board_id}/labels")
+    def create_label(board_id: str, body: dict[str, Any]) -> dict:
+        name = (body.get("name") or "").strip()
+        color = (body.get("color") or "").strip() or None
+        if not name and not color:
+            raise HTTPException(
+                status_code=400, detail="A label name or color is required."
+            )
+        return _ok(api.create_label, board_id, name, color=color)
+
     @app.get("/api/cards/{card_id}")
     def get_card(card_id: str) -> dict:
         card = _ok(api.get_card, card_id)
@@ -131,6 +148,32 @@ def create_app(token: str | None = None) -> FastAPI:
     @app.patch("/api/cards/{card_id}")
     def patch_card(card_id: str, fields: dict[str, Any]) -> dict:
         return _ok(api.update_card, card_id, **_guard(fields, _CARD_PATCH_FIELDS))
+
+    @app.delete("/api/cards/{card_id}")
+    def delete_card(card_id: str) -> dict:
+        # Soft delete (archive), matching the CLI's `card archive` — the card
+        # drops out of the board's visible cards but stays recoverable.
+        return _ok(api.archive_card, card_id)
+
+    @app.post("/api/cards/{card_id}/comments")
+    def add_comment(card_id: str, body: dict[str, Any]) -> dict:
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Comment text is required.")
+        return _ok(api.add_comment, card_id, text)
+
+    @app.post("/api/cards/{card_id}/labels")
+    def add_card_label(card_id: str, body: dict[str, Any]) -> dict:
+        label_id = (body.get("idLabel") or "").strip()
+        if not label_id:
+            raise HTTPException(status_code=400, detail="idLabel is required.")
+        _ok(api.add_label_to_card, card_id, label_id)
+        return _ok(api.get_card, card_id)
+
+    @app.delete("/api/cards/{card_id}/labels/{label_id}")
+    def remove_card_label(card_id: str, label_id: str) -> dict:
+        _ok(api.remove_label_from_card, card_id, label_id)
+        return _ok(api.get_card, card_id)
 
     @app.patch("/api/lists/{list_id}")
     def patch_list(list_id: str, fields: dict[str, Any]) -> dict:
@@ -189,6 +232,13 @@ def create_app(token: str | None = None) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/favicon.ico")
+    def favicon() -> FileResponse:
+        # index.html links the SVG icon directly, but browsers also probe
+        # /favicon.ico unprompted; serve the same pink board glyph there so it
+        # resolves instead of 404ing.
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
 
@@ -228,7 +278,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(browse_url)).start()
     print(
-        f"TrelloCLI web on {browse_url}  "
+        f"Trellno web on {browse_url}  "
         f"(backend: {config.get_backend_name()})  — Ctrl-C to stop"
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
