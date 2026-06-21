@@ -89,21 +89,7 @@ body { display: flex; flex-direction: column; }
   flex: 0 0 auto;
 }
 
-/* Per-column sort picker + actions menu */
-.column-sort {
-  flex: 0 0 auto;
-  background: var(--card-bg);
-  color: var(--text-dim);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 11px;
-  font-weight: 400;
-  cursor: pointer;
-  max-width: 70px;
-}
-.column-sort:hover { color: var(--text); }
-
+/* Per-column actions menu */
 .column-menu-btn {
   flex: 0 0 auto;
   background: none;
@@ -144,6 +130,16 @@ body { display: flex; flex-direction: column; }
 }
 .column-menu-item:hover { background: rgba(255,255,255,.08); }
 .column-menu-item.danger { color: var(--error); }
+.column-menu-item.active { font-weight: 600; background: rgba(255,255,255,.06); }
+.column-menu-label {
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-dim);
+}
+.column-menu-sep { height: 1px; margin: 4px 4px; background: var(--border); }
 
 /* "Add another list" affordance */
 .add-list {
