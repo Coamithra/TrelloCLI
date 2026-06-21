@@ -267,8 +267,17 @@ required on every API request (the browser is opened on a `?token=…` URL autom
 so, keep remote access behind a VPN or reverse proxy. In the UI:
 pick a board from the dropdown, drag cards within/between columns and drag columns to
 reorder (both write straight through the backend, using the same float-`pos` midpoint rule
-as `card pos`), add a card from the composer at the bottom of a column, and click a card
-for a read-only detail panel (description, due, labels, checklist, comments).
+as `card pos`), add a card from the composer at the bottom of a column, and click a card to
+open an **editable** detail panel: rename the card, edit the description, set labels and a due
+date, manage attachments (see below), and add comments (checklists render read-only).
+
+**Attachments:** the detail panel's **📎 Attach** button opens a popover to either upload a file
+from your computer or paste a URL. Attachments list below with image thumbnails, a name link,
+and size; a `📎 N` badge also shows on the card face. Uploaded files are served back through a
+small token-gated endpoint (a local blob, or a Trello-hosted upload fetched with your token);
+external URL attachments link straight to their source. Remove one with the × on its row. This
+mirrors the CLI's `attachment add <file_or_url>` — anything attached here is visible to
+`attachment ls` and vice-versa.
 
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its

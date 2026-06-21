@@ -11,15 +11,20 @@ module requires them. See DESIGN.md.
 from __future__ import annotations
 
 import asyncio
+import mimetypes
+import os
 import secrets
+import shutil
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from .. import api, config
 from . import live
@@ -173,6 +178,81 @@ def create_app(token: str | None = None) -> FastAPI:
     @app.delete("/api/cards/{card_id}/labels/{label_id}")
     def remove_card_label(card_id: str, label_id: str) -> dict:
         _ok(api.remove_label_from_card, card_id, label_id)
+        return _ok(api.get_card, card_id)
+
+    @app.post("/api/cards/{card_id}/attachments")
+    def add_attachment_url(card_id: str, body: dict[str, Any]) -> dict:
+        url = (body.get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="Attachment url is required.")
+        name = (body.get("name") or "").strip() or None
+        _ok(api.add_attachment_url, card_id, url, name=name)
+        return _ok(api.get_card, card_id)
+
+    @app.post("/api/cards/{card_id}/attachments/file")
+    async def add_attachment_file(
+        card_id: str,
+        file: UploadFile = File(...),
+        name: str | None = Form(None),
+    ) -> dict:
+        # Stream the upload to a temp file under its original basename so the
+        # backend stores the blob with a real filename, then hand the path to the
+        # facade (the local backend copies it into the store; Trello re-uploads
+        # it). The temp dir is always cleaned up.
+        tmp_dir = tempfile.mkdtemp()
+        safe_name = os.path.basename(file.filename or "upload")
+        tmp_path = os.path.join(tmp_dir, safe_name or "upload")
+        try:
+            with open(tmp_path, "wb") as out:
+                shutil.copyfileobj(file.file, out)
+            att_name = (name or "").strip() or file.filename or None
+            _ok(api.add_attachment_file, card_id, tmp_path, name=att_name)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _ok(api.get_card, card_id)
+
+    @app.get("/api/cards/{card_id}/attachments/{attachment_id}/raw")
+    def attachment_raw(card_id: str, attachment_id: str) -> FileResponse:
+        # Serve an uploaded attachment's bytes (a local blob, or a Trello-hosted
+        # upload fetched with the OAuth header). External URL attachments are NOT
+        # proxied — the browser links to them directly — so the server never
+        # fetches an arbitrary URL on a request's behalf. Stream through the
+        # facade into a temp file (uniform across backends), serve it inline so
+        # images/PDFs render in-tab, and delete it once the response is sent.
+        atts = _ok(api.get_attachments, card_id)
+        att = next((a for a in atts if a.get("id") == attachment_id), None)
+        if att is None:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
+        if not att.get("isUpload"):
+            raise HTTPException(
+                status_code=404, detail="Not an uploaded attachment."
+            )
+        url = att.get("url")
+        if not url:
+            raise HTTPException(status_code=404, detail="Attachment has no content.")
+        fd, tmp_path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            _ok(api.download_attachment, url, tmp_path, authed=True)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
+        media = (
+            att.get("mimeType")
+            or mimetypes.guess_type(att.get("name") or "")[0]
+            or "application/octet-stream"
+        )
+        return FileResponse(
+            tmp_path,
+            media_type=media,
+            filename=att.get("name") or attachment_id,
+            content_disposition_type="inline",
+            background=BackgroundTask(os.unlink, tmp_path),
+        )
+
+    @app.delete("/api/cards/{card_id}/attachments/{attachment_id}")
+    def remove_attachment(card_id: str, attachment_id: str) -> dict:
+        _ok(api.delete_attachment, card_id, attachment_id)
         return _ok(api.get_card, card_id)
 
     @app.patch("/api/lists/{list_id}")
