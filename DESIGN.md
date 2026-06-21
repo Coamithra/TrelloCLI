@@ -204,6 +204,11 @@ board members aren't mapped, and only open lists are pushed.
 > the diff/reconcile algorithm, and conflict handling — and ends with an explicit
 > recommendation: **do not build it yet.** The reasoning is at the bottom. Nothing
 > below has shipped; today's only `--to trello` mode is still create-new-each-time.
+>
+> **DECISION (2026-06-21, user): not building this.** Continuous / tracked re-sync
+> into an existing Trello board is explicitly not wanted; one-off create-new-each-time
+> `export --to trello` covers the need. The design below is retained as a record only,
+> should the decision ever be revisited. Card `6a366ff2` is closed (Done) on this basis.
 
 The deferred alternative to create-new-each-time is a **re-sync**: instead of a
 fresh board every run, `export --to trello --into <board_id>` would push the local
