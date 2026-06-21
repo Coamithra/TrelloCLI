@@ -48,11 +48,21 @@ function patch(path, body) {
 // The same float-midpoint rule the CLI uses for `card pos` / `list pos`:
 // land between the new DOM neighbours, or send the "top"/"bottom" keyword at
 // an edge so the backend resolves it against the destination's current bounds.
+// Skips siblings without a numeric data-pos (e.g. the "Add another list"
+// affordance that sits after the last column).
+function siblingPos(el, dir) {
+  let s = el[dir];
+  while (s) {
+    const p = parseFloat(s.dataset.pos);
+    if (!Number.isNaN(p)) return p;
+    s = s[dir];
+  }
+  return null;
+}
+
 function neighborPos(el) {
-  const prev = el.previousElementSibling;
-  const next = el.nextElementSibling;
-  const pp = prev ? parseFloat(prev.dataset.pos) : null;
-  const np = next ? parseFloat(next.dataset.pos) : null;
+  const pp = siblingPos(el, 'previousElementSibling');
+  const np = siblingPos(el, 'nextElementSibling');
   if (pp === null && np === null) return 'bottom';
   if (pp === null) return 'top';
   if (np === null) return 'bottom';
@@ -115,6 +125,9 @@ function columnEl(list, cards) {
   col.dataset.listId = list.id;
   col.dataset.pos = list.pos;
 
+  const listSort = list.sort || 'manual';
+  col.dataset.sort = listSort;
+
   const header = document.createElement('div');
   header.className = 'column-header';
   const name = document.createElement('span');
@@ -123,7 +136,44 @@ function columnEl(list, cards) {
   const count = document.createElement('span');
   count.className = 'column-count';
   count.textContent = cards.length;
-  header.append(name, count);
+
+  // Per-column sort picker (persisted auto-sort). Changing it persists the
+  // setting AND re-sorts existing cards server-side, so we reload to reflect
+  // the new order; every later add then auto-places per the saved sort.
+  const sortSel = document.createElement('select');
+  sortSel.className = 'column-sort';
+  sortSel.title = 'Sort this column (saved; new cards auto-place)';
+  [['manual', 'Manual'], ['newest', 'Newest'], ['oldest', 'Oldest'], ['name', 'Name']]
+    .forEach(([value, label]) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      sortSel.appendChild(opt);
+    });
+  sortSel.value = listSort;
+  sortSel.addEventListener('change', async () => {
+    try {
+      await patch(`/api/lists/${list.id}`, { sort: sortSel.value });
+      setStatus(sortSel.value === 'manual' ? 'Sort cleared' : 'Column sorted: ' + sortSel.value);
+      await loadBoard(picker.value);
+    } catch (err) {
+      setStatus('Sort failed: ' + err.message, true);
+    }
+  });
+
+  // Delete (archive) the column. A small ⋯ menu keeps the affordance Trello-like
+  // without crowding the header; the only action today is delete.
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'column-menu-btn';
+  menuBtn.type = 'button';
+  menuBtn.textContent = '⋯';
+  menuBtn.title = 'List actions';
+  menuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleColumnMenu(col, list);
+  });
+
+  header.append(name, count, sortSel, menuBtn);
   col.appendChild(header);
 
   const cardsWrap = document.createElement('div');
@@ -148,8 +198,15 @@ function columnEl(list, cards) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
-      cardsWrap.appendChild(cardEl(card));
-      countFor(cardsWrap);
+      // On a sorted column the new card lands in its sorted slot (anywhere, not
+      // the bottom), so reload to place it correctly; manual columns keep the
+      // cheap append.
+      if (listSort !== 'manual') {
+        await loadBoard(picker.value);
+      } else {
+        cardsWrap.appendChild(cardEl(card));
+        countFor(cardsWrap);
+      }
       setStatus('Card added');
     } catch (err) {
       setStatus('Add failed: ' + err.message, true);
@@ -160,20 +217,62 @@ function columnEl(list, cards) {
   return col;
 }
 
+// A tiny per-column actions menu (currently just Delete). Closes any other open
+// menu first; an outside click / Escape closes it (wired once at boot).
+function toggleColumnMenu(col, list) {
+  const existing = col.querySelector('.column-menu');
+  closeColumnMenus();
+  if (existing) return;  // it was open → toggle shut
+  const menu = document.createElement('div');
+  menu.className = 'column-menu';
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'column-menu-item danger';
+  del.textContent = 'Delete list';
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    closeColumnMenus();
+    const n = col.querySelectorAll('.card').length;
+    const warn = n
+      ? `Delete "${list.name}" and archive its ${n} card${n === 1 ? '' : 's'}?`
+      : `Delete "${list.name}"?`;
+    if (!window.confirm(warn)) return;
+    try {
+      await patch(`/api/lists/${list.id}`, { closed: true });
+      setStatus('List deleted');
+      await loadBoard(picker.value);
+    } catch (err) {
+      setStatus('Delete failed: ' + err.message, true);
+    }
+  });
+  menu.appendChild(del);
+  col.querySelector('.column-header').appendChild(menu);
+}
+
+function closeColumnMenus() {
+  document.querySelectorAll('.column-menu').forEach((m) => m.remove());
+}
+
 function initDragging() {
   if (boardSortable) boardSortable.destroy();
   cardSortables.forEach((s) => s.destroy());
   cardSortables = [];
 
   // Reorder columns (grab by header only, so card drags don't trigger it).
+  // `filter` keeps the "Add another list" affordance from being draggable.
   boardSortable = Sortable.create(boardEl, {
     group: 'columns',
     draggable: '.column',
+    filter: '.add-list',
     handle: '.column-header',
     animation: 150,
     onStart: () => { liveDragging = true; },
     onEnd: async (evt) => {
       const col = evt.item;
+      // Keep the add-list affordance pinned to the end if a column was dropped
+      // to its right.
+      const addList = boardEl.querySelector('.add-list');
+      if (addList && addList.nextElementSibling) boardEl.appendChild(addList);
       let rebalanced = false;
       try {
         const updated = await patch(`/api/lists/${col.dataset.listId}`, { pos: neighborPos(col) });
@@ -202,6 +301,11 @@ function initDragging() {
         const item = evt.item;
         const toList = evt.to.dataset.listId;
         if (evt.from !== evt.to) { countFor(evt.from); countFor(evt.to); }
+        // A manual hand-placement takes the destination column off auto-sort —
+        // otherwise the saved sort would fight the user on the next add. Detect
+        // a non-manual destination before the move so we can clear it after.
+        const destCol = evt.to.closest('.column');
+        const clearSort = destCol && destCol.dataset.sort && destCol.dataset.sort !== 'manual';
         let rebalanced = false;
         try {
           const updated = await patch(`/api/cards/${item.dataset.id}`, {
@@ -211,16 +315,21 @@ function initDragging() {
           item.dataset.pos = updated.pos;
           item.dataset.list = updated.idList;
           rebalanced = !!updated.rebalanced;
-          setStatus('Card moved');
+          if (clearSort) {
+            await patch(`/api/lists/${toList}`, { sort: 'manual' });
+            destCol.dataset.sort = 'manual';
+          }
+          setStatus(clearSort ? 'Card moved (sort cleared)' : 'Card moved');
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
         } finally {
           liveDragging = false;
         }
         // A server-side rebalance respread the *other* cards too, so their DOM
-        // data-pos is now stale; reload to refresh every position. Done after the
-        // finally clears liveDragging so we don't tear down this Sortable mid-onEnd.
-        if (rebalanced) await loadBoard(picker.value);
+        // data-pos is now stale; reload to refresh every position. A cleared sort
+        // also needs a reload so the destination column's sort <select> resets.
+        // Done after finally clears liveDragging so we don't tear down mid-onEnd.
+        if (rebalanced || clearSort) await loadBoard(picker.value);
       },
     }));
   });
@@ -232,7 +341,61 @@ function renderBoard(data) {
   (data.cards || []).forEach((c) => { (byList[c.idList] = byList[c.idList] || []).push(c); });
   Object.values(byList).forEach((arr) => arr.sort((a, b) => (Number(a.pos) || 0) - (Number(b.pos) || 0)));
   (data.lists || []).forEach((list) => boardEl.appendChild(columnEl(list, byList[list.id] || [])));
+  boardEl.appendChild(addListEl(data.board.id));
   initDragging();
+}
+
+// Trello-style "Add another list" affordance — a placeholder that swaps to an
+// inline composer on click. Lives after the last column; not draggable.
+function addListEl(boardId) {
+  const wrap = document.createElement('div');
+  wrap.className = 'add-list';
+
+  const placeholder = document.createElement('button');
+  placeholder.type = 'button';
+  placeholder.className = 'add-list-placeholder';
+  placeholder.textContent = '+ Add another list';
+
+  const form = document.createElement('div');
+  form.className = 'add-list-form hidden';
+  const input = document.createElement('input');
+  input.className = 'add-list-input';
+  input.placeholder = 'Enter list name…';
+  form.appendChild(input);
+
+  const reset = () => {
+    input.value = '';
+    form.classList.add('hidden');
+    placeholder.classList.remove('hidden');
+  };
+  placeholder.addEventListener('click', () => {
+    placeholder.classList.add('hidden');
+    form.classList.remove('hidden');
+    input.focus();
+  });
+  const submit = async () => {
+    const name = input.value.trim();
+    if (!name) { reset(); return; }
+    try {
+      await api(`/api/boards/${boardId}/lists`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      setStatus('List added');
+      await loadBoard(picker.value);
+    } catch (err) {
+      setStatus('Add list failed: ' + err.message, true);
+    }
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submit();
+    else if (e.key === 'Escape') reset();
+  });
+  input.addEventListener('blur', submit);
+
+  wrap.append(placeholder, form);
+  return wrap;
 }
 
 async function loadBoard(boardId) {
@@ -342,7 +505,15 @@ async function openDetail(cardId) {
 }
 
 overlayEl.addEventListener('click', closeDetail);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetail(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeDetail(); closeColumnMenus(); }
+});
+// A click anywhere outside an open column menu (and not on its toggle) closes it.
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.column-menu') && !e.target.closest('.column-menu-btn')) {
+    closeColumnMenus();
+  }
+});
 
 // ── live refresh ───────────────────────────────────────────────────
 

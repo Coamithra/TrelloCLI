@@ -41,6 +41,13 @@ from .store import (
 
 DEFAULT_LISTS = ("To Do", "Doing", "Done")
 
+# Per-list persisted sort (the web "auto-sort" feature). "manual" keeps explicit
+# positions (the default / classic behavior); the others re-sort existing cards
+# and auto-place every NEW card into its sorted slot on create. Local-backend
+# only — Trello has no native per-list sort field (see CLAUDE.md / DESIGN.md).
+LIST_SORTS = ("manual", "newest", "oldest", "name")
+DEFAULT_SORT = "manual"
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
@@ -146,6 +153,62 @@ class LocalBackend(Backend):
                 self._save_card(board_id, card)
         return True
 
+    @staticmethod
+    def _sort_key(sort: str) -> Callable[[dict], Any]:
+        """Sort key for a non-manual list sort. `name` is case-insensitive
+        alphabetical; `oldest`/`newest` order by `dateLastActivity` (a new card's
+        is `now`, so it is the most recent — landing at the bottom for `oldest`,
+        the top for `newest`)."""
+        if sort == "name":
+            return lambda c: (c.get("name", "") or "").lower()
+        # newest/oldest both sort ascending by activity; newest just reverses.
+        return lambda c: c.get("dateLastActivity", "") or ""
+
+    def _resort_list_cards(self, board_id: str, list_id: str, sort: str) -> None:
+        """Respread a list's open cards into the order its `sort` dictates,
+        rewriting only the cards whose `pos` actually changes (minimal Dropbox
+        churn). No-op for `manual`. Runs under the store lock via its caller."""
+        if sort == DEFAULT_SORT or sort not in LIST_SORTS:
+            return
+        open_cards = [
+            c for c in self.store.cards(board_id)
+            if c.get("idList") == list_id and not c.get("closed")
+        ]
+        ordered = sorted(open_cards, key=self._sort_key(sort),
+                         reverse=(sort == "newest"))
+        for card, pos in zip(ordered, even_positions(len(ordered))):
+            if card.get("pos") != pos:
+                card["pos"] = pos
+                self._save_card(board_id, card)
+
+    def _auto_place_pos(self, board_id: str, list_id: str, sort: str,
+                        new_card: dict) -> float:
+        """The `pos` a new card should take to land in its sorted slot among the
+        list's existing open cards (float midpoint between the neighbours it sorts
+        between). Falls back to the requested resolve for `manual`/unknown sorts —
+        the caller only invokes this for a real sort."""
+        key = self._sort_key(sort)
+        reverse = sort == "newest"
+        existing = sorted(
+            (c for c in self.store.cards(board_id)
+             if c.get("idList") == list_id and not c.get("closed")),
+            key=lambda c: c.get("pos", 0),
+        )
+        if not existing:
+            return POS_STEP
+        nk = key(new_card)
+        # Walk the position-ordered list and find the first card the new one sorts
+        # *before*; insert at the midpoint just above it (or at the bottom if none).
+        def sorts_before(a_key: Any, b_key: Any) -> bool:
+            return a_key > b_key if reverse else a_key < b_key
+        prev_pos: float | None = None
+        for c in existing:
+            if sorts_before(nk, key(c)):
+                cp = c.get("pos", 0)
+                return cp / 2 if prev_pos is None else (prev_pos + cp) / 2
+            prev_pos = c.get("pos", 0)
+        return max(c.get("pos", 0) for c in existing) + POS_STEP
+
     def _log(self, board_id: str, action_type: str, data: dict) -> None:
         user = self._local_user()
         self.store.append_activity(board_id, {
@@ -231,7 +294,8 @@ class LocalBackend(Backend):
         lists = []
         if default_lists:
             for i, lname in enumerate(DEFAULT_LISTS, start=1):
-                lists.append({"id": new_id(), "name": lname, "pos": POS_STEP * i, "closed": False})
+                lists.append({"id": new_id(), "name": lname, "pos": POS_STEP * i,
+                              "closed": False, "sort": DEFAULT_SORT})
         self._save_lists(bid, lists)
         self._log(bid, "createBoard", {"board": {"id": bid, "name": name}})
         return {"id": bid, "name": name, "shortUrl": "", "desc": desc or ""}
@@ -295,6 +359,9 @@ class LocalBackend(Backend):
                 "name": l.get("name", ""),
                 "pos": l.get("pos", 0),
                 "closed": _as_bool(l.get("closed", False)),
+                # Source backends (Trello) have no sort; default to manual. A
+                # local source carries its own through unchanged.
+                "sort": l.get("sort", DEFAULT_SORT),
             }
             for l in lists
         ])
@@ -338,6 +405,8 @@ class LocalBackend(Backend):
         self._load_board(board_id)  # 404 if the board is missing
         lists = [l for l in self._load_lists(board_id) if not l.get("closed")]
         lists.sort(key=lambda l: l.get("pos", 0))
+        for l in lists:
+            l.setdefault("sort", DEFAULT_SORT)  # pre-`sort` stores default to manual
         return lists
 
     def _rebalance_lists_inplace(self, lists: list[dict]) -> bool:
@@ -364,6 +433,7 @@ class LocalBackend(Backend):
             "name": name,
             "pos": resolve_pos(existing, pos if pos is not None else "top"),
             "closed": False,
+            "sort": DEFAULT_SORT,
         }
         lists.append(new)
         self._rebalance_lists_inplace(lists)
@@ -387,7 +457,22 @@ class LocalBackend(Backend):
             rebalanced = self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
         if "closed" in fields:
             target["closed"] = _as_bool(fields["closed"])
+        resort_to = None
+        if "sort" in fields:
+            sort = str(fields["sort"]).strip().lower()
+            if sort not in LIST_SORTS:
+                raise SystemExit(
+                    f"Invalid list sort: {fields['sort']!r}. "
+                    f"Choose one of {', '.join(LIST_SORTS)}."
+                )
+            target["sort"] = sort
+            resort_to = sort  # one-shot reorder of existing cards after the save
         self._save_lists(board_id, lists)
+        # Persist the setting first, then re-sort existing cards into the new
+        # order (a separate per-card save loop) so the column reflects the choice
+        # immediately — future adds stay sorted via create_card's auto-place.
+        if resort_to is not None:
+            self._resort_list_cards(board_id, list_id, resort_to)
         self._log(board_id, "updateList", {"list": {"id": list_id, "name": target["name"]}})
         if rebalanced:
             # Transient signal, set after the save so it is never persisted: a
@@ -470,8 +555,14 @@ class LocalBackend(Backend):
     def create_card(self, list_id: str, name: str, desc: str | None = None,
                     due: str | None = None, labels: list[str] | None = None,
                     pos: str = "top") -> dict:
-        board_id, _ = self._locate_list(list_id)
+        board_id, lst = self._locate_list(list_id)
         card = self._new_card(board_id, list_id, name, desc, due, pos, labels)
+        # Auto-place per the list's persisted sort, overriding the requested pos
+        # so a sorted column stays sorted on every add (the feature that beats
+        # Trello). Manual lists keep the requested pos.
+        list_sort = lst.get("sort", DEFAULT_SORT)
+        if list_sort != DEFAULT_SORT and list_sort in LIST_SORTS:
+            card["pos"] = self._auto_place_pos(board_id, list_id, list_sort, card)
         self._save_card(board_id, card)
         if self._rebalance_cards(board_id, list_id):
             _, card = self._load_card(card["id"])

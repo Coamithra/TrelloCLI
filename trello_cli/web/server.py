@@ -26,11 +26,11 @@ from . import live
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# The browser only moves/reorders cards and reorders columns, so the API accepts
-# exactly those fields — nothing that could archive or rename via the raw
-# endpoint. Widen these only alongside a matching UI control.
+# The browser moves/reorders cards and reorders columns; it also archives a
+# column (`closed`) and sets a column's persisted sort (`sort`). The whitelist is
+# the exact set the UI drives — widen it only alongside a matching UI control.
 _CARD_PATCH_FIELDS = {"idList", "pos"}
-_LIST_PATCH_FIELDS = {"pos"}
+_LIST_PATCH_FIELDS = {"pos", "closed", "sort"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
@@ -113,6 +113,15 @@ def create_app(token: str | None = None) -> FastAPI:
             "lists": _ok(api.get_lists, board_id),
             "cards": _ok(api.get_board_cards, board_id),
         }
+
+    @app.post("/api/boards/{board_id}/lists")
+    def add_list(board_id: str, body: dict[str, Any]) -> dict:
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="List name is required.")
+        # New columns land at the bottom (rightmost), matching Trello's
+        # "Add another list" affordance.
+        return _ok(api.create_list, board_id, name, pos="bottom")
 
     @app.get("/api/cards/{card_id}")
     def get_card(card_id: str) -> dict:

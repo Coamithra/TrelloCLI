@@ -71,12 +71,14 @@ body { display: flex; flex-direction: column; }
 .column-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 4px 8px 8px;
   font-weight: 600;
   cursor: grab;
+  position: relative;
 }
 .column-header:active { cursor: grabbing; }
+.column-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .column-count {
   color: var(--text-dim);
   font-weight: 400;
@@ -84,7 +86,94 @@ body { display: flex; flex-direction: column; }
   background: rgba(255,255,255,.06);
   border-radius: 10px;
   padding: 1px 8px;
+  flex: 0 0 auto;
 }
+
+/* Per-column sort picker + actions menu */
+.column-sort {
+  flex: 0 0 auto;
+  background: var(--card-bg);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+  max-width: 70px;
+}
+.column-sort:hover { color: var(--text); }
+
+.column-menu-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.column-menu-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
+
+.column-menu {
+  position: absolute;
+  top: 100%;
+  right: 4px;
+  z-index: 5;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  padding: 4px;
+  min-width: 140px;
+}
+.column-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 400;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.column-menu-item:hover { background: rgba(255,255,255,.08); }
+.column-menu-item.danger { color: var(--error); }
+
+/* "Add another list" affordance */
+.add-list {
+  width: 272px;
+  flex: 0 0 auto;
+}
+.add-list-placeholder {
+  width: 100%;
+  text-align: left;
+  background: rgba(255,255,255,.04);
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.add-list-placeholder:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.add-list-form { background: var(--column-bg); border-radius: 8px; padding: 8px; }
+.add-list-form.hidden, .add-list-placeholder.hidden { display: none; }
+.add-list-input {
+  width: 100%;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+}
+.add-list-input:focus { outline: none; }
 
 .cards {
   display: flex;
