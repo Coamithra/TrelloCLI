@@ -190,7 +190,7 @@ def create_app(token: str | None = None) -> FastAPI:
         return _ok(api.get_card, card_id)
 
     @app.post("/api/cards/{card_id}/attachments/file")
-    async def add_attachment_file(
+    def add_attachment_file(
         card_id: str,
         file: UploadFile = File(...),
         name: str | None = Form(None),
@@ -198,7 +198,9 @@ def create_app(token: str | None = None) -> FastAPI:
         # Stream the upload to a temp file under its original basename so the
         # backend stores the blob with a real filename, then hand the path to the
         # facade (the local backend copies it into the store; Trello re-uploads
-        # it). The temp dir is always cleaned up.
+        # it). The temp dir is always cleaned up. Kept a sync `def` (like the
+        # other mutating routes) so FastAPI runs the blocking copy + upload in the
+        # threadpool rather than stalling the event loop / SSE stream.
         tmp_dir = tempfile.mkdtemp()
         safe_name = os.path.basename(file.filename or "upload")
         tmp_path = os.path.join(tmp_dir, safe_name or "upload")

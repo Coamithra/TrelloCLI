@@ -975,6 +975,10 @@ function openAttachmentPopover(anchor) {
         setStatus('Attachment uploaded');
       } catch (err) {
         setStatus('Upload failed: ' + err.message, true);
+      } finally {
+        // Clear the selection so picking the same file again re-fires `change`
+        // (e.g. retrying after a failed upload).
+        fileIn.value = '';
       }
     });
     body.appendChild(fileIn);
