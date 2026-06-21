@@ -317,6 +317,11 @@ function initDragging() {
     // Keep the add-list affordance non-draggable, and stop the header controls
     // (sort picker, actions menu) from initiating a column drag.
     filter: '.add-list, .column-sort, .column-menu-btn, .column-menu',
+    // Filter alone stops these from starting a drag, but SortableJS still
+    // preventDefault()s the pointer event on them by default — which blocks the
+    // native <select> dropdown from opening and eats the menu button's click,
+    // since both live inside the .column-header drag handle. Turn that off.
+    preventOnFilter: false,
     handle: '.column-header',
     animation: 150,
     onStart: () => { liveDragging = true; document.body.classList.add('dragging'); },
