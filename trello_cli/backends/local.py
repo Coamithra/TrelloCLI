@@ -604,6 +604,18 @@ class LocalBackend(Backend):
     def move_card(self, card_id: str, list_id: str) -> dict:
         return self.update_card(card_id, idList=list_id)
 
+    def grab_top_card(self, source_list_id: str,
+                      dest_list_id: str) -> dict | None:
+        # Runs under the store lock (it's in _MUTATORS), so reading the source
+        # list's top card and moving it out is one atomic step: a second racing
+        # caller blocks until we're done, then sees the card already gone and
+        # grabs the next one. No two callers can claim the same card. This is the
+        # native version of CONTRIBUTING.md's claim handshake — no comment dance.
+        cards = self.get_cards_in_list(source_list_id)  # open, pos-sorted
+        if not cards:
+            return None
+        return self.move_card(cards[0]["id"], dest_list_id)
+
     def archive_card(self, card_id: str) -> dict:
         return self.update_card(card_id, closed=True)
 
@@ -1062,7 +1074,8 @@ class LocalBackend(Backend):
 _MUTATORS = (
     "create_board", "import_board",
     "create_list", "update_list", "archive_list", "rename_list",
-    "create_card", "move_card", "archive_card", "unarchive_card", "update_card",
+    "create_card", "move_card", "grab_top_card",
+    "archive_card", "unarchive_card", "update_card",
     "add_comment", "update_comment", "delete_comment",
     "create_label", "update_label", "delete_label",
     "add_label_to_card", "remove_label_from_card",

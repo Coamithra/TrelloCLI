@@ -61,6 +61,24 @@ trello export --to trello [--name <name>] [--no-attachments]  Push a local --boa
                                    local; create-new-each-time)
 ```
 
+### Workflow
+
+```
+trello grab [--from "To Do"] [--to "Doing"]  Atomically claim the top card of
+                                   a list and move it to another, returning the
+                                   card it got you (--json for the full dict;
+                                   exit 1 if there's nothing to grab)
+```
+
+Made for "tell several agents to grab the top To Do ticket" without them racing
+onto the **same** card. On the **local** backend it's truly atomic — the move
+runs under the store lock, so concurrent grabbers each get a distinct card. On
+the **Trello** backend (no atomic primitive) it fakes the
+[CONTRIBUTING.md](CONTRIBUTING.md) claim handshake instead: grab, post a claim
+comment, wait ~10-30s, and let the earliest claim win (retrying the next card on
+a loss) — so a `trello grab` blocks for that wait. Cross-machine Dropbox
+concurrency is out of scope (OS locks don't cross machines).
+
 ### Card
 
 ```
@@ -267,8 +285,17 @@ required on every API request (the browser is opened on a `?token=…` URL autom
 so, keep remote access behind a VPN or reverse proxy. In the UI:
 pick a board from the dropdown, drag cards within/between columns and drag columns to
 reorder (both write straight through the backend, using the same float-`pos` midpoint rule
-as `card pos`), add a card from the composer at the bottom of a column, and click a card
-for a read-only detail panel (description, due, labels, checklist, comments).
+as `card pos`), add a card from the composer at the bottom of a column, and click a card to
+open an **editable** detail panel: rename the card, edit the description, set labels and a due
+date, manage attachments (see below), and add comments (checklists render read-only).
+
+**Attachments:** the detail panel's **📎 Attach** button opens a popover to either upload a file
+from your computer or paste a URL. Attachments list below with image thumbnails, a name link,
+and size; a `📎 N` badge also shows on the card face. Uploaded files are served back through a
+small token-gated endpoint (a local blob, or a Trello-hosted upload fetched with your token);
+external URL attachments link straight to their source. Remove one with the × on its row. This
+mirrors the CLI's `attachment add <file_or_url>` — anything attached here is visible to
+`attachment ls` and vice-versa.
 
 **Starred quick-swap boards:** click the ★ toggle (top-right, just before the board dropdown)
 to **star** the current board — it gets a one-click button in the top bar and drops out of the
