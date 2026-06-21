@@ -1,6 +1,6 @@
 # Contributing: Tackling a Trello Card
 
-Step-by-step workflow for picking up and completing any card from the [TrelloCLI Trello board](https://trello.com/b/oa692YwN) (board id `6a353ffc61a1ba7c32c0ff72`). Lists are **To Do → Doing → Done**.
+Step-by-step workflow for picking up and completing any card from the TrelloCLI project board (board id `6a353ffc`), now managed on the **local backend**: run every `trello` board-management command with `--backend local`. The board lives in the local file store (the configured `local_root`); it was exported with IDs preserved from the original [Trello board](https://trello.com/b/oa692YwN), which is now a snapshot source only. Lists are **To Do → Doing → Done**.
 
 TrelloCLI is a small **Python 3.12 CLI** (package `trello_cli/`) that wraps the Trello REST API over `httpx` and prints compact, context-friendly output. There is no build step, no dev server, and no browser — the way you verify a change is by **running the actual CLI against a real Trello board** and reading the output. The roadmap (a local file backend + a web kanban) lives in [`DESIGN.md`](DESIGN.md); the To Do cards are the phases from that plan.
 
@@ -73,13 +73,13 @@ There is no server or port to manage. Set up an editable install in the worktree
 ```
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e .
-$env:PYTHONIOENCODING='utf-8'; .venv/Scripts/python.exe -m trello_cli --board <id> card ls "To Do"
+$env:PYTHONIOENCODING='utf-8'; .venv/Scripts/python.exe -m trello_cli --backend local --board <id> card ls "To Do"
 ```
 
 (`trello` is the same as `python -m trello_cli` once installed; from a worktree, prefer the explicit `.venv/Scripts/python.exe -m trello_cli` form so there's no ambiguity about which copy of the code is running.)
 
 **One caution specific to this project:**
-- **Mutating commands hit a real Trello board for real.** `card add/move/archive`, `comment add/delete`, `label set`, etc. take effect immediately and are visible to anyone on the board — there's no dry-run. When you need to verify a *write* path, prefer a throwaway scratch board (`trello board add "scratch-<branch>" --use`) or a scratch card you create and clean up, rather than mutating real cards on the TrelloCLI board. Read commands (`ls`, `show`, `boards`, `labels`) are side-effect-free and safe to run freely.
+- **Mutating commands hit the shared project board for real.** (The board is on the local backend now, so these write to the local file store, which syncs to every machine sharing the Dropbox folder.) `card add/move/archive`, `comment add/delete`, `label set`, etc. take effect immediately and are visible to anyone on the board — there's no dry-run. When you need to verify a *write* path, prefer a throwaway scratch board (`trello --backend local board add "scratch-<branch>"`) or a scratch card you create and clean up, rather than mutating real cards on the TrelloCLI board. Read commands (`ls`, `show`, `boards`, `labels`) are side-effect-free and safe to run freely.
 
 ---
 
@@ -89,10 +89,10 @@ $env:PYTHONIOENCODING='utf-8'; .venv/Scripts/python.exe -m trello_cli --board <i
 
 1. **Claim the top card with the two-phase handshake (do this first, nothing before it)** — Run these in order, with nothing else interleaved:
     1. **Mint a claim ID** once for this session — a short unique token (e.g. `python -c "import secrets; print(secrets.token_hex(4))"`). Reuse the same ID for every claim attempt this session.
-    2. **Grab it** — View the To Do list (`trello --board 6a353ffc card ls "To Do"`), then *immediately* `trello --board 6a353ffc card move <card_id> Doing` for the top card. (If the top card is already in Doing, target the next one down instead.)
-    3. **Post the claim comment** — `trello --board 6a353ffc comment add <card_id> "I am doing this now — claim <claim_id>"`. This exact phrase is the lock marker other agents scan for.
-    4. **Wait 10-30s**, randomly pick a waiting length between these values, then **re-read the card's comments with their timestamps** — `trello --board 6a353ffc --json comment ls <card_id>`. Use `--json`: the formatted `comment ls` prints only the day, but the JSON `date` field is a millisecond-precision ISO timestamp, which is what a 10s tie-break needs.
-    5. **Resolve ties — earliest claim comment wins.** Look at every comment containing "I am doing this now". If any such comment from a *different* agent (different claim ID) has a `date` **earlier than yours**, you lost the race: that agent owns the card. Back off — `trello --board 6a353ffc comment delete <card_id> <your_comment_id>` to remove your own claim comment (note it takes **both** the card id and the comment id, the `id` field from the JSON above), and **leave the card in Doing** (don't yank it from the winner). Then:
+    2. **Grab it** — View the To Do list (`trello --backend local --board 6a353ffc card ls "To Do"`), then *immediately* `trello --backend local --board 6a353ffc card move <card_id> Doing` for the top card. (If the top card is already in Doing, target the next one down instead.)
+    3. **Post the claim comment** — `trello --backend local --board 6a353ffc comment add <card_id> "I am doing this now — claim <claim_id>"`. This exact phrase is the lock marker other agents scan for.
+    4. **Wait 10-30s**, randomly pick a waiting length between these values, then **re-read the card's comments with their timestamps** — `trello --backend local --board 6a353ffc --json comment ls <card_id>`. Use `--json`: the formatted `comment ls` prints only the day, but the JSON `date` field is a millisecond-precision ISO timestamp, which is what a 10s tie-break needs.
+    5. **Resolve ties — earliest claim comment wins.** Look at every comment containing "I am doing this now". If any such comment from a *different* agent (different claim ID) has a `date` **earlier than yours**, you lost the race: that agent owns the card. Back off — `trello --backend local --board 6a353ffc comment delete <card_id> <your_comment_id>` to remove your own claim comment (note it takes **both** the card id and the comment id, the `id` field from the JSON above), and **leave the card in Doing** (don't yank it from the winner). Then:
         - If you were told to work a **specific** card, stop here — end the session; the card is taken.
         - If the request was **generic** ("top card of To Do"), go back to (ii) and claim the **next** To Do card down, repeating the whole handshake.
     6. **You hold the lock** when your claim comment is the earliest (or the only) "I am doing this now". Only now read the card and proceed.
@@ -155,7 +155,7 @@ There is no typecheck/build gate — this is a small CLI. **Verification is func
 16. **Exercise every command path you touched** — against a real board for read paths, and a **scratch board or throwaway card for write paths** (see the caution in "Running the CLI from a worktree"). Run from the worktree's interpreter so you're testing the worktree's code:
     ```
     $env:PYTHONIOENCODING='utf-8'
-    .venv/Scripts/python.exe -m trello_cli --board <id> <command you changed>
+    .venv/Scripts/python.exe -m trello_cli --backend local --board <id> <command you changed>
     ```
     For a refactor that must not change behavior (e.g. the Phase 0 backend seam), the bar is **identical output before and after** — run the same commands on `master` and on your branch and diff the results. Read commands are free to run; clean up anything a write path created.
 17. **Check both output modes** — if you touched a read command, run it with and without `--json` and confirm both render correctly (formatted table vs. raw `print_json`)
@@ -187,9 +187,9 @@ There is no typecheck/build gate — this is a small CLI. **Verification is func
     git push origin --delete <branch>
     ```
 27. **Delete the plan + tracker files** — If the card had a `plans/<file>.md` behind it, delete it now (`git rm plans/<file>.md && git rm plans/tracker_<branch>.md && git commit -m "Remove <name> plan; <feature/fix> is implemented" && git push`). The plans directory is for *open* work only; the tracker doc is per-card scratch. (Updates to `DESIGN.md` stay — that's the living roadmap.)
-28. **Move card to Done** — `trello --board 6a353ffc card move <card_id> Done`
-29. **Comment on the card** — `trello --board 6a353ffc comment add <card_id> "<summary>"`. Include: what changed, which files, what it fixes/adds, the commit hash(es), and what needs manual testing. Use real newlines in the text, not `\n` escapes. Leaves a paper trail for future debugging
-30. **Create follow-up cards** — If review, implementation, or testing surfaced issues that are out of scope for this card (pre-existing bugs, minor improvements, edge cases deferred as too risky to bundle), create new Trello cards (`trello --board 6a353ffc card add "To Do" "<title>" "<desc>"`). Reference the original card so there's a trail. Don't let follow-up work disappear into commit messages — if it's worth noting, it's worth tracking
+28. **Move card to Done** — `trello --backend local --board 6a353ffc card move <card_id> Done`
+29. **Comment on the card** — `trello --backend local --board 6a353ffc comment add <card_id> "<summary>"`. Include: what changed, which files, what it fixes/adds, the commit hash(es), and what needs manual testing. Use real newlines in the text, not `\n` escapes. Leaves a paper trail for future debugging
+30. **Create follow-up cards** — If review, implementation, or testing surfaced issues that are out of scope for this card (pre-existing bugs, minor improvements, edge cases deferred as too risky to bundle), create new Trello cards (`trello --backend local --board 6a353ffc card add "To Do" "<title>" "<desc>"`). Reference the original card so there's a trail. Don't let follow-up work disappear into commit messages — if it's worth noting, it's worth tracking
 31. **Write an overview of the changes made** — As the final step, post a concise overview to the user summarizing the work: what changed (the user-facing behavior delta, not a file list), which files were touched, anything that still needs manual testing or follow-up, and the commit hash(es) and merged branch. This is the closing handoff — it's how the user picks the session up cold and knows the card is actually shipped
 
 ## Phase 7: Clean up

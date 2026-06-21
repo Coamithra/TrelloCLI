@@ -4,9 +4,9 @@ Compact Trello CLI tool — wraps the Trello REST API with concise output format
 
 ## Management
 
-- Trello board with tasks: 6a353ffc
+- Project board (tasks): board id `6a353ffc`, now managed on the **local backend**. Run board-management commands with `trello --backend local --board 6a353ffc ...` (or set `TRELLO_BACKEND=local`). The board lives in the local file store at the configured `local_root` (currently `C:\Users\coami\Dropbox\Programming\FakeTrelloData`; see `~/.trello-cli.json`). It was exported with IDs preserved from the original Trello board at https://trello.com/b/oa692YwN, which is now a snapshot source only: re-pull it any time with `trello --backend trello --board 6a353ffc export --to local`. Local edits do NOT sync back to remote Trello.
 
-> **IMPORTANT - mandatory workflow, not a suggestion.** If your task involves a Trello card from board `6a353ffc` (picking one up, implementing it, or closing it out), you MUST follow [`CONTRIBUTING.md`](CONTRIBUTING.md) end to end BEFORE writing any code. In particular: claim the card with the two-phase handshake FIRST (move to Doing, post the claim comment, wait, earliest comment wins), work in a git worktree branched off `master` (never commit on `master` directly), then go research -> design -> implement -> verify -> PR + self-merge -> move the card to Done. Do not improvise your own workflow or skip the claim handshake. If you have not read CONTRIBUTING.md yet, stop and read it now.
+> **IMPORTANT - mandatory workflow, not a suggestion.** If your task involves a card from the project board `6a353ffc` (now on the **local backend**; run all board-management commands with `trello --backend local ...`), i.e. picking one up, implementing it, or closing it out, you MUST follow [`CONTRIBUTING.md`](CONTRIBUTING.md) end to end BEFORE writing any code. In particular: claim the card with the two-phase handshake FIRST (move to Doing, post the claim comment, wait, earliest comment wins), work in a git worktree branched off `master` (never commit on `master` directly), then go research -> design -> implement -> verify -> PR + self-merge -> move the card to Done. Do not improvise your own workflow or skip the claim handshake. If you have not read CONTRIBUTING.md yet, stop and read it now.
 
 ## Architecture
 
