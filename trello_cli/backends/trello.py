@@ -73,6 +73,12 @@ class TrelloBackend(Backend):
         return self._put(f"/lists/{list_id}/closed", value="true")
 
     def update_list(self, list_id: str, **fields: Any) -> dict:
+        # Persisted per-list `sort` is a local-backend-only feature — Trello has
+        # no native field for it. Drop it so a `sort` PATCH from the web UI is a
+        # clean no-op on a Trello board rather than an unknown-param request.
+        fields.pop("sort", None)
+        if not fields:
+            return self._get(f"/lists/{list_id}", fields="id,name,pos")
         return self._put(f"/lists/{list_id}", **fields)
 
     def rename_list(self, list_id: str, name: str) -> dict:
