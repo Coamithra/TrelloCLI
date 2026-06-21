@@ -86,7 +86,8 @@ class Backend(ABC):
                       dest_list_id: str) -> dict | None:
         """Atomically claim the top open card of `source_list_id`, move it to
         `dest_list_id`, and return it — or `None` if nothing could be claimed
-        (empty source list). "Atomic" so many callers racing the same list each
+        (an empty source list, or — on Trello — every candidate lost to a
+        concurrent claimer). "Atomic" so many callers racing the same list each
         get a *distinct* card. `LocalBackend` does this for real under the store
         lock; `TrelloBackend`, with no atomic primitive, fakes it with the
         claim-comment handshake (see CONTRIBUTING.md)."""

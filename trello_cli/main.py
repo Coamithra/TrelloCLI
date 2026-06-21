@@ -1946,15 +1946,28 @@ def cmd_serve(args: list[str]) -> None:
 
 # ── Workflow commands ───────────────────────────────────────────────
 
+def _grab_resolve_list(board_id: str, name: str, defaulted: bool) -> str:
+    """Resolve a grab list, hinting at --from/--to when a *defaulted* name (the
+    board has no "To Do"/"Doing") is what failed."""
+    try:
+        return _resolve_list(board_id, name)
+    except SystemExit as e:
+        if defaulted:
+            raise SystemExit(f"{e} (couldn't resolve the default '{name}' list; "
+                             "pass --from/--to to name your lists)")
+        raise
+
+
 def cmd_grab(args: list[str]) -> None:
     positional, flags = _parse_flags(args, value_flags=("--from", "--to"))
     if positional:
         raise SystemExit("Usage: trello grab [--from <list>] [--to <list>]")
-    src_name = str(flags.get("--from") or "To Do")
-    dst_name = str(flags.get("--to") or "Doing")
+    from_flag, to_flag = flags.get("--from"), flags.get("--to")
+    src_name = str(from_flag or "To Do")
+    dst_name = str(to_flag or "Doing")
     board_id = _require_board()
-    src_id = _resolve_list(board_id, src_name)
-    dst_id = _resolve_list(board_id, dst_name)
+    src_id = _grab_resolve_list(board_id, src_name, defaulted=from_flag is None)
+    dst_id = _grab_resolve_list(board_id, dst_name, defaulted=to_flag is None)
     if src_id == dst_id:
         raise SystemExit("--from and --to resolve to the same list.")
     card = api.grab_top_card(src_id, dst_id)

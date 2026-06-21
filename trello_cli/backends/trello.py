@@ -164,6 +164,10 @@ class TrelloBackend(Backend):
         # card with the winner, and try the next card down.
         claim_id = secrets.token_hex(4)
         lost: set[str] = set()
+        # Safety cap on how many distinct cards we'll try (each loss moves on to
+        # the next). Not an infinite-loop guard — the loop already ends when the
+        # source list runs out of un-lost candidates; this just bounds a
+        # pathologically contended list.
         for _ in range(_GRAB_MAX_ATTEMPTS):
             cards = sorted(self.get_cards_in_list(source_list_id),
                            key=lambda c: c.get("pos", 0))
@@ -172,12 +176,22 @@ class TrelloBackend(Backend):
                 return None
             card_id = candidates[0]["id"]
             self.move_card(card_id, dest_list_id)          # fast grab
-            mine = self.add_comment(card_id, f"{_CLAIM_MARKER}{claim_id}")
-            my_date = _parse_dt(mine.get("date"))
-            time.sleep(random.uniform(*_GRAB_WAIT_RANGE))
-            if self._won_claim(card_id, claim_id, my_date):
-                return self.get_card(card_id)
-            self.delete_comment(mine["id"])                # retract, back off
+            try:
+                mine = self.add_comment(card_id, f"{_CLAIM_MARKER}{claim_id}")
+                my_date = _parse_dt(mine.get("date"))
+                time.sleep(random.uniform(*_GRAB_WAIT_RANGE))
+                if self._won_claim(card_id, claim_id, my_date):
+                    return self.get_card(card_id)
+                self.delete_comment(mine["id"])            # legit loss: back off
+            except Exception:
+                # Anything after the fast grab failed (e.g. a transport error).
+                # Don't strand the card in dest with no claim — move it back so
+                # it stays grabbable, then surface the original error.
+                try:
+                    self.move_card(card_id, source_list_id)
+                except Exception:
+                    pass
+                raise
             lost.add(card_id)
         return None
 
@@ -190,6 +204,9 @@ class TrelloBackend(Backend):
         if my_date is None:
             return True  # no comparable timestamp; assume we hold it
         floor = my_date - _GRAB_CLAIM_WINDOW
+        # The 50 most-recent comments: a claim posted seconds ago is always in
+        # that window unless 50+ comments landed in the same few seconds, which
+        # isn't a real claim-race scenario.
         for c in self.get_comments(card_id, limit=50):
             text = (c.get("data") or {}).get("text") or ""
             if _CLAIM_MARKER not in text:
