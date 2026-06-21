@@ -77,7 +77,7 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def create_app(token: str | None = None) -> FastAPI:
-    app = FastAPI(title="TrelloCLI Web", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Trellno Web", docs_url=None, redoc_url=None)
 
     if token:
         @app.middleware("http")
@@ -180,6 +180,13 @@ def create_app(token: str | None = None) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/favicon.ico")
+    def favicon() -> FileResponse:
+        # index.html links the SVG icon directly, but browsers also probe
+        # /favicon.ico unprompted; serve the same pink board glyph there so it
+        # resolves instead of 404ing.
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
 
@@ -219,7 +226,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(browse_url)).start()
     print(
-        f"TrelloCLI web on {browse_url}  "
+        f"Trellno web on {browse_url}  "
         f"(backend: {config.get_backend_name()})  — Ctrl-C to stop"
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
