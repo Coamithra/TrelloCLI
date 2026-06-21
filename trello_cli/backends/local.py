@@ -184,29 +184,34 @@ class LocalBackend(Backend):
     def _auto_place_pos(self, board_id: str, list_id: str, sort: str,
                         new_card: dict) -> float:
         """The `pos` a new card should take to land in its sorted slot among the
-        list's existing open cards (float midpoint between the neighbours it sorts
-        between). Falls back to the requested resolve for `manual`/unknown sorts —
-        the caller only invokes this for a real sort."""
+        list's existing open cards: the float midpoint between the `pos` of the
+        two cards it sorts between. Neighbours are found in *sort* order, not
+        `pos` order, so it places correctly even if the list's `pos` order has
+        drifted from its sort order (e.g. a CLI `card pos`/`move` reordered a
+        sorted column without clearing its sort)."""
         key = self._sort_key(sort)
         reverse = sort == "newest"
-        existing = sorted(
-            (c for c in self.store.cards(board_id)
-             if c.get("idList") == list_id and not c.get("closed")),
-            key=lambda c: c.get("pos", 0),
-        )
+        existing = [
+            c for c in self.store.cards(board_id)
+            if c.get("idList") == list_id and not c.get("closed")
+        ]
         if not existing:
             return POS_STEP
+        ordered = sorted(existing, key=key, reverse=reverse)
         nk = key(new_card)
-        # Walk the position-ordered list and find the first card the new one sorts
-        # *before*; insert at the midpoint just above it (or at the bottom if none).
+
         def sorts_before(a_key: Any, b_key: Any) -> bool:
             return a_key > b_key if reverse else a_key < b_key
-        prev_pos: float | None = None
-        for c in existing:
+
+        # Find the first existing card the new one sorts before; its sort-order
+        # neighbour above (if any) is the other midpoint bound.
+        for i, c in enumerate(ordered):
             if sorts_before(nk, key(c)):
                 cp = c.get("pos", 0)
-                return cp / 2 if prev_pos is None else (prev_pos + cp) / 2
-            prev_pos = c.get("pos", 0)
+                if i == 0:  # lands at the top — go strictly below the current min
+                    return cp / 2 if cp > 0 else cp - POS_STEP
+                return (ordered[i - 1].get("pos", 0) + cp) / 2
+        # Sorts at/after every existing card — land below the current maximum.
         return max(c.get("pos", 0) for c in existing) + POS_STEP
 
     def _log(self, board_id: str, action_type: str, data: dict) -> None:
@@ -473,7 +478,10 @@ class LocalBackend(Backend):
         # immediately — future adds stay sorted via create_card's auto-place.
         if resort_to is not None:
             self._resort_list_cards(board_id, list_id, resort_to)
-        self._log(board_id, "updateList", {"list": {"id": list_id, "name": target["name"]}})
+        log_list = {"id": list_id, "name": target["name"]}
+        if "sort" in fields:
+            log_list["sort"] = target["sort"]  # record the headline sort change
+        self._log(board_id, "updateList", {"list": log_list})
         if rebalanced:
             # Transient signal, set after the save so it is never persisted: a
             # respread moved the *other* columns too, so the web client must
@@ -562,6 +570,12 @@ class LocalBackend(Backend):
         # Trello). Manual lists keep the requested pos.
         list_sort = lst.get("sort", DEFAULT_SORT)
         if list_sort != DEFAULT_SORT and list_sort in LIST_SORTS:
+            # Re-assert the sort order first: a CLI `card pos`/`move` can leave a
+            # sorted list's `pos` order drifted from its sort order without
+            # clearing the sort, and `_auto_place_pos` midpoints against the
+            # existing `pos` values. Resorting restores the invariant so the new
+            # card always lands in its correct slot.
+            self._resort_list_cards(board_id, list_id, list_sort)
             card["pos"] = self._auto_place_pos(board_id, list_id, list_sort, card)
         self._save_card(board_id, card)
         if self._rebalance_cards(board_id, list_id):

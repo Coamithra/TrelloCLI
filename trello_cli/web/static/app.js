@@ -263,7 +263,9 @@ function initDragging() {
   boardSortable = Sortable.create(boardEl, {
     group: 'columns',
     draggable: '.column',
-    filter: '.add-list',
+    // Keep the add-list affordance non-draggable, and stop the header controls
+    // (sort picker, actions menu) from initiating a column drag.
+    filter: '.add-list, .column-sort, .column-menu-btn, .column-menu',
     handle: '.column-header',
     animation: 150,
     onStart: () => { liveDragging = true; },
@@ -307,6 +309,7 @@ function initDragging() {
         const destCol = evt.to.closest('.column');
         const clearSort = destCol && destCol.dataset.sort && destCol.dataset.sort !== 'manual';
         let rebalanced = false;
+        let sortCleared = false;
         try {
           const updated = await patch(`/api/cards/${item.dataset.id}`, {
             idList: toList,
@@ -315,11 +318,19 @@ function initDragging() {
           item.dataset.pos = updated.pos;
           item.dataset.list = updated.idList;
           rebalanced = !!updated.rebalanced;
+          // Clear the destination's auto-sort in a separate try: the move already
+          // committed, so a failed sort-clear must not be reported as a failed
+          // move (and only a real clear should drive the reload below).
           if (clearSort) {
-            await patch(`/api/lists/${toList}`, { sort: 'manual' });
-            destCol.dataset.sort = 'manual';
+            try {
+              await patch(`/api/lists/${toList}`, { sort: 'manual' });
+              destCol.dataset.sort = 'manual';
+              sortCleared = true;
+            } catch (err) {
+              setStatus('Card moved, but clearing the column sort failed: ' + err.message, true);
+            }
           }
-          setStatus(clearSort ? 'Card moved (sort cleared)' : 'Card moved');
+          if (!clearSort || sortCleared) setStatus(sortCleared ? 'Card moved (sort cleared)' : 'Card moved');
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
         } finally {
@@ -329,7 +340,7 @@ function initDragging() {
         // data-pos is now stale; reload to refresh every position. A cleared sort
         // also needs a reload so the destination column's sort <select> resets.
         // Done after finally clears liveDragging so we don't tear down mid-onEnd.
-        if (rebalanced || clearSort) await loadBoard(picker.value);
+        if (rebalanced || sortCleared) await loadBoard(picker.value);
       },
     }));
   });
@@ -363,6 +374,7 @@ function addListEl(boardId) {
   input.placeholder = 'Enter list name…';
   form.appendChild(input);
 
+  let submitting = false;  // guards against Enter + blur double-firing the POST
   const reset = () => {
     input.value = '';
     form.classList.add('hidden');
@@ -374,8 +386,10 @@ function addListEl(boardId) {
     input.focus();
   });
   const submit = async () => {
+    if (submitting) return;
     const name = input.value.trim();
     if (!name) { reset(); return; }
+    submitting = true;
     try {
       await api(`/api/boards/${boardId}/lists`, {
         method: 'POST',
@@ -383,9 +397,10 @@ function addListEl(boardId) {
         body: JSON.stringify({ name }),
       });
       setStatus('List added');
-      await loadBoard(picker.value);
+      await loadBoard(picker.value);  // re-renders, discarding this affordance
     } catch (err) {
       setStatus('Add list failed: ' + err.message, true);
+      submitting = false;  // allow a retry only on failure (success re-renders)
     }
   };
   input.addEventListener('keydown', (e) => {
