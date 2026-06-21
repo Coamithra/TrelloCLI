@@ -118,7 +118,7 @@ Dig into the problem before proposing solutions. Use `/research` for topics that
 
 6. **Read the referenced code** — The card and `DESIGN.md` cite specific files. Read them — descriptions can drift. The architecture map in [`CLAUDE.md`](CLAUDE.md) is the fastest orientation
 7. **Trace the call chain** — The layers (all documented in `CLAUDE.md`):
-    - `trello_cli/config.py` — credentials, active board, and per-invocation board override stored in `~/.trello-cli.json`
+    - `trello_cli/config.py` — credentials + the local-backend root (`local_root`), stored in `~/.trello-cli.json`; board/backend selection is per-invocation only (`--board`/`--backend`/env), never persisted
     - `trello_cli/api.py` — thin `httpx` client over the Trello REST API; requests only the fields each command needs
     - `trello_cli/fmt.py` — compact table/detail formatting + helpers (`short_id`, `truncate`, `due_str`, `label_str`, `is_image`, `size_str`, `print_json`). **Backend-agnostic** — it formats plain Trello-shaped dicts, which is what makes the planned local backend cheap
     - `trello_cli/main.py` — CLI entry point: noun-group dispatch (`card`, `list`, `label`, `checklist`, `comment`, `attachment`), the `_resolve_*` prefix resolvers, `_require_board()`, and `--json` / `--board` handling
@@ -206,7 +206,7 @@ Stop any processes (a `trello serve` web server, etc.) you've started, and remov
 | **Resolvers** | Every domain has a `_resolve_*` helper: accepts ID, ID-prefix, or case-insensitive name-prefix; `SystemExit` on miss/ambiguity. Keep them strict — never silently pick the first match |
 | **API client** | `api.py` — thin `httpx` over Trello REST. Narrow `fields=` to only what the command needs (keeps responses + context small). Secrets come from `~/.trello-cli.json` / env, never hardcoded |
 | **Formatting** | `fmt.py` — backend-agnostic; formats Trello-shaped dicts. Touching the dict shape is a wide blast radius (every command reads these keys). `print_json` is the `--json` path |
-| **Board scope / config** | `config.py` + `_require_board()`. Honors `--board <name_or_id>` and `TRELLO_BOARD`. Active board + creds persist in `~/.trello-cli.json` |
+| **Board scope / config** | `config.py` + `_require_board()`. Honors `--board <name_or_id>` and `TRELLO_BOARD`. Credentials + `local_root` persist in `~/.trello-cli.json`; board/backend selection is per-invocation only (no active board) |
 | **Backends (planned, see DESIGN.md)** | The `Backend` ABC is the CLI's ~40 ops. Both `TrelloBackend` and the future `LocalBackend` must return the **same dict shape** or `fmt.py` / commands `KeyError`. Local backend: 24-hex IDs + float `pos` so resolvers and `pos` math behave identically |
 | **Web app (planned, see DESIGN.md)** | FastAPI over the same `Backend`; vanilla JS + SortableJS, no build step. Binds `127.0.0.1` by default — remote exposure is an opt-in with a token, never the default. Web deps go in an optional `[web]` extra so the core CLI stays httpx-only |
 | **Refactoring** | High blast radius if it touches the dict contract, the resolvers, or board scoping. Verify by diffing command output before/after against a real board — behavior must be identical |
