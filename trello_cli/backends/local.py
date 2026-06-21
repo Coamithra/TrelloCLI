@@ -164,6 +164,21 @@ class LocalBackend(Backend):
         # newest/oldest both sort ascending by activity; newest just reverses.
         return lambda c: c.get("dateLastActivity", "") or ""
 
+    def _list_is_sorted(self, board_id: str, list_id: str, sort: str) -> bool:
+        """True if the list's open cards are already in `sort` order when read in
+        `pos` order — i.e. `_auto_place_pos` can midpoint safely without a
+        resort first. Always True for `manual`/unknown."""
+        if sort == DEFAULT_SORT or sort not in LIST_SORTS:
+            return True
+        by_pos = sorted(
+            (c for c in self.store.cards(board_id)
+             if c.get("idList") == list_id and not c.get("closed")),
+            key=lambda c: c.get("pos", 0),
+        )
+        key = self._sort_key(sort)
+        keys = [key(c) for c in by_pos]
+        return keys == sorted(keys, reverse=(sort == "newest"))
+
     def _resort_list_cards(self, board_id: str, list_id: str, sort: str) -> None:
         """Respread a list's open cards into the order its `sort` dictates,
         rewriting only the cards whose `pos` actually changes (minimal Dropbox
@@ -570,12 +585,14 @@ class LocalBackend(Backend):
         # Trello). Manual lists keep the requested pos.
         list_sort = lst.get("sort", DEFAULT_SORT)
         if list_sort != DEFAULT_SORT and list_sort in LIST_SORTS:
-            # Re-assert the sort order first: a CLI `card pos`/`move` can leave a
-            # sorted list's `pos` order drifted from its sort order without
-            # clearing the sort, and `_auto_place_pos` midpoints against the
-            # existing `pos` values. Resorting restores the invariant so the new
-            # card always lands in its correct slot.
-            self._resort_list_cards(board_id, list_id, list_sort)
+            # `_auto_place_pos` midpoints against the existing cards' `pos`, which
+            # only places correctly if `pos` order already equals sort order.
+            # That holds for the normal path (every add is auto-placed), but a CLI
+            # `card pos`/`move` can drift a sorted list without clearing its sort.
+            # Only when that drift is actually present do we respread first — so
+            # the common add stays a single write (minimal Dropbox churn).
+            if not self._list_is_sorted(board_id, list_id, list_sort):
+                self._resort_list_cards(board_id, list_id, list_sort)
             card["pos"] = self._auto_place_pos(board_id, list_id, list_sort, card)
         self._save_card(board_id, card)
         if self._rebalance_cards(board_id, list_id):
