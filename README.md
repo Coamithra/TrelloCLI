@@ -272,8 +272,8 @@ for a read-only detail panel (description, due, labels, checklist, comments).
 
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its
-cards are hidden, not destroyed). Each header also has a **sort picker** (Manual / Newest /
-Oldest / Name).
+cards are hidden, not destroyed) and a **Sort by** section (Manual / Newest / Oldest / Name) in
+that same menu.
 
 **Persisted per-column auto-sort (local backend — beats Trello):** picking a sort other than
 Manual doesn't just re-order the column once — it is **saved on the list**, and every new card
@@ -281,7 +281,7 @@ added to that column is auto-placed into its sorted slot (alphabetical, or by ne
 activity). The setting survives reloads. Manually dragging a card into an auto-sorted column
 **clears that column's sort back to Manual** (so your hand-placement isn't immediately
 overridden by the next add). This is a **local-backend feature**: Trello's API has no per-list
-sort field, so on a `--backend trello` board the sort picker is a no-op.
+sort field, so on a `--backend trello` board the Sort by menu is a no-op.
 
 **Live refresh:** when serving a `--backend local` board, the page reloads itself
 as the store changes on disk — a Dropbox sync from another machine, or another `--backend local`

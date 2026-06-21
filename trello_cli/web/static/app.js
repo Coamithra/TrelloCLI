@@ -184,32 +184,8 @@ function columnEl(list, cards) {
   count.className = 'column-count';
   count.textContent = cards.length;
 
-  // Per-column sort picker (persisted auto-sort). Changing it persists the
-  // setting AND re-sorts existing cards server-side, so we reload to reflect
-  // the new order; every later add then auto-places per the saved sort.
-  const sortSel = document.createElement('select');
-  sortSel.className = 'column-sort';
-  sortSel.title = 'Sort this column (saved; new cards auto-place)';
-  [['manual', 'Manual'], ['newest', 'Newest'], ['oldest', 'Oldest'], ['name', 'Name']]
-    .forEach(([value, label]) => {
-      const opt = document.createElement('option');
-      opt.value = value;
-      opt.textContent = label;
-      sortSel.appendChild(opt);
-    });
-  sortSel.value = listSort;
-  sortSel.addEventListener('change', async () => {
-    try {
-      await patch(`/api/lists/${list.id}`, { sort: sortSel.value });
-      setStatus(sortSel.value === 'manual' ? 'Sort cleared' : 'Column sorted: ' + sortSel.value);
-      await loadBoard(picker.value);
-    } catch (err) {
-      setStatus('Sort failed: ' + err.message, true);
-    }
-  });
-
-  // Delete (archive) the column. A small ⋯ menu keeps the affordance Trello-like
-  // without crowding the header; the only action today is delete.
+  // The actions menu (the small⋯ button) holds Sort by and Delete list,
+  // keeping the column header uncluttered, Trello-style.
   const menuBtn = document.createElement('button');
   menuBtn.className = 'column-menu-btn';
   menuBtn.type = 'button';
@@ -220,7 +196,7 @@ function columnEl(list, cards) {
     toggleColumnMenu(col, list);
   });
 
-  header.append(name, count, sortSel, menuBtn);
+  header.append(name, count, menuBtn);
   col.appendChild(header);
 
   const cardsWrap = document.createElement('div');
@@ -264,7 +240,7 @@ function columnEl(list, cards) {
   return col;
 }
 
-// A tiny per-column actions menu (currently just Delete). Closes any other open
+// A per-column actions menu: Sort by + Delete list. Closes any other open
 // menu first; an outside click / Escape closes it (wired once at boot).
 function toggleColumnMenu(col, list) {
   const existing = col.querySelector('.column-menu');
@@ -272,6 +248,40 @@ function toggleColumnMenu(col, list) {
   if (existing) return;  // it was open → toggle shut
   const menu = document.createElement('div');
   menu.className = 'column-menu';
+
+  // Sort by (persisted auto-sort): picking a sort re-sorts the column's cards
+  // server-side, and every later add auto-places into the saved order. The
+  // current choice is marked active.
+  const sortHead = document.createElement('div');
+  sortHead.className = 'column-menu-label';
+  sortHead.textContent = 'Sort by';
+  menu.appendChild(sortHead);
+  const current = list.sort || 'manual';
+  [['manual', 'Manual'], ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['name', 'Card name']]
+    .forEach(([value, label]) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'column-menu-item' + (value === current ? ' active' : '');
+      item.textContent = label;
+      item.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        closeColumnMenus();
+        if (value === current) return;  // already this sort
+        try {
+          await patch(`/api/lists/${list.id}`, { sort: value });
+          setStatus(value === 'manual' ? 'Sort cleared' : 'Column sorted: ' + value);
+          await loadBoard(picker.value);
+        } catch (err) {
+          setStatus('Sort failed: ' + err.message, true);
+        }
+      });
+      menu.appendChild(item);
+    });
+
+  const sep = document.createElement('div');
+  sep.className = 'column-menu-sep';
+  menu.appendChild(sep);
+
   const del = document.createElement('button');
   del.type = 'button';
   del.className = 'column-menu-item danger';
@@ -316,7 +326,7 @@ function initDragging() {
     draggable: '.column',
     // Keep the add-list affordance non-draggable, and stop the header controls
     // (sort picker, actions menu) from initiating a column drag.
-    filter: '.add-list, .column-sort, .column-menu-btn, .column-menu',
+    filter: '.add-list, .column-menu-btn, .column-menu',
     // Filter alone stops these from starting a drag, but SortableJS still
     // preventDefault()s the pointer event on them by default — which blocks the
     // native <select> dropdown from opening and eats the menu button's click,
