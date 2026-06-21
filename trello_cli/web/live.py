@@ -36,6 +36,17 @@ def get_version() -> int:
         return _version
 
 
+def watchdog_available() -> bool:
+    """Whether the `watchdog` package can be imported.
+
+    Live refresh for the local backend needs it (see `start_watching`); without
+    it the SSE stream silently degrades to keep-alive only. `serve()` checks this
+    at startup so the degradation is announced rather than silent."""
+    import importlib.util
+
+    return importlib.util.find_spec("watchdog") is not None
+
+
 def start_watching(root: str) -> bool:
     """Start watching `root` for changes (idempotent).
 

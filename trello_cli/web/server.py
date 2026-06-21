@@ -395,4 +395,13 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
         f"Trellno web on {browse_url}  "
         f"(backend: {config.get_backend_name()})  — Ctrl-C to stop"
     )
+    if config.get_backend_name() == "local" and not live.watchdog_available():
+        # The SSE stream degrades to keep-alive-only without watchdog, so the
+        # board silently stops auto-updating. Announce it instead of failing mute.
+        print(
+            "WARNING: 'watchdog' is not installed — live refresh is OFF; the board "
+            "won't auto-update when cards change (you'll need to reload manually). "
+            'Fix: pip install "watchdog>=4"   (or reinstall the web extra: '
+            'pip install -e ".[web]")'
+        )
     uvicorn.run(app, host=host, port=port, log_level="info")
