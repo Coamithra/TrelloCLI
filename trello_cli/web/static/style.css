@@ -57,9 +57,57 @@ body { display: flex; flex-direction: column; }
   flex: 0 0 auto;
 }
 
-.topbar h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .3px; }
+.topbar h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .3px; flex: 0 0 auto; }
+
+/* Quick-swap board buttons: shrink + ellipsis before they overflow the bar. */
+.board-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.board-nav.hidden { display: none; }
+.board-nav-btn {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.board-nav-btn:hover { background: var(--card-hover); }
+.board-nav-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1d2125;
+  font-weight: 600;
+}
+
+.star-toggle {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.star-toggle:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.star-toggle.on { color: #f2d600; }
 
 #board-picker {
+  flex: 0 0 auto;
   background: var(--card-bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -67,8 +115,17 @@ body { display: flex; flex-direction: column; }
   padding: 4px 8px;
   font-size: 14px;
 }
+#board-picker.hidden { display: none; }
 
-.status { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+.status {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .status.error, .error { color: var(--error); }
 
 /* ── Board ── */

@@ -297,6 +297,13 @@ external URL attachments link straight to their source. Remove one with the × o
 mirrors the CLI's `attachment add <file_or_url>` — anything attached here is visible to
 `attachment ls` and vice-versa.
 
+**Starred quick-swap boards:** click the ★ toggle (top-right, just before the board dropdown)
+to **star** the current board — it gets a one-click button in the top bar and drops out of the
+dropdown; the dropdown holds the rest. Click a button to jump straight to that board (the active
+one is highlighted). Stars are a **per-browser preference** (stored in `localStorage`), so they
+persist across reloads on that machine but don't sync to other browsers. When the bar fills up
+the buttons squish (truncating with an ellipsis) rather than overflowing.
+
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its
 cards are hidden, not destroyed) and a **Sort by** section (Manual / Newest / Oldest / Name) in
