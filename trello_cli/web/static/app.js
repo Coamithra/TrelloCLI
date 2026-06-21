@@ -2,6 +2,8 @@
 
 const boardEl = document.getElementById('board');
 const picker = document.getElementById('board-picker');
+const navEl = document.getElementById('board-nav');
+const starToggle = document.getElementById('star-toggle');
 const statusEl = document.getElementById('status');
 const detailEl = document.getElementById('detail');
 const overlayEl = document.getElementById('overlay');
@@ -9,6 +11,9 @@ const overlayEl = document.getElementById('overlay');
 let cardSortables = [];
 let boardSortable = null;
 let liveDragging = false;  // true mid-drag, so a live refresh won't yank a card
+
+let allBoards = [];        // every board from GET /api/boards, in API order
+let currentBoardId = null; // the board currently rendered (drives every reload)
 
 function setStatus(msg, isError) {
   statusEl.textContent = msg || '';
@@ -37,6 +42,88 @@ function setBoardInUrl(boardId) {
   const url = new URL(location.href);
   url.searchParams.set('board', boardId);
   history.replaceState(null, '', url);
+}
+
+// ── board navigation: starred quick-swap buttons + dropdown ─────────
+// Stars are a client-side preference (per-browser), kept in localStorage as a
+// JSON array of board ids. Starred boards get a quick-swap button in the top
+// bar; the rest stay in the dropdown.
+const STAR_KEY = 'trellno:starredBoards';
+
+function getStarredSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(STAR_KEY)) || []); }
+  catch (e) { return new Set(); }
+}
+
+function saveStarred(arr) {
+  try { localStorage.setItem(STAR_KEY, JSON.stringify(arr)); } catch (e) { /* private mode */ }
+}
+
+// Rebuild the top-bar nav from allBoards + the starred set + currentBoardId.
+// Pure DOM — no fetch, no board reload — so it's cheap to call after a star
+// toggle or a board switch.
+function renderNav() {
+  const starred = getStarredSet();
+
+  // Quick-swap buttons, one per starred board (board order), active one lit.
+  navEl.innerHTML = '';
+  allBoards.filter((b) => starred.has(b.id)).forEach((b) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'board-nav-btn' + (b.id === currentBoardId ? ' active' : '');
+    btn.textContent = b.name;
+    btn.title = b.name;
+    btn.addEventListener('click', () => selectBoard(b.id));
+    navEl.appendChild(btn);
+  });
+
+  // Dropdown holds the non-starred boards. A disabled "More boards…"
+  // placeholder is the selected value when the current board is starred (so it
+  // isn't an option here); the whole select hides when nothing is left in it.
+  const nonStarred = allBoards.filter((b) => !starred.has(b.id));
+  picker.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.disabled = true;
+  placeholder.textContent = nonStarred.length ? 'More boards…' : 'No other boards';
+  picker.appendChild(placeholder);
+  nonStarred.forEach((b) => {
+    const opt = document.createElement('option');
+    opt.value = b.id;
+    opt.textContent = b.name;
+    picker.appendChild(opt);
+  });
+  picker.value = starred.has(currentBoardId) ? '' : currentBoardId;
+  picker.classList.toggle('hidden', nonStarred.length === 0);
+
+  // ★/☆ toggle reflects whether the current board is starred.
+  const on = starred.has(currentBoardId);
+  starToggle.textContent = on ? '★' : '☆';
+  starToggle.classList.toggle('on', on);
+  starToggle.title = on ? 'Unstar this board' : 'Star this board';
+  starToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+// Switch the rendered board: update state + URL, re-skin the nav, then reload
+// the board and re-point the live stream. No-op for an empty/same selection.
+function selectBoard(boardId) {
+  if (!boardId || boardId === currentBoardId) return;
+  currentBoardId = boardId;
+  setBoardInUrl(boardId);
+  renderNav();
+  loadBoard(boardId);
+  initLive(boardId);
+}
+
+// Star/unstar the current board, then re-skin the nav (the board view is
+// unchanged, so no reload).
+function toggleStarCurrent() {
+  if (!currentBoardId) return;
+  const set = getStarredSet();
+  if (set.has(currentBoardId)) set.delete(currentBoardId);
+  else set.add(currentBoardId);
+  saveStarred([...set]);
+  renderNav();
 }
 
 async function api(path, opts) {
@@ -225,7 +312,7 @@ function columnEl(list, cards) {
       // the bottom), so reload to place it correctly; manual columns keep the
       // cheap append.
       if (listSort !== 'manual') {
-        await loadBoard(picker.value);
+        await loadBoard(currentBoardId);
       } else {
         cardsWrap.appendChild(cardEl(card));
         countFor(cardsWrap);
@@ -270,7 +357,7 @@ function toggleColumnMenu(col, list) {
         try {
           await patch(`/api/lists/${list.id}`, { sort: value });
           setStatus(value === 'manual' ? 'Sort cleared' : 'Column sorted: ' + value);
-          await loadBoard(picker.value);
+          await loadBoard(currentBoardId);
         } catch (err) {
           setStatus('Sort failed: ' + err.message, true);
         }
@@ -297,7 +384,7 @@ function toggleColumnMenu(col, list) {
     try {
       await patch(`/api/lists/${list.id}`, { closed: true });
       setStatus('List deleted');
-      await loadBoard(picker.value);
+      await loadBoard(currentBoardId);
     } catch (err) {
       setStatus('Delete failed: ' + err.message, true);
     }
@@ -356,7 +443,7 @@ function initDragging() {
       // A server-side rebalance respread the *other* columns too, so their DOM
       // data-pos is now stale; reload to refresh every position. Done after the
       // finally clears liveDragging so we don't tear down this Sortable mid-onEnd.
-      if (rebalanced) await loadBoard(picker.value);
+      if (rebalanced) await loadBoard(currentBoardId);
     },
   });
 
@@ -408,7 +495,7 @@ function initDragging() {
         // data-pos is now stale; reload to refresh every position. A cleared sort
         // also needs a reload so the destination column's sort <select> resets.
         // Done after finally clears liveDragging so we don't tear down mid-onEnd.
-        if (rebalanced || sortCleared) await loadBoard(picker.value);
+        if (rebalanced || sortCleared) await loadBoard(currentBoardId);
       },
     }));
   });
@@ -465,7 +552,7 @@ function addListEl(boardId) {
         body: JSON.stringify({ name }),
       });
       setStatus('List added');
-      await loadBoard(picker.value);  // re-renders, discarding this affordance
+      await loadBoard(currentBoardId);  // re-renders, discarding this affordance
     } catch (err) {
       setStatus('Add list failed: ' + err.message, true);
       submitting = false;  // allow a retry only on failure (success re-renders)
@@ -1055,8 +1142,8 @@ function initLive(boardId) {
   if (liveSource) liveSource.close();
   liveSource = new EventSource(withToken(withParam('/api/events', 'board', boardId)));
   liveSource.addEventListener('change', () => {
-    if (liveDragging || !picker.value) return;
-    loadBoard(picker.value);
+    if (liveDragging || !currentBoardId) return;
+    loadBoard(currentBoardId);
   });
 }
 
@@ -1069,26 +1156,17 @@ async function init() {
       setStatus('No boards found for this backend.', true);
       return;
     }
-    picker.innerHTML = '';
-    boards.forEach((b) => {
-      const opt = document.createElement('option');
-      opt.value = b.id;
-      opt.textContent = b.name;
-      picker.appendChild(opt);
-    });
-    picker.addEventListener('change', () => {
-      setBoardInUrl(picker.value);
-      loadBoard(picker.value);
-      initLive(picker.value);
-    });
+    allBoards = boards;
+    picker.addEventListener('change', () => selectBoard(picker.value));
+    starToggle.addEventListener('click', toggleStarCurrent);
     // Restore the board from ?board=<id> on reload/bookmark; fall back to the
     // first board if it's absent or no longer exists for this backend.
     const requested = new URLSearchParams(location.search).get('board');
-    const initial = boards.some((b) => b.id === requested) ? requested : boards[0].id;
-    picker.value = initial;
-    setBoardInUrl(initial);
-    loadBoard(initial);
-    initLive(initial);
+    currentBoardId = boards.some((b) => b.id === requested) ? requested : boards[0].id;
+    renderNav();
+    setBoardInUrl(currentBoardId);
+    loadBoard(currentBoardId);
+    initLive(currentBoardId);
   } catch (err) {
     setStatus('Could not load boards: ' + err.message, true);
   }
