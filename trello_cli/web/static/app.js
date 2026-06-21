@@ -26,6 +26,19 @@ function withToken(path) {
   return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(AUTH_TOKEN);
 }
 
+function withParam(path, key, value) {
+  return path + (path.includes('?') ? '&' : '?') + key + '=' + encodeURIComponent(value);
+}
+
+// Reflect the selected board in the URL (?board=<id>) so a reload, bookmark, or
+// shared link reopens it instead of snapping back to the first board. Preserves
+// any existing query params (notably ?token=) and doesn't add a history entry.
+function setBoardInUrl(boardId) {
+  const url = new URL(location.href);
+  url.searchParams.set('board', boardId);
+  history.replaceState(null, '', url);
+}
+
 async function api(path, opts) {
   const res = await fetch(withToken(path), opts);
   if (!res.ok) {
@@ -346,13 +359,20 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetai
 
 // ── live refresh ───────────────────────────────────────────────────
 
-// Reload the current board when the server signals a store change (a Dropbox
-// sync, or another `--backend local` CLI mutation). EventSource auto-reconnects
-// if the stream drops; skip the reload mid-drag so a card isn't yanked away.
-function initLive() {
+let liveSource = null;
+
+// Reload the current board when the server signals a change. For the local
+// backend that's a store file change (a Dropbox sync, or another
+// `--backend local` CLI mutation); for the Trello backend the server polls the
+// board's latest action, which is why the connection carries the board id —
+// reconnect when the selected board changes so it polls the right one. The local
+// backend ignores the board param. EventSource auto-reconnects if the stream
+// drops; skip the reload mid-drag so a card isn't yanked away.
+function initLive(boardId) {
   if (typeof EventSource === 'undefined') return;
-  const es = new EventSource(withToken('/api/events'));
-  es.addEventListener('change', () => {
+  if (liveSource) liveSource.close();
+  liveSource = new EventSource(withToken(withParam('/api/events', 'board', boardId)));
+  liveSource.addEventListener('change', () => {
     if (liveDragging || !picker.value) return;
     loadBoard(picker.value);
   });
@@ -374,9 +394,19 @@ async function init() {
       opt.textContent = b.name;
       picker.appendChild(opt);
     });
-    picker.addEventListener('change', () => loadBoard(picker.value));
-    loadBoard(boards[0].id);
-    initLive();
+    picker.addEventListener('change', () => {
+      setBoardInUrl(picker.value);
+      loadBoard(picker.value);
+      initLive(picker.value);
+    });
+    // Restore the board from ?board=<id> on reload/bookmark; fall back to the
+    // first board if it's absent or no longer exists for this backend.
+    const requested = new URLSearchParams(location.search).get('board');
+    const initial = boards.some((b) => b.id === requested) ? requested : boards[0].id;
+    picker.value = initial;
+    setBoardInUrl(initial);
+    loadBoard(initial);
+    initLive(initial);
   } catch (err) {
     setStatus('Could not load boards: ' + err.message, true);
   }

@@ -136,30 +136,62 @@ def create_app(token: str | None = None) -> FastAPI:
         return _ok(api.create_card, list_id, name, pos="bottom")
 
     @app.get("/api/events")
-    async def events() -> StreamingResponse:
+    async def events(board: str | None = None) -> StreamingResponse:
         """Server-Sent Events stream powering live refresh.
 
         For the local backend, watch the store root and emit `event: change`
         whenever a file under it changes (a Dropbox sync, or another
-        `--backend local` CLI mutation) so the browser reloads the board. The
-        Trello backend has no local files, so its stream is keep-alive only.
+        `--backend local` CLI mutation) so the browser reloads the board.
+
+        For the Trello backend there are no local files to watch, so the stream
+        instead polls the viewed board's latest action id (the `?board=<id>` the
+        client threads on) every few seconds and emits `change` when it moves —
+        surfacing edits made elsewhere (other CLIs, the Trello web app). Polling
+        is the cheapest possible request (one action) and only runs while a tab
+        is connected. Without a board it falls back to keep-alive only.
         EventSource on the client auto-reconnects if the connection drops."""
         is_local = config.get_backend_name() == "local"
+        # Poll Trello less aggressively than the local file-watch: it's a network
+        # round-trip per tick and the API is rate-limited.
+        poll_every = 5
+
+        def _latest_action_id(board_id: str) -> str | None:
+            # The most recent board action; its id is monotonic, so any change to
+            # the board (card add/move/comment/…) advances it. Best-effort — a
+            # transient API error just leaves the last seen id and retries.
+            try:
+                actions = api.get_activity(board_id, limit=1)
+            except Exception:
+                return None
+            return actions[0]["id"] if actions else None
 
         async def gen() -> AsyncIterator[str]:
             # Runs until the client disconnects: Starlette cancels the task, which
             # raises CancelledError at the await below and ends the generator.
             yield ": connected\n\n"
             last = live.get_version()
+            last_action: str | None = None
+            if not is_local and board:
+                last_action = await asyncio.to_thread(_latest_action_id, board)
             idle = 0
+            ticks = 0
             while True:
                 await asyncio.sleep(1.0)
+                ticks += 1
                 # Re-arm each tick (idempotent): if the store root didn't exist at
                 # connect time, the watcher starts as soon as it appears.
                 if is_local and live.start_watching(config.get_local_root()):
                     cur = live.get_version()
                     if cur != last:
                         last = cur
+                        idle = 0
+                        yield "event: change\ndata: {}\n\n"
+                        continue
+                elif not is_local and board and ticks % poll_every == 0:
+                    # Run the blocking httpx call off the event loop.
+                    cur_action = await asyncio.to_thread(_latest_action_id, board)
+                    if cur_action is not None and cur_action != last_action:
+                        last_action = cur_action
                         idle = 0
                         yield "event: change\ndata: {}\n\n"
                         continue
