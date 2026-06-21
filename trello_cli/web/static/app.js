@@ -70,6 +70,39 @@ function del(path) {
   return api(path, { method: 'DELETE' });
 }
 
+// Attachment helpers. isImageAtt / sizeStr mirror fmt.py's is_image / size_str
+// so the UI matches the CLI. attachmentHref: uploaded blobs are served
+// (token-gated) through the proxy endpoint; external URL attachments are linked
+// to directly (the browser fetches them — the server never proxies an arbitrary
+// URL on a request's behalf).
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
+  '.tif', '.tiff', '.heic'];
+
+function isImageAtt(att) {
+  const mime = (att.mimeType || '').toLowerCase();
+  if (mime) return mime.startsWith('image/');
+  const n = (att.name || att.url || '').toLowerCase();
+  return IMAGE_EXTS.some((e) => n.endsWith(e));
+}
+
+function sizeStr(bytes) {
+  if (!bytes) return '';
+  let n = bytes;
+  const units = ['B', 'KB', 'MB', 'GB'];
+  for (let i = 0; i < units.length; i++) {
+    if (n < 1024 || i === units.length - 1) {
+      return (units[i] === 'B' ? Math.round(n) : n.toFixed(1)) + units[i];
+    }
+    n /= 1024;
+  }
+  return '';
+}
+
+function attachmentHref(cardId, att) {
+  if (att.isUpload) return withToken(`/api/cards/${cardId}/attachments/${att.id}/raw`);
+  return att.url;
+}
+
 // The Trello label palette the chip CSS (.label[data-color=…]) already styles,
 // offered when creating a new label on the fly. '' is the colorless/grey label.
 const LABEL_COLORS = ['green', 'yellow', 'orange', 'red', 'purple', 'blue',
@@ -129,13 +162,23 @@ function cardEl(card) {
   title.textContent = card.name;
   el.appendChild(title);
 
-  if (card.due) {
+  const attCount = (card.attachments || []).length;
+  if (card.due || attCount) {
     const meta = document.createElement('div');
     meta.className = 'card-meta';
-    const due = document.createElement('span');
-    due.className = 'due' + (card.dueComplete ? ' done' : '');
-    due.textContent = card.due.slice(0, 10);
-    meta.appendChild(due);
+    if (card.due) {
+      const due = document.createElement('span');
+      due.className = 'due' + (card.dueComplete ? ' done' : '');
+      due.textContent = card.due.slice(0, 10);
+      meta.appendChild(due);
+    }
+    if (attCount) {
+      const att = document.createElement('span');
+      att.className = 'card-attach';
+      att.textContent = `📎 ${attCount}`;
+      att.title = `${attCount} attachment${attCount === 1 ? '' : 's'}`;
+      meta.appendChild(att);
+    }
     el.appendChild(meta);
   }
 
@@ -831,6 +874,144 @@ function renderDetailDue() {
   }
 }
 
+// ── attachments (live slot, like labels/due) ───────────────────────
+
+function attachmentRow(att) {
+  const card = openCard;
+  const href = attachmentHref(card.id, att);
+  const row = document.createElement('div');
+  row.className = 'attachment';
+
+  const thumb = document.createElement('a');
+  thumb.className = 'attachment-thumb';
+  thumb.href = href;
+  thumb.target = '_blank';
+  thumb.rel = 'noopener';
+  if (isImageAtt(att)) {
+    const img = document.createElement('img');
+    img.src = href;
+    img.alt = att.name || '';
+    img.loading = 'lazy';
+    thumb.appendChild(img);
+  } else {
+    thumb.classList.add('generic');
+    thumb.textContent = '📎';
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'attachment-meta';
+  const link = document.createElement('a');
+  link.className = 'attachment-name';
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = att.name || att.url || '(unnamed)';
+  const sub = document.createElement('div');
+  sub.className = 'attachment-sub';
+  const bits = [att.isUpload ? 'file' : 'link'];
+  const sz = sizeStr(att.bytes);
+  if (sz) bits.push(sz);
+  sub.textContent = bits.join(' · ');
+  meta.append(link, sub);
+
+  const rm = document.createElement('button');
+  rm.className = 'attachment-del';
+  rm.type = 'button';
+  rm.title = 'Remove attachment';
+  rm.textContent = '×';
+  rm.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Remove attachment "${att.name || att.url}"?`)) return;
+    try {
+      const updated = await del(`/api/cards/${card.id}/attachments/${att.id}`);
+      applyCardUpdate(updated);
+      renderDetailAttachments();
+      setStatus('Attachment removed');
+    } catch (err) {
+      setStatus('Remove failed: ' + err.message, true);
+    }
+  });
+
+  row.append(thumb, meta, rm);
+  return row;
+}
+
+function renderDetailAttachments() {
+  const slot = detailEl.querySelector('#detail-attachments');
+  if (!slot) return;
+  const atts = openCard.attachments || [];
+  const head = detailEl.querySelector('#detail-attachments-head');
+  if (head) head.textContent = `Attachments (${atts.length})`;
+  slot.innerHTML = '';
+  if (!atts.length) {
+    slot.appendChild(Object.assign(document.createElement('p'),
+      { className: 'detail-empty', textContent: 'No attachments yet.' }));
+    return;
+  }
+  atts.forEach((a) => slot.appendChild(attachmentRow(a)));
+}
+
+// Popover to add an attachment: upload a file (multipart) or paste a link.
+function openAttachmentPopover(anchor) {
+  const card = openCard;
+  if (!card) return;
+  openPopoverAt(anchor, 'Add attachment', (body) => {
+    body.appendChild(heading('Upload a file'));
+    const fileIn = document.createElement('input');
+    fileIn.type = 'file';
+    fileIn.className = 'attachment-file-input';
+    fileIn.addEventListener('change', async () => {
+      const f = fileIn.files && fileIn.files[0];
+      if (!f) return;
+      try {
+        const fd = new FormData();
+        fd.append('file', f);
+        // No Content-Type header — the browser sets the multipart boundary.
+        const updated = await api(`/api/cards/${card.id}/attachments/file`,
+          { method: 'POST', body: fd });
+        applyCardUpdate(updated);
+        renderDetailAttachments();
+        closePopover();
+        setStatus('Attachment uploaded');
+      } catch (err) {
+        setStatus('Upload failed: ' + err.message, true);
+      }
+    });
+    body.appendChild(fileIn);
+
+    body.appendChild(heading('Or paste a link'));
+    const form = document.createElement('div');
+    form.className = 'attachment-link-form';
+    const urlIn = document.createElement('input');
+    urlIn.type = 'text';
+    urlIn.className = 'inline-input';
+    urlIn.placeholder = 'https://…';
+    const nameIn = document.createElement('input');
+    nameIn.type = 'text';
+    nameIn.className = 'inline-input';
+    nameIn.placeholder = 'Display name (optional)';
+    const add = document.createElement('button');
+    add.className = 'btn-primary';
+    add.textContent = 'Attach link';
+    add.addEventListener('click', async () => {
+      const url = urlIn.value.trim();
+      if (!url) { setStatus('Enter a URL', true); return; }
+      try {
+        const updated = await post(`/api/cards/${card.id}/attachments`,
+          { url, name: nameIn.value.trim() });
+        applyCardUpdate(updated);
+        renderDetailAttachments();
+        closePopover();
+        setStatus('Attachment added');
+      } catch (err) {
+        setStatus('Attach failed: ' + err.message, true);
+      }
+    });
+    form.append(urlIn, nameIn, add);
+    body.appendChild(form);
+  });
+}
+
 function commentEl(c) {
   const who = (c.memberCreator && c.memberCreator.username) || '?';
   const date = (c.date || '').slice(0, 10);
@@ -894,6 +1075,10 @@ async function openDetail(cardId) {
     dueBtn.className = 'btn';
     dueBtn.textContent = '📅 Due date';
     dueBtn.addEventListener('click', (e) => { e.stopPropagation(); openDuePopover(dueBtn); });
+    const attBtn = document.createElement('button');
+    attBtn.className = 'btn';
+    attBtn.textContent = '📎 Attach';
+    attBtn.addEventListener('click', (e) => { e.stopPropagation(); openAttachmentPopover(attBtn); });
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-danger';
     delBtn.textContent = '🗑 Delete';
@@ -908,7 +1093,7 @@ async function openDetail(cardId) {
         setStatus('Delete failed: ' + err.message, true);
       }
     });
-    toolbar.append(labelBtn, dueBtn, delBtn);
+    toolbar.append(labelBtn, dueBtn, attBtn, delBtn);
     detailEl.appendChild(toolbar);
 
     // ── labels (live slot) ──
@@ -968,6 +1153,15 @@ async function openDetail(cardId) {
       });
       detailEl.appendChild(ul);
     });
+
+    // ── attachments (live slot) ──
+    const aHead = heading('Attachments');
+    aHead.id = 'detail-attachments-head';
+    detailEl.appendChild(aHead);
+    const attSlot = document.createElement('div');
+    attSlot.id = 'detail-attachments';
+    detailEl.appendChild(attSlot);
+    renderDetailAttachments();
 
     // ── comments (composer on top, list below — newest first) ──
     const comments = card.comments || [];
