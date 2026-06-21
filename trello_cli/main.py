@@ -75,6 +75,15 @@ Global:
                                 'today', 'yesterday'; optional action-type
                                 filter, e.g. commentCard updateCard)
 
+Workflow:
+  grab [--from "To Do"]         Atomically claim the top card of a list and move
+       [--to "Doing"]           it to another, returning the card it got you
+                                (--json for the full dict). Use it when several
+                                agents grab the top ticket at once: no two get
+                                the same card. Exit 1 if there's nothing to grab.
+                                Local: truly atomic (store lock). Trello: faked
+                                with the claim-comment handshake (a ~10-30s wait).
+
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
   card ls <list> [--with-comment]      Show cards in a list (Activity column;
@@ -1935,6 +1944,34 @@ def cmd_serve(args: list[str]) -> None:
           open_browser=not flags.get("--no-browser"))
 
 
+# ── Workflow commands ───────────────────────────────────────────────
+
+def cmd_grab(args: list[str]) -> None:
+    positional, flags = _parse_flags(args, value_flags=("--from", "--to"))
+    if positional:
+        raise SystemExit("Usage: trello grab [--from <list>] [--to <list>]")
+    src_name = str(flags.get("--from") or "To Do")
+    dst_name = str(flags.get("--to") or "Doing")
+    board_id = _require_board()
+    src_id = _resolve_list(board_id, src_name)
+    dst_id = _resolve_list(board_id, dst_name)
+    if src_id == dst_id:
+        raise SystemExit("--from and --to resolve to the same list.")
+    card = api.grab_top_card(src_id, dst_id)
+    if _is_json():
+        print_json(card)
+        if card is None:
+            sys.exit(1)
+        return
+    if card is None:
+        print(f"Nothing to grab in '{src_name}'.")
+        sys.exit(1)
+    names = {l["id"]: l["name"] for l in api.get_lists(board_id)}
+    print(f"Grabbed: {card['name']}")
+    print(f"  ID:    {short_id(card['id'])} ({card['id']})")
+    print(f"  Moved: {names.get(src_id, src_name)} -> {names.get(dst_id, dst_name)}")
+
+
 # ── Command dispatch ────────────────────────────────────────────────
 
 COMMANDS = {
@@ -1943,6 +1980,7 @@ COMMANDS = {
     "local": cmd_local,
     "export": cmd_export,
     "serve": cmd_serve,
+    "grab": cmd_grab,
     "board": cmd_board,
     "labels": cmd_labels,
     "members": cmd_members,
