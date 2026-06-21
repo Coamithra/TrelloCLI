@@ -196,10 +196,166 @@ attachments — are re-created under the new ids). This keeps **statelessness** 
 re-post as the token user with a fresh timestamp (provenance folded into the body),
 board members aren't mapped, and only open lists are pushed.
 
-A **tracked-mapping re-sync** (persist the id map, diff-and-update an existing
-board, e.g. `--into <board_id>`) was deliberately deferred: it reintroduces
-cross-invocation state and a full reconciliation engine, which fights the stateless
-design. It's a candidate follow-up card, not part of this one.
+### `export --to trello --into <board>` (tracked-mapping re-sync) — DESIGN + RECOMMENDATION
+
+> **Status: designed, NOT implemented — needs a product decision.** This section is
+> the first deliverable of card `6a366ff2` (the re-sync follow-up to the shipped
+> create-new-each-time model). It works through the full design — id-map storage,
+> the diff/reconcile algorithm, and conflict handling — and ends with an explicit
+> recommendation: **do not build it yet.** The reasoning is at the bottom. Nothing
+> below has shipped; today's only `--to trello` mode is still create-new-each-time.
+
+The deferred alternative to create-new-each-time is a **re-sync**: instead of a
+fresh board every run, `export --to trello --into <board_id>` would push the local
+store into an *existing* Trello board, updating in place. To find each local item's
+counterpart across runs you must persist a `local→trello` id map — which
+reintroduces cross-invocation state and a reconciliation engine. Here is exactly
+what that would take.
+
+#### (a) Id-map storage — a per-board, opt-in, local-only sidecar
+
+The map lives **next to the source data**, one file per local board, written only
+when `--into` is used:
+
+```
+<root>/<localBoardId>/sync/<trelloBoardId>.json
+```
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "localBoardId": "6a35…",          // source of truth (the file store board)
+  "trelloBoardId": "abc123…",       // the --into target
+  "lastSyncedAt": "2026-06-21T…Z",
+  "tokenUserId": "5f…",             // whose token pushed last (provenance)
+  "labels": { "<localLabelId>": "<trelloLabelId>", … },
+  "lists":  { "<localListId>":  "<trelloListId>",  … },
+  "cards":  {
+    "<localCardId>": {
+      "trelloId": "<trelloCardId>",
+      "checklists": { "<localClId>": "<trelloClId>",
+                      "items": { "<localItemId>": "<trelloItemId>" } },
+      // attachments/comments deliberately NOT mapped — see reconcile notes
+      "baseline": { "name":"…","desc":"…","due":"…","dueComplete":false,
+                    "idList":"<localListId>","pos":1.0,"closed":false,
+                    "labels":["<localLabelId>"],
+                    "checklistsHash":"…" }   // last-pushed local content (3-way merge)
+    }, …
+  }
+}
+```
+
+Keying the filename by `<trelloBoardId>` lets one local board track several Trello
+boards (a personal copy + a shared copy) without collision. The sidecar is reused
+across machines via the same Dropbox folder as the rest of the store.
+
+**Why this is compatible with the Statelessness guideline (qualified).** The
+guideline forbids *shared mutable selection state* — an "active board/backend" that
+silently changes what a *different* invocation sees. The sync map is a different
+category: it is **data tied to a specific source board**, like `local_root` or a
+credential, not selection. It changes nothing about which board/backend any other
+command resolves; it is read/written *only* on an explicit `--into` run; and absent
+`--into` the tool behaves exactly as today. So it is opt-in, per-board, local-only
+state — admissible under the letter of the guideline. **But** it is still
+cross-invocation state with real failure modes (staleness, conflicted Dropbox
+copies of the sidecar itself, a half-written map after a mid-push crash), which is
+the spirit the guideline is trying to avoid. That tension is the crux of the
+recommendation below.
+
+#### (b) Diff-and-reconcile algorithm
+
+Each entity class is reconciled by id via the map, in dependency order. All writes
+go through the existing `Backend` ABC ops — no new transport.
+
+1. **Gather both sides.** Local snapshot via the shared `_gather_board` helper;
+   current Trello state via `dest.get_lists / get_labels / get_board_cards
+   (visible+closed) / get_card / get_checklists / get_comments / get_attachments`.
+2. **Labels.** For each local label: mapped → `update_label` if name/color drifted;
+   unmapped → `create_label`, record id. Local labels whose mapped Trello label
+   vanished → recreate. Trello labels with no local origin → leave (additive) or
+   `delete_label` under a `--prune` flag.
+3. **Lists.** Same shape with `create_list` / `update_list` (name) /
+   `update_list(pos=…)` for reordering / `archive_list` for lists removed locally.
+4. **Cards** (the bulk). For each local card:
+   - **Unmapped** → `create_card` (+ children, exactly as `_push_card` does today),
+     record the new id and the checklist/item sub-map.
+   - **Mapped & present on Trello** → field-by-field `update_card` for
+     name/desc/due/dueComplete/idList(move)/pos(reorder); add/remove `idLabels` via
+     `add_label_to_card`/`remove_label_from_card` against the mapped label ids;
+     `archive_card`/`unarchive_card` on `closed` drift.
+   - **Mapped but gone on Trello** (deleted in the UI) → recreate and remap (or skip
+     under a policy flag).
+   - **Children**: checklists/items reconciled by sub-map (create/rename/delete,
+     check/uncheck). **Comments and attachments stay append-only / create-each-time**
+     — Trello can't preserve comment author/date anyway (today's provenance prefix),
+     and re-diffing free-text comments is not worth a content hash; re-syncing them
+     would either duplicate or require a comment-id map that Trello mutates. So
+     comments are intentionally *not* reconciled (documented lossy bit, same spirit
+     as create-new-each-time).
+5. **Removed-upstream (local deletions).** Local card present in the map but absent
+   from the current local snapshot → `archive_card` on Trello by default
+   (`--prune` to hard-`delete` — but the ABC has no card-delete; Trello's is
+   `DELETE /cards/{id}`, which would be a new backend op). Drop it from the map.
+6. **Positions.** Reordering uses the same numeric `pos` push (`_pos_str`) the
+   create path already uses, applied via `update_card(pos=…)` / `update_list(pos=…)`.
+7. **Persist the map** atomically (temp + `os.replace`, like the rest of the store)
+   only after the push succeeds, stamping `lastSyncedAt` and refreshing every
+   `baseline`.
+
+#### (c) Conflict handling — the genuinely hard part
+
+Trello is independently editable between syncs. With only an id map you cannot tell
+*who* changed a field, so a naive re-sync is **last-write-wins with extra steps** —
+it silently clobbers Trello-side edits. Doing it *safely* needs a **three-way
+merge** using the `baseline` (last-pushed local content) stored in the map:
+
+| local vs baseline | trello vs baseline | action |
+|---|---|---|
+| unchanged | unchanged | nothing |
+| changed | unchanged | push local (the intended case) |
+| unchanged | changed | **keep Trello** (don't clobber a UI edit) |
+| changed | changed (same value) | nothing |
+| changed | changed (diff value) | **conflict** → policy |
+
+Conflict **policy** options, smallest-surface first: (1) **`--on-conflict=skip`**
+(default) — warn, leave Trello as-is, don't update the baseline so the next run
+re-surfaces it; (2) **`--on-conflict=local`** — local wins (the blunt "I know what
+I'm doing" mode, ≈ today's overwrite); (3) **`--on-conflict=trello`** — Trello
+wins, pull the value back into local. Deletions are their own conflict axis (local
+deleted vs Trello edited). All of this assumes the sidecar baseline survived; a lost
+or conflicted-copy sidecar forces a cold "adopt" pass (match by name within a list,
+ambiguous → bail).
+
+#### Recommendation: **defer — do not implement yet** (needs a user decision)
+
+1. **The hard 80% is a product decision, not an engineering one.** The id-map
+   plumbing and the create/update/archive/reorder reconcile are mechanical. The
+   *value* of the feature lives entirely in conflict handling, and the right policy
+   (skip vs local-wins vs trello-wins, and whether to store a content baseline at
+   all) depends on how the user actually intends to use it — as a one-way
+   "publish my local board to Trello and keep it fresh" (baseline optional,
+   local-wins acceptable) or a genuine two-way-aware sync (baseline mandatory, much
+   bigger). Building the wrong half is worse than not building it.
+2. **It cannot be verified end-to-end here.** Live Trello is off-limits (free
+   workspace at the 10-board limit) and there is no committed test harness — the
+   create-new-each-time model itself shipped "verified offline only". The reconcile
+   *logic* could be unit-tested against a fake/local target, but the parts that
+   actually bite (fresh-id minting, comment/checklist non-idempotency, rate limits,
+   real UI drift) only show up against live Trello. Shipping an unverifiable
+   *mutating* path that can silently clobber a user's real Trello board is the
+   highest-risk change in this codebase.
+3. **Statelessness cost is real even if admissible.** A persisted, Dropbox-synced,
+   crash-sensitive sidecar is exactly the kind of cross-invocation state the project
+   has worked to avoid; a stale/corrupt map mis-targets *live mutations*. Worth it
+   only if the user genuinely needs in-place re-sync — which the shipped
+   create-new-each-time model already substitutes for in the common "snapshot my
+   local board to Trello" case.
+
+**Net:** the design is ready to build behind a clean, opt-in `--into <board_id>`
+flag (default behavior unchanged) the moment the user confirms (i) they want it and
+(ii) the conflict policy. Until then it stays deferred — implementing now would mean
+shipping an unverifiable, board-clobbering write path on a guessed policy. Tracked
+by card `6a366ff2`, left open for that decision.
 
 ---
 
