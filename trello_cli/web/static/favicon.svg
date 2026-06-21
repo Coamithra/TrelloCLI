@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Trellno">
+  <!-- Trello-style board glyph: a rounded board tile with two columns, in pink. -->
+  <rect x="2" y="2" width="28" height="28" rx="6" fill="#e774bb"/>
+  <rect x="6" y="6" width="9" height="20" rx="2" fill="#ffffff"/>
+  <rect x="17" y="6" width="9" height="11" rx="2" fill="#ffffff"/>
+</svg>
