@@ -345,13 +345,21 @@ function openPopoverAt(anchor, title, buildBody) {
 }
 
 // Click-to-edit a single-line title or multi-line description. `render` shows the
-// read view, `save(value)` persists; clicking the read view swaps in an editor.
+// read view, `save(value)` persists. `container` stays stable across edit cycles:
+// only its single child (`current`) is swapped between the read view and editor.
 function inlineEditable(container, { value, multiline, render, save }) {
-  const view = render();
-  view.classList.add('editable');
-  view.title = 'Click to edit';
+  // `current` is always the one element living inside `container`.
+  let current = null;
 
-  function toEditor() {
+  function showView() {
+    const view = render();
+    view.classList.add('editable');
+    view.title = 'Click to edit';
+    view.addEventListener('click', showEditor);
+    swap(view);
+  }
+
+  function showEditor() {
     const editor = multiline
       ? document.createElement('textarea')
       : document.createElement('input');
@@ -371,47 +379,42 @@ function inlineEditable(container, { value, multiline, render, save }) {
 
     const wrap = document.createElement('div');
     wrap.append(editor, actions);
-    container.replaceWith(wrap);
-    // re-point `container` so a later toView() can swap back.
-    container = wrap;
-    editor.focus();
-    if (multiline) { editor.style.height = editor.scrollHeight + 'px'; }
-
-    function toView() {
-      const fresh = render();
-      fresh.classList.add('editable');
-      fresh.title = 'Click to edit';
-      fresh.addEventListener('click', toEditor);
-      wrap.replaceWith(fresh);
-      container = fresh;
-    }
 
     async function commit() {
       const next = editor.value;
-      if (next === value) { toView(); return; }
+      if (next === value) { showView(); return; }
       try {
         await save(next);
         value = next;
-        toView();
+        showView();
       } catch (err) {
         setStatus('Save failed: ' + err.message, true);
       }
     }
 
     ok.addEventListener('click', commit);
-    cancel.addEventListener('click', toView);
+    cancel.addEventListener('click', showView);
     // Enter saves a single-line title; Cmd/Ctrl-Enter saves a description.
     editor.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); toView(); }
+      if (e.key === 'Escape') { e.preventDefault(); showView(); }
       else if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         commit();
       }
     });
+
+    swap(wrap);
+    editor.focus();
+    if (multiline) editor.style.height = editor.scrollHeight + 'px';
   }
 
-  view.addEventListener('click', toEditor);
-  container.appendChild(view);
+  function swap(el) {
+    if (current) current.replaceWith(el);
+    else container.appendChild(el);
+    current = el;
+  }
+
+  showView();
 }
 
 // ── label popover ──────────────────────────────────────────────────
@@ -553,7 +556,8 @@ function openDuePopover(anchor) {
 
     save.addEventListener('click', async () => {
       if (!dateIn.value) { setStatus('Pick a date first', true); return; }
-      // Store an ISO timestamp (midday UTC) so the backend keeps a full due value.
+      // Anchor the picked calendar date at midday UTC so the day reads back the
+      // same after the .slice(0,10) render in any timezone within ±12h of UTC.
       const due = dateIn.value + 'T12:00:00.000Z';
       try {
         const updated = await patch(`/api/cards/${card.id}`,
@@ -753,11 +757,17 @@ async function openDetail(cardId) {
       detailEl.appendChild(ul);
     });
 
-    // ── comments (list + composer) ──
+    // ── comments (composer on top, list below — newest first) ──
     const comments = card.comments || [];
     const cHead = heading(`Comments (${comments.length})`);
     cHead.id = 'detail-comments-head';
     detailEl.appendChild(cHead);
+
+    // Build the list first so the composer's send handler can prepend into it,
+    // even though the composer is appended above it in the DOM.
+    const commentsList = document.createElement('div');
+    commentsList.id = 'detail-comments';
+    comments.forEach((c) => commentsList.appendChild(commentEl(c)));
 
     const composer = document.createElement('div');
     composer.className = 'comment-composer';
@@ -788,10 +798,6 @@ async function openDetail(cardId) {
     });
     composer.append(ta, send);
     detailEl.appendChild(composer);
-
-    const commentsList = document.createElement('div');
-    commentsList.id = 'detail-comments';
-    comments.forEach((c) => commentsList.appendChild(commentEl(c)));
     detailEl.appendChild(commentsList);
   } catch (err) {
     detailEl.innerHTML = '';
