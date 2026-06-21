@@ -244,7 +244,9 @@ new board's id and URL. A few things change in the cloud copy by necessity:
   skipped with a warning. Per-attachment failures warn and continue.
 
 The source must be the local store, so run it with `--backend local`. (A tracked re-sync that
-updates an existing board in place is intentionally out of scope — see `DESIGN.md`.)
+updates an existing board in place — `export --to trello --into <board>` — is **designed but not
+yet built**: see the `--into` section in `DESIGN.md` for the id-map sidecar, the reconcile
+algorithm, conflict handling, and why the build is deferred pending a conflict-policy decision.)
 
 ## Web app
 
