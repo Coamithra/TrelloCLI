@@ -198,6 +198,10 @@ function initDragging() {
   if (boardSortable) boardSortable.destroy();
   cardSortables.forEach((s) => s.destroy());
   cardSortables = [];
+  // destroy() skips onEnd, so clear the drag class here too in case a reload
+  // ever tears a Sortable down mid-drag — otherwise body.dragging could stick
+  // and permanently hide the columns' scrollbars.
+  document.body.classList.remove('dragging');
 
   // Reorder columns (grab by header only, so card drags don't trigger it).
   boardSortable = Sortable.create(boardEl, {
@@ -205,8 +209,9 @@ function initDragging() {
     draggable: '.column',
     handle: '.column-header',
     animation: 150,
-    onStart: () => { liveDragging = true; },
+    onStart: () => { liveDragging = true; document.body.classList.add('dragging'); },
     onEnd: async (evt) => {
+      document.body.classList.remove('dragging');
       const col = evt.item;
       let rebalanced = false;
       try {
@@ -231,8 +236,9 @@ function initDragging() {
     cardSortables.push(Sortable.create(wrap, {
       group: 'cards',
       animation: 150,
-      onStart: () => { liveDragging = true; },
+      onStart: () => { liveDragging = true; document.body.classList.add('dragging'); },
       onEnd: async (evt) => {
+        document.body.classList.remove('dragging');
         const item = evt.item;
         const toList = evt.to.dataset.listId;
         if (evt.from !== evt.to) { countFor(evt.from); countFor(evt.to); }

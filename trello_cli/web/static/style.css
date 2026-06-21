@@ -91,9 +91,17 @@ body { display: flex; flex-direction: column; }
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
+  /* Reserve the scrollbar's space so toggling overflow never shifts layout. */
+  scrollbar-gutter: stable;
   min-height: 8px;
   padding: 2px;
 }
+
+/* While a drag is in flight, SortableJS momentarily inserts the dragged element
+   into the target column, briefly overflowing it and flashing a scrollbar.
+   Pin overflow to hidden for the whole drag so that transient scrollbar can't
+   render; the gutter above keeps the column width stable when it returns. */
+body.dragging .cards { overflow-y: hidden; }
 
 .card {
   background: var(--card-bg);
