@@ -8,6 +8,10 @@ public `api.py` is now a thin facade forwarding to whichever backend
 from __future__ import annotations
 
 import os
+import random
+import secrets
+import time
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -16,6 +20,25 @@ from ..config import get_auth
 from .base import Backend
 
 BASE = "https://api.trello.com/1"
+
+# `grab_top_card` claim-handshake tunables (Trello has no atomic primitive, so we
+# fake it like CONTRIBUTING.md). The marker phrase (em-dash and all) must match
+# CONTRIBUTING's exactly — other agents and hand-run claims scan for this string.
+_CLAIM_MARKER = "I am doing this now — claim "
+_GRAB_WAIT_RANGE = (10.0, 30.0)   # randomized blocking wait, seconds
+_GRAB_CLAIM_WINDOW = timedelta(seconds=60)  # ignore claims older than this (stale)
+_GRAB_MAX_ATTEMPTS = 50           # infinite-loop guard across retried cards
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    """Parse a Trello action timestamp (ISO 8601, often `…Z`) to an aware
+    datetime, or None if absent/malformed."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class TrelloBackend(Backend):
@@ -132,6 +155,73 @@ class TrelloBackend(Backend):
 
     def move_card(self, card_id: str, list_id: str) -> dict:
         return self._put(f"/cards/{card_id}", idList=list_id)
+
+    def grab_top_card(self, source_list_id: str,
+                      dest_list_id: str) -> dict | None:
+        # Trello has no atomic move-and-return, so fake it with CONTRIBUTING.md's
+        # claim handshake: grab the top card, stake a claim comment, wait, then
+        # let the *earliest* claim win. On a loss, retract our claim, leave the
+        # card with the winner, and try the next card down.
+        claim_id = secrets.token_hex(4)
+        lost: set[str] = set()
+        # Safety cap on how many distinct cards we'll try (each loss moves on to
+        # the next). Not an infinite-loop guard — the loop already ends when the
+        # source list runs out of un-lost candidates; this just bounds a
+        # pathologically contended list.
+        for _ in range(_GRAB_MAX_ATTEMPTS):
+            cards = sorted(self.get_cards_in_list(source_list_id),
+                           key=lambda c: c.get("pos", 0))
+            candidates = [c for c in cards if c["id"] not in lost]
+            if not candidates:
+                return None
+            card_id = candidates[0]["id"]
+            self.move_card(card_id, dest_list_id)          # fast grab
+            try:
+                mine = self.add_comment(card_id, f"{_CLAIM_MARKER}{claim_id}")
+                my_date = _parse_dt(mine.get("date"))
+                time.sleep(random.uniform(*_GRAB_WAIT_RANGE))
+                if self._won_claim(card_id, claim_id, my_date):
+                    return self.get_card(card_id)
+                self.delete_comment(mine["id"])            # legit loss: back off
+            except Exception:
+                # Anything after the fast grab failed (e.g. a transport error).
+                # Don't strand the card in dest with no claim — move it back so
+                # it stays grabbable, then surface the original error.
+                try:
+                    self.move_card(card_id, source_list_id)
+                except Exception:
+                    pass
+                raise
+            lost.add(card_id)
+        return None
+
+    def _won_claim(self, card_id: str, claim_id: str,
+                   my_date: datetime | None) -> bool:
+        """True if our claim is the earliest among the live (in-window) claims on
+        the card. Ties on the exact timestamp break deterministically by claim
+        id. Claims older than the window are stale (a past session) and ignored,
+        so a re-grabbed card isn't blocked by its history."""
+        if my_date is None:
+            return True  # no comparable timestamp; assume we hold it
+        floor = my_date - _GRAB_CLAIM_WINDOW
+        # The 50 most-recent comments: a claim posted seconds ago is always in
+        # that window unless 50+ comments landed in the same few seconds, which
+        # isn't a real claim-race scenario.
+        for c in self.get_comments(card_id, limit=50):
+            text = (c.get("data") or {}).get("text") or ""
+            if _CLAIM_MARKER not in text:
+                continue
+            rest = text.split(_CLAIM_MARKER, 1)[1].split()
+            other_id = rest[0] if rest else ""
+            if other_id == claim_id:
+                continue  # our own claim
+            other_date = _parse_dt(c.get("date"))
+            if other_date is None or other_date < floor:
+                continue  # malformed or stale
+            if other_date < my_date or (other_date == my_date
+                                        and other_id < claim_id):
+                return False  # someone else claimed first
+        return True
 
     def archive_card(self, card_id: str) -> dict:
         return self._put(f"/cards/{card_id}", closed="true")

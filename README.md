@@ -61,6 +61,24 @@ trello export --to trello [--name <name>] [--no-attachments]  Push a local --boa
                                    local; create-new-each-time)
 ```
 
+### Workflow
+
+```
+trello grab [--from "To Do"] [--to "Doing"]  Atomically claim the top card of
+                                   a list and move it to another, returning the
+                                   card it got you (--json for the full dict;
+                                   exit 1 if there's nothing to grab)
+```
+
+Made for "tell several agents to grab the top To Do ticket" without them racing
+onto the **same** card. On the **local** backend it's truly atomic — the move
+runs under the store lock, so concurrent grabbers each get a distinct card. On
+the **Trello** backend (no atomic primitive) it fakes the
+[CONTRIBUTING.md](CONTRIBUTING.md) claim handshake instead: grab, post a claim
+comment, wait ~10-30s, and let the earliest claim win (retrying the next card on
+a loss) — so a `trello grab` blocks for that wait. Cross-machine Dropbox
+concurrency is out of scope (OS locks don't cross machines).
+
 ### Card
 
 ```

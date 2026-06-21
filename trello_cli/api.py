@@ -91,6 +91,10 @@ def update_card(card_id: str, **fields: Any) -> dict:
     return get_backend().update_card(card_id, **fields)
 
 
+def grab_top_card(source_list_id: str, dest_list_id: str) -> dict | None:
+    return get_backend().grab_top_card(source_list_id, dest_list_id)
+
+
 # --- Comments ---
 
 def add_comment(card_id: str, text: str) -> dict:
