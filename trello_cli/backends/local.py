@@ -496,6 +496,8 @@ class LocalBackend(Backend):
             card["desc"] = fields["desc"] or ""
         if "due" in fields:
             card["due"] = fields["due"] or None  # "" clears the due date
+        if "dueComplete" in fields:
+            card["dueComplete"] = _as_bool(fields["dueComplete"])
         pos_touched = False
         if "idList" in fields:
             card["idList"] = fields["idList"]

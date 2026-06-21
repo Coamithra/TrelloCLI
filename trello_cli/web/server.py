@@ -26,10 +26,11 @@ from . import live
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# The browser only moves/reorders cards and reorders columns, so the API accepts
-# exactly those fields — nothing that could archive or rename via the raw
-# endpoint. Widen these only alongside a matching UI control.
-_CARD_PATCH_FIELDS = {"idList", "pos"}
+# The board and detail panel let the browser move/reorder cards, rename them,
+# edit the description, and set/clear the due date. The API accepts exactly those
+# fields — nothing that could (un)archive via the raw PATCH endpoint (delete has
+# its own DELETE route). Widen this only alongside a matching UI control.
+_CARD_PATCH_FIELDS = {"idList", "pos", "name", "desc", "due", "dueComplete"}
 _LIST_PATCH_FIELDS = {"pos"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -114,6 +115,20 @@ def create_app(token: str | None = None) -> FastAPI:
             "cards": _ok(api.get_board_cards, board_id),
         }
 
+    @app.get("/api/boards/{board_id}/labels")
+    def list_labels(board_id: str) -> list[dict]:
+        return _ok(api.get_labels, board_id)
+
+    @app.post("/api/boards/{board_id}/labels")
+    def create_label(board_id: str, body: dict[str, Any]) -> dict:
+        name = (body.get("name") or "").strip()
+        color = (body.get("color") or "").strip() or None
+        if not name and not color:
+            raise HTTPException(
+                status_code=400, detail="A label name or color is required."
+            )
+        return _ok(api.create_label, board_id, name, color=color)
+
     @app.get("/api/cards/{card_id}")
     def get_card(card_id: str) -> dict:
         card = _ok(api.get_card, card_id)
@@ -122,6 +137,32 @@ def create_app(token: str | None = None) -> FastAPI:
     @app.patch("/api/cards/{card_id}")
     def patch_card(card_id: str, fields: dict[str, Any]) -> dict:
         return _ok(api.update_card, card_id, **_guard(fields, _CARD_PATCH_FIELDS))
+
+    @app.delete("/api/cards/{card_id}")
+    def delete_card(card_id: str) -> dict:
+        # Soft delete (archive), matching the CLI's `card archive` — the card
+        # drops out of the board's visible cards but stays recoverable.
+        return _ok(api.archive_card, card_id)
+
+    @app.post("/api/cards/{card_id}/comments")
+    def add_comment(card_id: str, body: dict[str, Any]) -> dict:
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Comment text is required.")
+        return _ok(api.add_comment, card_id, text)
+
+    @app.post("/api/cards/{card_id}/labels")
+    def add_card_label(card_id: str, body: dict[str, Any]) -> dict:
+        label_id = (body.get("idLabel") or "").strip()
+        if not label_id:
+            raise HTTPException(status_code=400, detail="idLabel is required.")
+        _ok(api.add_label_to_card, card_id, label_id)
+        return _ok(api.get_card, card_id)
+
+    @app.delete("/api/cards/{card_id}/labels/{label_id}")
+    def remove_card_label(card_id: str, label_id: str) -> dict:
+        _ok(api.remove_label_from_card, card_id, label_id)
+        return _ok(api.get_card, card_id)
 
     @app.patch("/api/lists/{list_id}")
     def patch_list(list_id: str, fields: dict[str, Any]) -> dict:
