@@ -1333,8 +1333,13 @@ async function reloadBoardsNav() {
     currentBoardId = null;       // so selectBoard doesn't no-op on the stale id
     selectBoard(next);
   } else {
+    // The last open board just went away — drop the now-stale board view and
+    // null the id (which also disables the live-refresh reload) so nothing
+    // points at a closed board behind the panel.
+    currentBoardId = null;
+    boardEl.innerHTML = '';
     renderNav();
-    setStatus('No open boards left — create one from the CLI.', true);
+    setStatus('No open boards left — restore one below or create one from the CLI.', true);
   }
 }
 
@@ -1469,7 +1474,7 @@ function archivedBoardRow(b) {
   delBtn.addEventListener('click', () => {
     if (!window.confirm(`Permanently delete "${b.name}"? This removes the board `
       + `and all its files and cannot be undone.`)) return;
-    boardAction(delBtn, () => del(`/api/boards/${b.id}`));
+    boardAction(delBtn, () => del(`/api/boards/${b.id}?confirm=true`));
   });
   actions.append(restoreBtn, delBtn);
   return row;

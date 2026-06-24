@@ -132,9 +132,16 @@ def create_app(token: str | None = None) -> FastAPI:
         return _ok(api.update_board, board_id, **_guard(fields, _BOARD_PATCH_FIELDS))
 
     @app.delete("/api/boards/{board_id}")
-    def delete_board(board_id: str) -> dict:
+    def delete_board(board_id: str, confirm: bool = False) -> dict:
         # Permanent delete (empty the recycling bin) — local-backend only; the
-        # facade raises a clear error on Trello, which `_ok` surfaces.
+        # facade raises a clear error on Trello, which `_ok` surfaces. Gated on
+        # `?confirm=true` so this irreversible wipe needs explicit intent, the
+        # web echo of the CLI's `local rm --yes`.
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Pass ?confirm=true to permanently delete a board.",
+            )
         return _ok(api.delete_board, board_id, apply=True)
 
     @app.post("/api/boards/{board_id}/lists")
