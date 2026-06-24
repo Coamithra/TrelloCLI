@@ -15,8 +15,8 @@ from .backends import get_backend
 
 # --- Boards ---
 
-def get_boards() -> list[dict]:
-    return get_backend().get_boards()
+def get_boards(include_closed: bool = False) -> list[dict]:
+    return get_backend().get_boards(include_closed=include_closed)
 
 
 def get_board(board_id: str) -> dict:
@@ -26,6 +26,23 @@ def get_board(board_id: str) -> dict:
 def create_board(name: str, desc: str | None = None,
                  default_lists: bool = True) -> dict:
     return get_backend().create_board(name, desc=desc, default_lists=default_lists)
+
+
+def update_board(board_id: str, name: str | None = None,
+                 closed: bool | None = None) -> dict:
+    return get_backend().update_board(board_id, name=name, closed=closed)
+
+
+def delete_board(board_id: str, apply: bool = False) -> dict:
+    """Permanently delete a board's folder + blobs. Local-only: `delete_board`
+    is not on the `Backend` ABC (Trello has no safe board-delete here), so guard
+    rather than `AttributeError` when the active backend is Trello."""
+    fn = getattr(get_backend(), "delete_board", None)
+    if fn is None:
+        raise SystemExit(
+            "Permanent board delete is only supported on the local backend."
+        )
+    return fn(board_id, apply=apply)
 
 
 # --- Lists ---

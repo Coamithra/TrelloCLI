@@ -56,7 +56,8 @@ Tip: bare nouns default to `ls` — e.g. `trello list` ≡ `trello list ls`,
 
 Global:
   configure <key> <token>       Save API credentials
-  boards                        List all boards
+  boards [--archived|--all]     List boards (open by default; --archived shows
+                                only archived, --all shows both with state)
   local init [path]             Set up the local file backend root
                                 (default ~/Dropbox/trello-cli)
   local gc [--apply]            Clean stale local data: orphaned attachment
@@ -67,6 +68,9 @@ Global:
                                 dry run unless --yes)
   board                         Show board info (needs --board)
   board add <name> [desc]       Create a new board (--no-default-lists)
+  board rename <new name>       Rename the --board board
+  board archive                 Archive the --board board (soft delete; restorable)
+  board restore                 Restore (unarchive) the --board board
   labels                        Show board labels
   members                       Show board members
   activity [n]                  Show recent activity
@@ -173,8 +177,11 @@ Web:
 
 
 def _resolve_board_ref(ref: str) -> str:
-    """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD)."""
-    boards = api.get_boards()
+    """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD).
+
+    Includes archived boards so an archived board can still be addressed (e.g. to
+    `board restore` or `board show` it) — `get_boards()` alone hides them."""
+    boards = api.get_boards(include_closed=True)
     # Exact ID match
     for b in boards:
         if b["id"] == ref or short_id(b["id"]) == ref:
@@ -429,13 +436,24 @@ def cmd_configure(args: list[str]) -> None:
     print("Credentials saved.")
 
 
-def cmd_boards(_args: list[str]) -> None:
-    boards = api.get_boards()
+def cmd_boards(args: list[str]) -> None:
+    _positional, flags = _parse_flags(args, bool_flags=("--archived", "--all"))
+    archived_only = bool(flags.get("--archived"))
+    include_closed = archived_only or bool(flags.get("--all"))
+    boards = api.get_boards(include_closed=include_closed)
+    if archived_only:
+        boards = [b for b in boards if b.get("closed")]
     if _is_json():
         print_json(boards)
         return
-    rows = [[short_id(b["id"]), b["name"], b.get("shortUrl", "")] for b in boards]
-    print_table(["ID", "Name", "URL"], rows)
+    if include_closed:
+        rows = [[short_id(b["id"]), b["name"],
+                 "archived" if b.get("closed") else "", b.get("shortUrl", "")]
+                for b in boards]
+        print_table(["ID", "Name", "State", "URL"], rows)
+    else:
+        rows = [[short_id(b["id"]), b["name"], b.get("shortUrl", "")] for b in boards]
+        print_table(["ID", "Name", "URL"], rows)
 
 
 def _board_show(_args: list[str]) -> None:
@@ -464,11 +482,42 @@ def _board_add(args: list[str]) -> None:
     print(f"Created board: {b['name']} ({short_id(b['id'])})  {b.get('shortUrl', '')}")
 
 
+def _board_rename(args: list[str]) -> None:
+    if not args:
+        raise SystemExit("Usage: trello --board <board> board rename <new name>")
+    board_id = _require_board()
+    b = api.update_board(board_id, name=" ".join(args))
+    if _is_json():
+        print_json(b)
+        return
+    print(f"Renamed board to: {b['name']} ({short_id(b['id'])})")
+
+
+def _board_set_closed(closed: bool) -> None:
+    board_id = _require_board()
+    b = api.update_board(board_id, closed=closed)
+    if _is_json():
+        print_json(b)
+        return
+    verb = "Archived" if closed else "Restored"
+    print(f"{verb} board: {b['name']} ({short_id(b['id'])})")
+
+
 def cmd_board(args: list[str]) -> None:
-    if args and args[0] == "add":
+    verb = args[0] if args else ""
+    if verb == "add":
         _board_add(args[1:])
         return
-    if args and args[0] == "show":
+    if verb == "rename":
+        _board_rename(args[1:])
+        return
+    if verb == "archive":
+        _board_set_closed(True)
+        return
+    if verb in ("restore", "unarchive"):
+        _board_set_closed(False)
+        return
+    if verb == "show":
         args = args[1:]
     _board_show(args)
 

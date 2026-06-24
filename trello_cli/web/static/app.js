@@ -1311,6 +1311,170 @@ async function openDetail(cardId) {
   }
 }
 
+// ── manage-boards panel (rename / archive / restore / purge) ────────
+// Reuses the detail drawer + overlay as a generic right-side panel. Lists every
+// board (open + archived) from GET /api/boards?include_closed=true, splitting on
+// `closed`: active boards rename-in-place + Archive; archived boards Restore or
+// permanently Delete — the recycling bin.
+
+// Refresh the top-bar nav after a board mutation. If the current board was
+// archived or purged it's no longer open, so switch to the first remaining one.
+async function reloadBoardsNav() {
+  try {
+    allBoards = await api('/api/boards');
+  } catch (err) {
+    setStatus('Could not refresh boards: ' + err.message, true);
+    return;
+  }
+  if (allBoards.some((b) => b.id === currentBoardId)) {
+    renderNav();
+  } else if (allBoards.length) {
+    const next = allBoards[0].id;
+    currentBoardId = null;       // so selectBoard doesn't no-op on the stale id
+    selectBoard(next);
+  } else {
+    renderNav();
+    setStatus('No open boards left — create one from the CLI.', true);
+  }
+}
+
+async function openManageBoards() {
+  closePopover();
+  openCard = null;
+  overlayEl.classList.remove('hidden');
+  detailEl.classList.remove('hidden');
+  detailEl.innerHTML = '<p class="loading">Loading…</p>';
+  await renderManagePanel();
+}
+
+async function renderManagePanel() {
+  let boards;
+  try {
+    boards = await api('/api/boards?include_closed=true');
+  } catch (err) {
+    detailEl.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'error';
+    p.textContent = 'Failed to load boards: ' + err.message;
+    detailEl.appendChild(p);
+    return;
+  }
+  detailEl.innerHTML = '';
+
+  const close = document.createElement('button');
+  close.className = 'detail-close';
+  close.setAttribute('aria-label', 'Close');
+  close.textContent = '×';
+  close.addEventListener('click', closeDetail);
+  detailEl.appendChild(close);
+
+  const title = document.createElement('h2');
+  title.textContent = 'Manage boards';
+  detailEl.appendChild(title);
+
+  const active = boards.filter((b) => !b.closed);
+  const archived = boards.filter((b) => b.closed);
+
+  detailEl.appendChild(heading('Active boards'));
+  detailEl.appendChild(boardList(active, activeBoardRow, 'No active boards.'));
+
+  detailEl.appendChild(heading('Archived'));
+  const hint = document.createElement('p');
+  hint.className = 'board-mgmt-hint';
+  hint.textContent = 'Archived boards are hidden but their files are kept — '
+    + 'restore one to bring it back, or permanently delete it to remove it for good.';
+  detailEl.appendChild(hint);
+  detailEl.appendChild(boardList(archived, archivedBoardRow, 'Nothing archived.'));
+}
+
+function boardList(boards, rowFn, emptyText) {
+  const list = document.createElement('div');
+  list.className = 'board-mgmt-list';
+  if (!boards.length) {
+    const empty = document.createElement('p');
+    empty.className = 'board-mgmt-empty';
+    empty.textContent = emptyText;
+    list.appendChild(empty);
+    return list;
+  }
+  boards.forEach((b) => list.appendChild(rowFn(b)));
+  return list;
+}
+
+// Row scaffold: name (click-to-rename) + an empty actions slot the caller fills.
+function boardRowShell(b) {
+  const row = document.createElement('div');
+  row.className = 'board-mgmt-row';
+  const nameBox = document.createElement('div');
+  nameBox.className = 'board-mgmt-name';
+  inlineEditable(nameBox, {
+    value: b.name,
+    multiline: false,
+    render: () => {
+      const span = document.createElement('span');
+      span.textContent = b.name;
+      if (b.id === currentBoardId) span.classList.add('board-mgmt-current');
+      return span;
+    },
+    save: async (name) => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error('Board name cannot be empty');
+      const updated = await patch(`/api/boards/${b.id}`, { name: trimmed });
+      b.name = updated.name;
+      await reloadBoardsNav();
+    },
+  });
+  const actions = document.createElement('div');
+  actions.className = 'board-mgmt-actions';
+  row.append(nameBox, actions);
+  return { row, actions };
+}
+
+// Run a board mutation, then re-skin the nav and rebuild the panel. `btn` is
+// re-enabled on failure (on success the row is replaced by the re-render).
+async function boardAction(btn, fn) {
+  btn.disabled = true;
+  try {
+    await fn();
+    await reloadBoardsNav();
+    await renderManagePanel();
+  } catch (err) {
+    setStatus(err.message, true);
+    btn.disabled = false;
+  }
+}
+
+function activeBoardRow(b) {
+  const { row, actions } = boardRowShell(b);
+  const archiveBtn = document.createElement('button');
+  archiveBtn.className = 'btn';
+  archiveBtn.textContent = 'Archive';
+  archiveBtn.addEventListener('click', () =>
+    boardAction(archiveBtn, () => patch(`/api/boards/${b.id}`, { closed: true })));
+  actions.appendChild(archiveBtn);
+  return row;
+}
+
+function archivedBoardRow(b) {
+  const { row, actions } = boardRowShell(b);
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'btn';
+  restoreBtn.textContent = 'Restore';
+  restoreBtn.addEventListener('click', () =>
+    boardAction(restoreBtn, () => patch(`/api/boards/${b.id}`, { closed: false })));
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn-danger';
+  delBtn.textContent = 'Delete';
+  delBtn.title = 'Permanently delete — cannot be undone';
+  delBtn.addEventListener('click', () => {
+    if (!window.confirm(`Permanently delete "${b.name}"? This removes the board `
+      + `and all its files and cannot be undone.`)) return;
+    boardAction(delBtn, () => del(`/api/boards/${b.id}`));
+  });
+  actions.append(restoreBtn, delBtn);
+  return row;
+}
+
 overlayEl.addEventListener('click', closeDetail);
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -1363,6 +1527,7 @@ async function init() {
     allBoards = boards;
     picker.addEventListener('change', () => selectBoard(picker.value));
     starToggle.addEventListener('click', toggleStarCurrent);
+    document.getElementById('manage-boards-btn').addEventListener('click', openManageBoards);
     // Restore the board from ?board=<id> on reload/bookmark; fall back to the
     // first board if it's absent or no longer exists for this backend.
     const requested = new URLSearchParams(location.search).get('board');

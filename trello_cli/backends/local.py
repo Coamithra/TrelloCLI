@@ -284,11 +284,11 @@ class LocalBackend(Backend):
 
     # ── Boards ───────────────────────────────────────────────────────
 
-    def get_boards(self) -> list[dict]:
+    def get_boards(self, include_closed: bool = False) -> list[dict]:
         out = []
         for bid in self.store.board_ids():
             b = read_json(self.store.board_file(bid))
-            if b and not b.get("closed"):
+            if b and (include_closed or not b.get("closed")):
                 out.append({
                     "id": b["id"],
                     "name": b["name"],
@@ -319,6 +319,29 @@ class LocalBackend(Backend):
         self._save_lists(bid, lists)
         self._log(bid, "createBoard", {"board": {"id": bid, "name": name}})
         return {"id": bid, "name": name, "shortUrl": "", "desc": desc or ""}
+
+    def update_board(self, board_id: str, name: str | None = None,
+                     closed: bool | None = None) -> dict:
+        """Rename and/or (un)archive a board. Archiving is a soft delete — it sets
+        `closed: true` so the board drops out of `get_boards()` (unless asked for),
+        but the folder and every file stay on disk, so `restore` (`closed: false`)
+        brings it back intact. The hard delete is still `delete_board`."""
+        board = self._load_board(board_id)
+        if name is not None:
+            board["name"] = name
+        if closed is not None:
+            board["closed"] = bool(closed)
+        atomic_write_json(self.store.board_file(board_id), board)
+        self._log(board_id, "updateBoard",
+                  {"board": {"id": board_id, "name": board["name"],
+                             "closed": board.get("closed", False)}})
+        return {
+            "id": board["id"],
+            "name": board["name"],
+            "shortUrl": board.get("shortUrl", ""),
+            "desc": board.get("desc", ""),
+            "closed": board.get("closed", False),
+        }
 
     # ── Import (local-only; target of `trello export`) ───────────────
 
@@ -1072,7 +1095,7 @@ class LocalBackend(Backend):
 # Delegating mutators (e.g. move_card → update_card) nest harmlessly because the
 # lock is re-entrant.
 _MUTATORS = (
-    "create_board", "import_board",
+    "create_board", "update_board", "import_board",
     "create_list", "update_list", "archive_list", "rename_list",
     "create_card", "move_card", "grab_top_card",
     "archive_card", "unarchive_card", "update_card",

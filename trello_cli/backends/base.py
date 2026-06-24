@@ -23,7 +23,7 @@ class Backend(ABC):
     # --- Boards ---
 
     @abstractmethod
-    def get_boards(self) -> list[dict]: ...
+    def get_boards(self, include_closed: bool = False) -> list[dict]: ...
 
     @abstractmethod
     def get_board(self, board_id: str) -> dict: ...
@@ -31,6 +31,10 @@ class Backend(ABC):
     @abstractmethod
     def create_board(self, name: str, desc: str | None = None,
                      default_lists: bool = True) -> dict: ...
+
+    @abstractmethod
+    def update_board(self, board_id: str, name: str | None = None,
+                     closed: bool | None = None) -> dict: ...
 
     # --- Lists ---
 
