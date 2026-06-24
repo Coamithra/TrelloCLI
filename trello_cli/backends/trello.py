@@ -69,8 +69,9 @@ class TrelloBackend(Backend):
 
     # --- Boards ---
 
-    def get_boards(self) -> list[dict]:
-        return self._get("/members/me/boards", fields="id,name,shortUrl,closed", filter="open")
+    def get_boards(self, include_closed: bool = False) -> list[dict]:
+        return self._get("/members/me/boards", fields="id,name,shortUrl,closed",
+                         filter="all" if include_closed else "open")
 
     def get_board(self, board_id: str) -> dict:
         return self._get(f"/boards/{board_id}", fields="id,name,shortUrl,desc")
@@ -83,6 +84,17 @@ class TrelloBackend(Backend):
             desc=desc,
             defaultLists="true" if default_lists else "false",
         )
+
+    def update_board(self, board_id: str, name: str | None = None,
+                     closed: bool | None = None) -> dict:
+        fields: dict[str, Any] = {}
+        if name is not None:
+            fields["name"] = name
+        if closed is not None:
+            fields["closed"] = "true" if closed else "false"
+        if not fields:
+            return self.get_board(board_id)
+        return self._put(f"/boards/{board_id}", **fields)
 
     # --- Lists ---
 

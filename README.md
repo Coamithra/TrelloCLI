@@ -42,7 +42,8 @@ commands. The CLI keeps no shared session state so concurrent invocations never 
 
 ```
 trello configure <key> <token>     Save API credentials
-trello boards                      List all boards
+trello boards [--archived|--all]   List boards (open by default; --archived =
+                                   only archived, --all = both with a State column)
 trello local init [path]           Set up the local file-backend root
 trello local gc [--apply]          Clean stale local data (orphaned blobs,
                                    temp cache; --activity-keep <n>, --cache-days
@@ -50,6 +51,9 @@ trello local gc [--apply]          Clean stale local data (orphaned blobs,
 trello local rm <board> --yes      Delete a local board folder + blobs (no undo)
 trello board                       Show board info (needs --board)
 trello board add <name> [desc]     Create a board (--no-default-lists)
+trello board rename <new name>     Rename the --board board
+trello board archive               Archive the --board board (soft delete; restorable)
+trello board restore               Restore (unarchive) the --board board
 trello labels                      Show board labels
 trello members                     Show board members
 trello activity [n]                Show recent activity
@@ -303,6 +307,14 @@ dropdown; the dropdown holds the rest. Click a button to jump straight to that b
 one is highlighted). Stars are a **per-browser preference** (stored in `localStorage`), so they
 persist across reloads on that machine but don't sync to other browsers. When the bar fills up
 the buttons squish (truncating with an ellipsis) rather than overflowing.
+
+**Managing boards:** the **⚙** button (top-right) opens a **Manage boards** panel. Under
+*Active boards*, click a board's name to rename it inline, or **Archive** it — a soft delete that
+hides the board but keeps all its files (it drops off the board picker and quick-swap bar). Under
+*Archived*, **Restore** brings an archived board back, or **Delete** permanently removes it (folder,
+cards, and blobs — no undo, behind a confirm; the same wipe as `trello local rm`). These map to the
+CLI's `board rename` / `board archive` / `board restore` and `boards --archived`, so changes made
+either way are visible in both. (Permanent delete is local-backend only.)
 
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its

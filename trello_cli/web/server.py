@@ -39,6 +39,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # matching UI control.
 _CARD_PATCH_FIELDS = {"idList", "pos", "name", "desc", "due", "dueComplete"}
 _LIST_PATCH_FIELDS = {"pos", "closed", "sort"}
+_BOARD_PATCH_FIELDS = {"name", "closed"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
@@ -111,8 +112,10 @@ def create_app(token: str | None = None) -> FastAPI:
     # ── JSON API (1:1 with the api facade / Backend ABC) ─────────────
 
     @app.get("/api/boards")
-    def list_boards() -> list[dict]:
-        return _ok(api.get_boards)
+    def list_boards(include_closed: bool = False) -> list[dict]:
+        # `?include_closed=true` adds archived boards (each carries `closed`) so the
+        # manage-boards panel can show the recycling bin; default stays open-only.
+        return _ok(api.get_boards, include_closed=include_closed)
 
     @app.get("/api/boards/{board_id}")
     def get_board(board_id: str) -> dict:
@@ -121,6 +124,25 @@ def create_app(token: str | None = None) -> FastAPI:
             "lists": _ok(api.get_lists, board_id),
             "cards": _ok(api.get_board_cards, board_id),
         }
+
+    @app.patch("/api/boards/{board_id}")
+    def patch_board(board_id: str, fields: dict[str, Any]) -> dict:
+        # Rename (`name`) and archive/restore (`closed`) only — the manage-boards
+        # panel's two write controls. Returns the fresh board.
+        return _ok(api.update_board, board_id, **_guard(fields, _BOARD_PATCH_FIELDS))
+
+    @app.delete("/api/boards/{board_id}")
+    def delete_board(board_id: str, confirm: bool = False) -> dict:
+        # Permanent delete (empty the recycling bin) — local-backend only; the
+        # facade raises a clear error on Trello, which `_ok` surfaces. Gated on
+        # `?confirm=true` so this irreversible wipe needs explicit intent, the
+        # web echo of the CLI's `local rm --yes`.
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Pass ?confirm=true to permanently delete a board.",
+            )
+        return _ok(api.delete_board, board_id, apply=True)
 
     @app.post("/api/boards/{board_id}/lists")
     def add_list(board_id: str, body: dict[str, Any]) -> dict:
