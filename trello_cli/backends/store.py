@@ -49,34 +49,37 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def pos_below(m: float) -> float:
+    """A position strictly below `m`: min/2 while positive (the common case),
+    else a whole step below. The shared "insert at the top" rule, used by
+    `resolve_pos` and LocalBackend's sorted auto-placement."""
+    return m / 2 if m > 0 else m - POS_STEP
+
+
 def resolve_pos(existing: list[float], pos: Any) -> float:
     """Resolve a position request to a concrete float.
 
     `pos` is a number (used as-is), or the keyword "top" / "bottom". "top" lands
     before the current minimum (min/2), "bottom" after the current maximum
     (max+STEP); an empty list yields STEP. This is the same float-midpoint model
-    the `card pos` / `list pos` commands assume."""
+    the `card pos` / `list pos` commands assume. An unrecognized keyword raises
+    SystemExit rather than silently landing at the bottom (a stray value should
+    surface as a clean error, not a wrong-but-successful move)."""
     if isinstance(pos, bool):
         pos = "bottom" if pos else "top"
     if isinstance(pos, (int, float)):
         return float(pos)
     s = str(pos).strip().lower()
     if s == "top":
-        if not existing:
-            return POS_STEP
-        # Always land strictly below the current minimum. min/2 does that while
-        # staying positive in the common case; if a non-positive pos was ever
-        # set explicitly, step below it instead (min/2 wouldn't be "above").
-        m = min(existing)
-        return m / 2 if m > 0 else m - POS_STEP
+        return pos_below(min(existing)) if existing else POS_STEP
     if s == "bottom":
         return max(existing) + POS_STEP if existing else POS_STEP
     try:
         return float(s)
     except ValueError:
-        # Unknown keyword: append at the bottom rather than raise — keeps a
-        # mutation from hard-failing on a stray value.
-        return max(existing) + POS_STEP if existing else POS_STEP
+        raise SystemExit(
+            f"Invalid position: {pos!r}. Use a number, 'top', or 'bottom'."
+        )
 
 
 def needs_rebalance(positions: list[float]) -> bool:
@@ -100,17 +103,40 @@ def read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         # A store file can be externally corrupted (e.g. a Dropbox conflict copy);
-        # fail with a clean message rather than a traceback.
+        # fail with a clean message rather than a traceback. Used for the
+        # structural files (board.json / lists.json / labels.json) where a bad
+        # file must fail fast; per-card reads use `read_json_tolerant` instead.
         raise SystemExit(f"Corrupt store file {path}: {e}")
+
+
+def read_json_tolerant(path: Path) -> Any:
+    """Like `read_json`, but returns None (with a one-line stderr warning) on a
+    decode error or unreadable/empty file instead of raising. Per-card reads use
+    this so one corrupt or half-synced card file (a Dropbox mid-sync writes a
+    zero-byte file; `json.loads("")` raises) never aborts a whole-board scan or a
+    cross-board comment/checklist lookup. Mirrors the tolerant `read_activity`."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        print(f"warning: skipping unreadable store file {path}: {e}", file=sys.stderr)
+        return None
 
 
 def atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` atomically (temp file in the same dir + os.replace),
-    so a Dropbox-synced folder never observes a half-written file."""
+    so a Dropbox-synced folder never observes a half-written file. The temp file
+    is cleaned up if the write or replace fails, so a mid-write crash doesn't
+    leave a `.tmp` stray behind (`gc` sweeps any that a hard crash does)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def atomic_write_json(path: Path, obj: Any) -> None:
@@ -286,15 +312,30 @@ class LocalStore:
         )
 
     def cards(self, board_id: str) -> list[dict]:
-        """Load every card dict on a board (any list, any closed state)."""
+        """Load every card dict on a board (any list, any closed state).
+
+        One corrupt / half-synced / empty card file is skipped with a stderr
+        warning rather than aborting the whole scan (see `read_json_tolerant`).
+        A file whose stem doesn't match the card id it carries is a Dropbox
+        "conflicted copy" phantom — the same id under a `... (conflicted copy)`
+        name — which would otherwise read as a duplicate card that never
+        converges; skip it so only the canonical `<id>.json` counts."""
         cdir = self.cards_dir(board_id)
         if not cdir.exists():
             return []
         out = []
         for p in sorted(cdir.glob("*.json")):
-            c = read_json(p)
-            if c:
-                out.append(c)
+            c = read_json_tolerant(p)
+            if not c:
+                continue
+            if c.get("id") and p.stem != c["id"]:
+                print(
+                    f"warning: skipping card file {p} "
+                    f"(id {c['id']} != filename)",
+                    file=sys.stderr,
+                )
+                continue
+            out.append(c)
         return out
 
     # --- activity log ---
