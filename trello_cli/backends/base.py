@@ -2,9 +2,9 @@
 
 The CLI talks only to this ABC (via `get_backend()`); commands and `fmt.py`
 never touch a concrete backend or its transport. Both the Trello REST client
-and the planned local file store return the same Trello-shaped dicts, so all
-formatting and command logic stay backend-agnostic. The method set is exactly
-the operations `main.py` invokes — nothing more. See DESIGN.md.
+and the self-hosted local file store (`local.py`) return the same Trello-shaped
+dicts, so all formatting and command logic stay backend-agnostic. The method set
+is exactly the operations `main.py` invokes — nothing more. See DESIGN.md.
 
 A backend may add *transient* keys to a returned dict that aren't part of the
 stored shape, as long as consumers treat them as optional. The only one today:
@@ -89,12 +89,13 @@ class Backend(ABC):
     def grab_top_card(self, source_list_id: str,
                       dest_list_id: str) -> dict | None:
         """Atomically claim the top open card of `source_list_id`, move it to
-        `dest_list_id`, and return it — or `None` if nothing could be claimed
-        (an empty source list, or — on Trello — every candidate lost to a
-        concurrent claimer). "Atomic" so many callers racing the same list each
+        `dest_list_id`, and return it — or `None` if the source list is empty
+        (nothing to grab). "Atomic" so many callers racing the same list each
         get a *distinct* card. `LocalBackend` does this for real under the store
         lock; `TrelloBackend`, with no atomic primitive, fakes it with the
-        claim-comment handshake (see CONTRIBUTING.md)."""
+        claim-comment handshake (see CONTRIBUTING.md) and raises `SystemExit` if
+        it exhausts its retry cap on a pathologically contended list — distinct
+        from the empty-list `None`."""
         ...
 
     # --- Comments ---

@@ -45,13 +45,27 @@ def get_backend_name() -> str:
 
 
 def _load() -> dict:
-    if CONFIG_PATH.exists():
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
         return json.loads(CONFIG_PATH.read_text())
-    return {}
+    except (json.JSONDecodeError, ValueError) as e:
+        # A half-synced or hand-edited config shouldn't spew a raw JSON traceback
+        # from every command — surface a clean one-liner instead.
+        raise SystemExit(f"Corrupt config file {CONFIG_PATH}: {e}")
 
 
 def _save(data: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    # Atomic write (temp + os.replace) so a crash mid-write can't leave a
+    # truncated config, mirroring store.py's writes. The file holds credentials,
+    # so chmod it owner-only (0o600); chmod is best-effort — a no-op on Windows.
+    tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, CONFIG_PATH)
 
 
 def get_auth() -> tuple[str, str]:
