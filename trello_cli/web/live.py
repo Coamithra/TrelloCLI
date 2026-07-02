@@ -55,7 +55,18 @@ def start_watching(root: str) -> bool:
     (the web server watches a single store for its lifetime)."""
     global _observer
     if _observer is not None:
-        return True
+        # Recover a dead watcher: watchdog's observer thread can stop if the
+        # watched root is removed/recreated (or on an internal error), after
+        # which it silently stops emitting events. Detect that here and fall
+        # through to recreate, so live refresh heals on the next SSE tick instead
+        # of appearing alive forever while nothing updates.
+        if _observer.is_alive():
+            return True
+        try:
+            _observer.stop()
+        except Exception:
+            pass
+        _observer = None
     p = Path(root).expanduser()
     if not p.exists():
         return False

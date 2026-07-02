@@ -16,15 +16,16 @@ import os
 import secrets
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import api, config
 from . import live
@@ -43,6 +44,26 @@ _BOARD_PATCH_FIELDS = {"name", "closed"}
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
+_STREAM_CHUNK = 64 * 1024  # /raw blob streaming chunk size
+
+
+def _allowed_hosts(host: str) -> list[str]:
+    """The Host-header allow-list for TrustedHostMiddleware (DNS-rebinding guard).
+
+    Always allow the loopback names — a browser reaching `trello serve` uses one
+    of them. A wildcard bind (`0.0.0.0`/`::`) is reached via an unknown external
+    hostname/IP and is already token-gated, so accept any Host there (there's no
+    single name to pin, and the token is the real gate). A specific non-loopback
+    bind adds exactly that host so it keeps working while foreign Hosts (a
+    DNS-rebinding attacker's domain) are rejected with a 400."""
+    if host in _WILDCARD_HOSTS:
+        return ["*"]
+    allowed = {"127.0.0.1", "localhost", "::1"}
+    if host not in _LOOPBACK_HOSTS:
+        # Strip IPv6 brackets: TrustedHostMiddleware matches the bracket-less,
+        # port-stripped host from the Host header.
+        allowed.add(host.strip("[]"))
+    return sorted(allowed)
 
 
 def _request_token(request: Request) -> str | None:
@@ -56,6 +77,16 @@ def _request_token(request: Request) -> str | None:
 
 
 def _guard(fields: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    # Reject (don't silently drop) any field outside the whitelist: a PATCH that
+    # names an unknown/non-editable field is a client bug, and dropping it would
+    # return 200 while ignoring the caller's intent (e.g. a card PATCH carrying
+    # `closed` would rename and quietly discard the archive). Name the offenders.
+    extra = sorted(k for k in fields if k not in allowed)
+    if extra:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown or non-editable field(s): {extra}. Allowed: {sorted(allowed)}",
+        )
     out = {k: v for k, v in fields.items() if k in allowed}
     if not out:
         raise HTTPException(
@@ -75,7 +106,26 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
     try:
         return fn(*args, **kwargs)
     except SystemExit as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        # Backends raise SystemExit for BOTH "no such id" and input validation
+        # (a bad sort value, a non-local-only op, …), and the Trello backend
+        # also translates upstream HTTP failures into SystemExit. Map a genuine
+        # missing resource to 404, a rate limit to 429, an upstream credential
+        # failure to 502 (the *server's* Trello token is bad, not the client's
+        # request), and everything else to 400. Heuristic on the message text:
+        # every backend's not-found message contains "not found" (verified:
+        # local + Trello), the Trello backend's 429/401 messages contain "rate
+        # limit"/"(401)", and no validation message does — cheap and honest.
+        msg = str(e)
+        lower = msg.lower()
+        if "not found" in lower:
+            code = 404
+        elif "rate limit" in lower:
+            code = 429
+        elif "(401)" in msg:
+            code = 502
+        else:
+            code = 400
+        raise HTTPException(status_code=code, detail=msg)
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=e.response.status_code,
@@ -85,8 +135,15 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
 
 
-def create_app(token: str | None = None) -> FastAPI:
+def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
     app = FastAPI(title="Trellno Web", docs_url=None, redoc_url=None)
+
+    # DNS-rebinding guard (applies to EVERY request — API, SSE, and the static
+    # shell): reject any Host header not on the allow-list before routing. A page
+    # the user visits can't rebind its hostname to 127.0.0.1 and drive this API,
+    # because its forged Host won't match. Loopback binds are covered too (that's
+    # exactly the rebinding target).
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts(host))
 
     if token:
         @app.middleware("http")
@@ -236,7 +293,7 @@ def create_app(token: str | None = None) -> FastAPI:
         return _ok(api.get_card, card_id)
 
     @app.get("/api/cards/{card_id}/attachments/{attachment_id}/raw")
-    def attachment_raw(card_id: str, attachment_id: str) -> FileResponse:
+    def attachment_raw(card_id: str, attachment_id: str) -> StreamingResponse:
         # Serve an uploaded attachment's bytes (a local blob, or a Trello-hosted
         # upload fetched with the OAuth header). External URL attachments are NOT
         # proxied — the browser links to them directly — so the server never
@@ -266,12 +323,36 @@ def create_app(token: str | None = None) -> FastAPI:
             or mimetypes.guess_type(att.get("name") or "")[0]
             or "application/octet-stream"
         )
-        return FileResponse(
-            tmp_path,
+
+        def _stream_and_cleanup() -> Iterator[bytes]:
+            # Stream the temp blob, then unlink it in a finally that runs on
+            # normal completion AND on client disconnect (Starlette closes the
+            # generator, firing the finally). This is the leak-proof alternative
+            # to FileResponse's background task, which is skipped when send raises
+            # mid-download — stranding the temp file. (We still copy the blob into
+            # a temp per view; serving a local blob's path directly would need a
+            # backend path accessor we can't add here without touching local.py.)
+            try:
+                with open(tmp_path, "rb") as blob:
+                    while True:
+                        chunk = blob.read(_STREAM_CHUNK)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        # Serve inline so images/PDFs render in-tab. RFC 5987 `filename*` encodes
+        # the (possibly non-ASCII / attacker-influenced) name so it can't break
+        # out of the header.
+        fname = att.get("name") or attachment_id
+        return StreamingResponse(
+            _stream_and_cleanup(),
             media_type=media,
-            filename=att.get("name") or attachment_id,
-            content_disposition_type="inline",
-            background=BackgroundTask(os.unlink, tmp_path),
+            headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(fname)}"},
         )
 
     @app.delete("/api/cards/{card_id}/attachments/{attachment_id}")
@@ -307,6 +388,13 @@ def create_app(token: str | None = None) -> FastAPI:
         is connected. Without a board it falls back to keep-alive only.
         EventSource on the client auto-reconnects if the connection drops."""
         is_local = config.get_backend_name() == "local"
+        # Resolve the store root ONCE per stream: config.get_local_root() reads
+        # and parses the config file off disk, and the tick loop below runs every
+        # second for the life of the connection — re-reading it each tick would be
+        # blocking disk I/O on the event loop 60×/min per open tab. The path is
+        # stable for the process; only its existence changes (start_watching
+        # re-checks that cheaply).
+        local_root = config.get_local_root() if is_local else None
         # Poll Trello less aggressively than the local file-watch: it's a network
         # round-trip per tick and the API is rate-limited.
         poll_every = 5
@@ -336,7 +424,7 @@ def create_app(token: str | None = None) -> FastAPI:
                 ticks += 1
                 # Re-arm each tick (idempotent): if the store root didn't exist at
                 # connect time, the watcher starts as soon as it appears.
-                if is_local and live.start_watching(config.get_local_root()):
+                if is_local and live.start_watching(local_root):
                     cur = live.get_version()
                     if cur != last:
                         last = cur
@@ -399,7 +487,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
     if not is_loopback and not token:
         token = secrets.token_urlsafe(16)
 
-    app = create_app(token=token)
+    app = create_app(token=token, host=host)
     browse_host = "127.0.0.1" if host in _WILDCARD_HOSTS else host
     browse_url = f"http://{browse_host}:{port}/"
     if token:

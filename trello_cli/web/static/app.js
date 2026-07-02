@@ -11,6 +11,7 @@ const overlayEl = document.getElementById('overlay');
 let cardSortables = [];
 let boardSortable = null;
 let liveDragging = false;  // true mid-drag, so a live refresh won't yank a card
+let pendingReload = false;  // a live change arrived mid-drag; consumed in onEnd
 
 let allBoards = [];        // every board from GET /api/boards, in API order
 let currentBoardId = null; // the board currently rendered (drives every reload)
@@ -21,18 +22,22 @@ function setStatus(msg, isError) {
 }
 
 // When the server is started on a non-loopback host it gates the API behind a
-// token, handed to the page as ?token=… on the URL. Thread it onto every API
-// request and the SSE stream — neither browser navigation nor EventSource can
-// set an Authorization header, so the query param is the only channel.
+// token, handed to the page as ?token=… on the URL. XHRs send it as an
+// `Authorization: Bearer` header (see api()); only the channels that can't set a
+// header — browser navigation, EventSource, and attachment hrefs/img srcs — fall
+// back to ?token= via withToken().
 const AUTH_TOKEN = new URLSearchParams(location.search).get('token');
 
-function withToken(path) {
-  if (!AUTH_TOKEN) return path;
-  return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(AUTH_TOKEN);
+// Append `key=value` to a path's query string (picking ? or & correctly).
+function withQuery(path, key, value) {
+  return path + (path.includes('?') ? '&' : '?') + key + '=' + encodeURIComponent(value);
 }
 
-function withParam(path, key, value) {
-  return path + (path.includes('?') ? '&' : '?') + key + '=' + encodeURIComponent(value);
+// Append the auth token as a query param. Reserved for the header-less channels
+// above; keeping it off XHRs keeps the secret out of access logs and shareable
+// URLs (the server accepts both header and query param).
+function withToken(path) {
+  return AUTH_TOKEN ? withQuery(path, 'token', AUTH_TOKEN) : path;
 }
 
 // Reflect the selected board in the URL (?board=<id>) so a reload, bookmark, or
@@ -133,7 +138,14 @@ function toggleStarCurrent() {
 }
 
 async function api(path, opts) {
-  const res = await fetch(withToken(path), opts);
+  const options = opts ? { ...opts } : {};
+  if (AUTH_TOKEN) {
+    // Bearer header instead of ?token= — keeps the secret out of the server's
+    // access log and out of any URL. Merge so callers' headers are preserved
+    // (and FormData uploads still let the browser set their multipart boundary).
+    options.headers = { ...(options.headers || {}), Authorization: 'Bearer ' + AUTH_TOKEN };
+  }
+  const res = await fetch(path, options);
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) { /* non-JSON body */ }
@@ -352,11 +364,7 @@ function columnEl(list, cards) {
     if (!name) return;
     input.value = '';
     try {
-      const card = await api(`/api/lists/${list.id}/cards`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
+      const card = await post(`/api/lists/${list.id}/cards`, { name });
       // On a sorted column the new card lands in its sorted slot (anywhere, not
       // the bottom), so reload to place it correctly; manual columns keep the
       // cheap append.
@@ -479,6 +487,7 @@ function initDragging() {
       const addList = boardEl.querySelector('.add-list');
       if (addList && addList.nextElementSibling) boardEl.appendChild(addList);
       let rebalanced = false;
+      let failed = false;
       try {
         const updated = await patch(`/api/lists/${col.dataset.listId}`, { pos: neighborPos(col) });
         col.dataset.pos = updated.pos;
@@ -486,13 +495,18 @@ function initDragging() {
         setStatus('Column moved');
       } catch (err) {
         setStatus('Move failed: ' + err.message, true);
+        failed = true;
       } finally {
         liveDragging = false;
       }
-      // A server-side rebalance respread the *other* columns too, so their DOM
-      // data-pos is now stale; reload to refresh every position. Done after the
-      // finally clears liveDragging so we don't tear down this Sortable mid-onEnd.
-      if (rebalanced) await loadBoard(currentBoardId);
+      // Reload when: the PATCH failed (roll the DOM back to the server's truth —
+      // nothing else corrects the wrong drop), a rebalance respread the *other*
+      // columns' data-pos, or a live change arrived mid-drag and was deferred.
+      // Done after the finally clears liveDragging so we don't tear down this
+      // Sortable mid-onEnd.
+      const reload = failed || rebalanced || pendingReload;
+      pendingReload = false;
+      if (reload) await loadBoard(currentBoardId);
     },
   });
 
@@ -514,6 +528,7 @@ function initDragging() {
         const clearSort = destCol && destCol.dataset.sort && destCol.dataset.sort !== 'manual';
         let rebalanced = false;
         let sortCleared = false;
+        let failed = false;
         try {
           const updated = await patch(`/api/cards/${item.dataset.id}`, {
             idList: toList,
@@ -537,14 +552,18 @@ function initDragging() {
           if (!clearSort || sortCleared) setStatus(sortCleared ? 'Card moved (sort cleared)' : 'Card moved');
         } catch (err) {
           setStatus('Move failed: ' + err.message, true);
+          failed = true;
         } finally {
           liveDragging = false;
         }
-        // A server-side rebalance respread the *other* cards too, so their DOM
-        // data-pos is now stale; reload to refresh every position. A cleared sort
-        // also needs a reload so the destination column's sort <select> resets.
+        // Reload when: the move PATCH failed (roll the card back to its real
+        // position — no SSE will fix a failed write), a rebalance respread the
+        // *other* cards' data-pos, the destination's auto-sort was cleared (so
+        // its menu resets), or a live change arrived mid-drag and was deferred.
         // Done after finally clears liveDragging so we don't tear down mid-onEnd.
-        if (rebalanced || sortCleared) await loadBoard(currentBoardId);
+        const reload = failed || rebalanced || sortCleared || pendingReload;
+        pendingReload = false;
+        if (reload) await loadBoard(currentBoardId);
       },
     }));
   });
@@ -595,11 +614,7 @@ function addListEl(boardId) {
     if (!name) { reset(); return; }
     submitting = true;
     try {
-      await api(`/api/boards/${boardId}/lists`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
+      await post(`/api/boards/${boardId}/lists`, { name });
       setStatus('List added');
       await loadBoard(currentBoardId);  // re-renders, discarding this affordance
     } catch (err) {
@@ -617,13 +632,21 @@ function addListEl(boardId) {
   return wrap;
 }
 
+// Monotonic token so a slow board response can't render over a newer one. Every
+// board switch/reload calls loadBoard and bumps it; a response whose token is no
+// longer current is stale (the user navigated on) and is dropped before render.
+let boardReqSeq = 0;
+
 async function loadBoard(boardId) {
+  const seq = ++boardReqSeq;
   setStatus('Loading…');
   try {
     const data = await api(`/api/boards/${boardId}`);
+    if (seq !== boardReqSeq) return;  // a newer load superseded this one
     renderBoard(data);
     setStatus(data.board.name);
   } catch (err) {
+    if (seq !== boardReqSeq) return;
     setStatus('Load failed: ' + err.message, true);
   }
 }
@@ -632,6 +655,10 @@ async function loadBoard(boardId) {
 
 let openCard = null;       // the card dict currently shown in the detail panel
 let openPopover = null;    // the floating popover element (label/due), if any
+// Token guarding the drawer against a stale detail/manage response rendering
+// after the user opened a different card (or the manage panel). Bumped by every
+// openDetail/openManageBoards; a response whose token went stale is dropped.
+let detailReqSeq = 0;
 
 function closePopover() {
   if (openPopover) { openPopover.remove(); openPopover = null; }
@@ -648,6 +675,22 @@ function heading(text) {
   const h = document.createElement('h3');
   h.textContent = text;
   return h;
+}
+
+// Clamp a popover under its anchor within the viewport. Measured against the
+// popover's *current* size, so callers re-run it after async content lands.
+function positionPopover(pop, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  let top = rect.bottom + 6;
+  let left = rect.left;
+  const pr = pop.getBoundingClientRect();
+  if (left + pr.width > window.innerWidth - 8) left = window.innerWidth - pr.width - 8;
+  if (left < 8) left = 8;
+  if (top + pr.height > window.innerHeight - 8) {
+    top = Math.max(8, rect.top - pr.height - 6);
+  }
+  pop.style.top = top + 'px';
+  pop.style.left = left + 'px';
 }
 
 // Float a popover anchored under a trigger button, clamped to the viewport. Only
@@ -671,7 +714,7 @@ function openPopoverAt(anchor, title, buildBody) {
 
   const body = document.createElement('div');
   body.className = 'popover-body';
-  buildBody(body);
+  const built = buildBody(body);
   pop.appendChild(body);
 
   // Swallow clicks inside so the document-level outside-click handler doesn't fire.
@@ -679,17 +722,13 @@ function openPopoverAt(anchor, title, buildBody) {
   document.body.appendChild(pop);
   openPopover = pop;
 
-  const rect = anchor.getBoundingClientRect();
-  let top = rect.bottom + 6;
-  let left = rect.left;
-  const pr = pop.getBoundingClientRect();
-  if (left + pr.width > window.innerWidth - 8) left = window.innerWidth - pr.width - 8;
-  if (left < 8) left = 8;
-  if (top + pr.height > window.innerHeight - 8) {
-    top = Math.max(8, rect.top - pr.height - 6);
+  positionPopover(pop, anchor);
+  // An async builder (e.g. the labels popover fetching board labels) is measured
+  // at its "Loading…" size above; re-clamp once its content lands so a tall
+  // popover doesn't overflow the viewport.
+  if (built && typeof built.then === 'function') {
+    built.then(() => { if (openPopover === pop) positionPopover(pop, anchor); });
   }
-  pop.style.top = top + 'px';
-  pop.style.left = left + 'px';
 }
 
 // Click-to-edit a single-line title or multi-line description. `render` shows the
@@ -744,8 +783,13 @@ function inlineEditable(container, { value, multiline, render, save }) {
     cancel.addEventListener('click', showView);
     // Enter saves a single-line title; Cmd/Ctrl-Enter saves a description.
     editor.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); showView(); }
-      else if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) {
+      if (e.key === 'Escape') {
+        // Close only THIS editor (revert to the read view). stopPropagation so
+        // the document-level Escape handler doesn't also close the whole drawer.
+        e.preventDefault();
+        e.stopPropagation();
+        showView();
+      } else if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         commit();
       }
@@ -1125,12 +1169,14 @@ function commentEl(c) {
 }
 
 async function openDetail(cardId) {
+  const seq = ++detailReqSeq;
   closePopover();
   overlayEl.classList.remove('hidden');
   detailEl.classList.remove('hidden');
   detailEl.innerHTML = '<p class="loading">Loading…</p>';
   try {
     const card = await api(`/api/cards/${cardId}`);
+    if (seq !== detailReqSeq) return;  // a different card/panel was opened since (openDetail)
     openCard = card;
     detailEl.innerHTML = '';
 
@@ -1297,12 +1343,16 @@ async function openDetail(cardId) {
       }
     });
     ta.addEventListener('keydown', (e) => {
+      // Escape must not close the drawer — that would discard the in-progress
+      // comment draft. Swallow it here so the document handler never sees it.
+      if (e.key === 'Escape') { e.stopPropagation(); return; }
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send.click(); }
     });
     composer.append(ta, send);
     detailEl.appendChild(composer);
     detailEl.appendChild(commentsList);
   } catch (err) {
+    if (seq !== detailReqSeq) return;
     detailEl.innerHTML = '';
     const p = document.createElement('p');
     p.className = 'error';
@@ -1344,6 +1394,7 @@ async function reloadBoardsNav() {
 }
 
 async function openManageBoards() {
+  ++detailReqSeq;  // invalidate any in-flight card detail load for this drawer
   closePopover();
   openCard = null;
   overlayEl.classList.remove('hidden');
@@ -1502,6 +1553,7 @@ document.addEventListener('click', (e) => {
 // ── live refresh ───────────────────────────────────────────────────
 
 let liveSource = null;
+let liveErrorCount = 0;  // consecutive SSE failures; reset on a successful open
 
 // Reload the current board when the server signals a change. For the local
 // backend that's a store file change (a Dropbox sync, or another
@@ -1513,26 +1565,51 @@ let liveSource = null;
 function initLive(boardId) {
   if (typeof EventSource === 'undefined') return;
   if (liveSource) liveSource.close();
-  liveSource = new EventSource(withToken(withParam('/api/events', 'board', boardId)));
+  liveErrorCount = 0;
+  liveSource = new EventSource(withToken(withQuery('/api/events', 'board', boardId)));
+  liveSource.addEventListener('open', () => { liveErrorCount = 0; });
   liveSource.addEventListener('change', () => {
-    if (liveDragging || !currentBoardId) return;
+    if (!currentBoardId) return;
+    // Defer a mid-drag change rather than drop it: reloading now would yank the
+    // dragged card away, but ignoring it entirely would hide another agent's
+    // edit until an unrelated later reload. onEnd consumes pendingReload.
+    if (liveDragging) { pendingReload = true; return; }
     loadBoard(currentBoardId);
+  });
+  liveSource.addEventListener('error', () => {
+    // EventSource auto-reconnects on a dropped stream; count consecutive
+    // failures (a successful 'open' resets this). If they pile up — server
+    // stopped, token rotated — stop the reconnect storm and surface a manual
+    // -reload hint instead of hammering silently and freezing the board.
+    liveErrorCount += 1;
+    if (liveErrorCount >= 5) {
+      liveSource.close();
+      liveSource = null;
+      setStatus('Live refresh disconnected — reload the page to reconnect.', true);
+    }
   });
 }
 
 // ── boot ───────────────────────────────────────────────────────────
 
 async function init() {
+  // Wire the topbar controls BEFORE any early return so they work even with zero
+  // open boards — the ⚙ manage-boards panel is the only way to restore an
+  // archived board, so it must never depend on a board being loaded first.
+  picker.addEventListener('change', () => selectBoard(picker.value));
+  starToggle.addEventListener('click', toggleStarCurrent);
+  document.getElementById('manage-boards-btn').addEventListener('click', openManageBoards);
   try {
     const boards = await api('/api/boards');
+    allBoards = boards;
     if (!boards.length) {
-      setStatus('No boards found for this backend.', true);
+      // Empty state, not a dead end: render the (empty) nav and point the user
+      // at ⚙ to restore an archived board or the CLI to create one.
+      renderNav();
+      setStatus('No open boards. Use ⚙ to restore an archived board, '
+        + 'or create one from the CLI.', true);
       return;
     }
-    allBoards = boards;
-    picker.addEventListener('change', () => selectBoard(picker.value));
-    starToggle.addEventListener('click', toggleStarCurrent);
-    document.getElementById('manage-boards-btn').addEventListener('click', openManageBoards);
     // Restore the board from ?board=<id> on reload/bookmark; fall back to the
     // first board if it's absent or no longer exists for this backend.
     const requested = new URLSearchParams(location.search).get('board');

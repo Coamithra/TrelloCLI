@@ -20,7 +20,9 @@ import functools
 import getpass
 import hashlib
 import mimetypes
+import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -35,7 +37,9 @@ from .store import (
     needs_rebalance,
     new_id,
     now_iso,
+    pos_below,
     read_json,
+    read_json_tolerant,
     resolve_pos,
 )
 
@@ -72,10 +76,28 @@ def _as_bool(value: Any) -> bool:
 
 
 def _dir_size(path: Path) -> int:
-    """Total size in bytes of every file under `path` (0 if it doesn't exist)."""
+    """Total size in bytes of every file under `path` (0 if it doesn't exist).
+    A file that vanishes mid-scan (a concurrent gc / Dropbox sync) is skipped
+    rather than raising."""
     if not path.exists():
         return 0
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _safe_component(name: str) -> str:
+    """Sanitize a filename to a single safe path component: strip any directory
+    parts and replace path-hostile characters, so an attachment's stored blob
+    can never escape the card's own `attachments/<cardId>/` directory."""
+    name = Path(name).name  # drop any directory components
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    return name or "file"
 
 
 class LocalBackend(Backend):
@@ -88,12 +110,6 @@ class LocalBackend(Backend):
         self._lock = get_store_lock(self.store.root / ".lock")
 
     # ── internal helpers ────────────────────────────────────────────
-
-    def _unsupported(self, op: str) -> Any:
-        raise SystemExit(
-            f"The local backend doesn't support '{op}' yet (coming in a later phase). "
-            "Run it against Trello with --backend trello."
-        )
 
     def _load_board(self, board_id: str) -> dict:
         board = read_json(self.store.board_file(board_id))
@@ -130,7 +146,7 @@ class LocalBackend(Backend):
     def _list_positions(self, board_id: str, list_id: str, exclude: str | None = None) -> list[float]:
         """Open cards' positions in a list (optionally excluding one card)."""
         return [
-            c["pos"] for c in self.store.cards(board_id)
+            c.get("pos", 0) for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed") and c["id"] != exclude
         ]
 
@@ -145,10 +161,10 @@ class LocalBackend(Backend):
              if c.get("idList") == list_id and not c.get("closed")),
             key=lambda c: c.get("pos", 0),
         )
-        if not needs_rebalance([c["pos"] for c in open_cards]):
+        if not needs_rebalance([c.get("pos", 0) for c in open_cards]):
             return False
         for card, pos in zip(open_cards, even_positions(len(open_cards))):
-            if card["pos"] != pos:
+            if card.get("pos", 0) != pos:
                 card["pos"] = pos
                 self._save_card(board_id, card)
         return True
@@ -224,7 +240,7 @@ class LocalBackend(Backend):
             if sorts_before(nk, key(c)):
                 cp = c.get("pos", 0)
                 if i == 0:  # lands at the top — go strictly below the current min
-                    return cp / 2 if cp > 0 else cp - POS_STEP
+                    return pos_below(cp)
                 return (ordered[i - 1].get("pos", 0) + cp) / 2
         # Sorts at/after every existing card — land below the current maximum.
         return max(c.get("pos", 0) for c in existing) + POS_STEP
@@ -253,11 +269,15 @@ class LocalBackend(Backend):
     def _save_labels(self, board_id: str, labels: list[dict]) -> None:
         atomic_write_json(self.store.labels_file(board_id), labels)
 
-    def _enrich_card(self, board_id: str, card: dict) -> dict:
+    def _enrich_card(self, board_id: str, card: dict,
+                     labels_by_id: dict | None = None) -> dict:
         """Return a Trello-shaped copy of a stored card: resolve `idLabels` to
         full label dicts and drop the store-only `idLabels` / inline `comments`
-        keys (comments are delivered as actions via get_comments)."""
-        by_id = {lb["id"]: lb for lb in self._load_labels(board_id)}
+        keys (comments are delivered as actions via get_comments). Pass
+        `labels_by_id` (an id→label map) to enrich a whole board's cards off one
+        `labels.json` read instead of re-reading it per card."""
+        by_id = (labels_by_id if labels_by_id is not None
+                 else {lb["id"]: lb for lb in self._load_labels(board_id)})
         out = dict(card)
         out["labels"] = [by_id[i] for i in card.get("idLabels", []) if i in by_id]
         out.pop("idLabels", None)
@@ -389,6 +409,11 @@ class LocalBackend(Backend):
         rewrites their urls root-relative *before* calling this, so those local urls
         get persisted here. Returns counts for the caller to print."""
         bid = board["id"]
+        # Preserve any local-only per-list `sort` set on a prior import of this
+        # board — a Trello re-pull has no `sort` field and would otherwise reset
+        # every column back to manual, silently losing local state.
+        prev_sort = {l["id"]: l.get("sort", DEFAULT_SORT)
+                     for l in self._load_lists(bid)}
         atomic_write_json(self.store.board_file(bid), {
             "id": bid,
             "name": board.get("name", ""),
@@ -402,9 +427,9 @@ class LocalBackend(Backend):
                 "name": l.get("name", ""),
                 "pos": l.get("pos", 0),
                 "closed": _as_bool(l.get("closed", False)),
-                # Source backends (Trello) have no sort; default to manual. A
-                # local source carries its own through unchanged.
-                "sort": l.get("sort", DEFAULT_SORT),
+                # A local source carries its own `sort`; a source without one
+                # (Trello) keeps this list's previously-imported sort, else manual.
+                "sort": l.get("sort") or prev_sort.get(l["id"], DEFAULT_SORT),
             }
             for l in lists
         ])
@@ -461,7 +486,7 @@ class LocalBackend(Backend):
             (l for l in lists if not l.get("closed")),
             key=lambda l: l.get("pos", 0),
         )
-        if not needs_rebalance([l["pos"] for l in open_lists]):
+        if not needs_rebalance([l.get("pos", 0) for l in open_lists]):
             return False
         for lst, pos in zip(open_lists, even_positions(len(open_lists))):
             lst["pos"] = pos
@@ -495,7 +520,7 @@ class LocalBackend(Backend):
             target["name"] = fields["name"]
         rebalanced = False
         if "pos" in fields:
-            existing = [l["pos"] for l in lists if l["id"] != list_id and not l.get("closed")]
+            existing = [l.get("pos", 0) for l in lists if l["id"] != list_id and not l.get("closed")]
             target["pos"] = resolve_pos(existing, fields["pos"])
             rebalanced = self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
         if "closed" in fields:
@@ -559,11 +584,18 @@ class LocalBackend(Backend):
         self._load_board(board_id)
         cards = self.store.cards(board_id)
         if card_filter == "visible":
-            cards = [c for c in cards if not c.get("closed")]
+            # A card whose list is archived is invisible on Trello (the whole
+            # column is gone), so exclude it here too — otherwise it renders in
+            # no column yet still shows up in board-card counts.
+            open_lists = {l["id"] for l in self._load_lists(board_id)
+                          if not l.get("closed")}
+            cards = [c for c in cards
+                     if not c.get("closed") and c.get("idList") in open_lists]
         elif card_filter == "closed":
             cards = [c for c in cards if c.get("closed")]
         cards.sort(key=lambda c: c.get("pos", 0))
-        return [self._enrich_card(board_id, c) for c in cards]
+        by_id = {lb["id"]: lb for lb in self._load_labels(board_id)}
+        return [self._enrich_card(board_id, c, by_id) for c in cards]
 
     def get_cards_in_list(self, list_id: str,
                           with_latest_comment: bool = False) -> list[dict]:
@@ -573,9 +605,10 @@ class LocalBackend(Backend):
             if c.get("idList") == list_id and not c.get("closed")
         ]
         cards.sort(key=lambda c: c.get("pos", 0))
+        by_id = {lb["id"]: lb for lb in self._load_labels(board_id)}
         out = []
         for c in cards:
-            enriched = self._enrich_card(board_id, c)
+            enriched = self._enrich_card(board_id, c, by_id)
             if with_latest_comment:
                 latest = sorted(c.get("comments", []),
                                 key=lambda x: x.get("date", ""), reverse=True)[:1]
@@ -592,9 +625,14 @@ class LocalBackend(Backend):
         # scope (Trello's is cross-board), so gather from every local board.
         out = []
         for bid in self.store.board_ids():
+            open_lists = {l["id"] for l in self._load_lists(bid)
+                          if not l.get("closed")}
+            by_id = {lb["id"]: lb for lb in self._load_labels(bid)}
             for c in self.store.cards(bid):
-                if not c.get("closed"):
-                    out.append(self._enrich_card(bid, c))
+                # Skip archived cards and cards stranded in an archived list
+                # (invisible on Trello, so not "mine" either).
+                if not c.get("closed") and c.get("idList") in open_lists:
+                    out.append(self._enrich_card(bid, c, by_id))
         out.sort(key=lambda c: c.get("dateLastActivity") or "", reverse=True)
         return out
 
@@ -643,7 +681,10 @@ class LocalBackend(Backend):
         return self.update_card(card_id, closed=True)
 
     def unarchive_card(self, card_id: str) -> dict:
-        return self.update_card(card_id, closed=False)
+        # Re-derive a fresh bottom pos: the stored pos is stale (the list may have
+        # rebalanced while the card was archived) and could now exactly equal a
+        # sibling's, making order ambiguous. Land it at the bottom of its list.
+        return self.update_card(card_id, closed=False, pos="bottom")
 
     def update_card(self, card_id: str, **fields: Any) -> dict:
         board_id, card = self._load_card(card_id)
@@ -657,6 +698,17 @@ class LocalBackend(Backend):
             card["dueComplete"] = _as_bool(fields["dueComplete"])
         pos_touched = False
         if "idList" in fields:
+            # The destination must be a real, open list on THIS card's board —
+            # `_list_positions` returns [] for an unknown/foreign/archived id, so
+            # without this guard the card would save with an idList that maps to
+            # no column: invisible yet still counted. Fail cleanly instead.
+            dest = next((l for l in self._load_lists(board_id)
+                         if l["id"] == fields["idList"]), None)
+            if dest is None or dest.get("closed"):
+                raise SystemExit(
+                    f"Destination list not found or archived on this board: "
+                    f"{fields['idList']}"
+                )
             card["idList"] = fields["idList"]
             # Land at the bottom of the destination list; reorder with `card pos`.
             existing = self._list_positions(board_id, card["idList"], exclude=card_id)
@@ -677,12 +729,14 @@ class LocalBackend(Backend):
         if rebalanced:
             _, card = self._load_card(card_id)
         self._log(board_id, "updateCard", {"card": {"id": card_id, "name": card["name"]}})
+        out = self._enrich_card(board_id, card)
         if rebalanced:
-            # Transient signal, set after the save so it is never persisted: the
-            # respread rewrote the *other* cards' pos too, so the web client must
-            # reload to refresh their now-stale data-pos. CLI callers ignore it.
-            card = {**card, "rebalanced": True}
-        return card
+            # Transient signal, re-attached AFTER enrichment so it is never
+            # persisted: the respread rewrote the *other* cards' pos too, so the
+            # web client must reload to refresh their now-stale data-pos. CLI
+            # callers ignore it.
+            out = {**out, "rebalanced": True}
+        return out
 
     # ── Comments (inline in the card JSON, action-shaped) ────────────
 
@@ -716,13 +770,19 @@ class LocalBackend(Backend):
     def update_comment(self, action_id: str, text: str) -> dict:
         board_id, card, comment = self._locate_comment(action_id)
         comment.setdefault("data", {})["text"] = text
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "updateComment",
+                  {"text": text, "card": {"id": card["id"], "name": card["name"]}})
         return comment
 
     def delete_comment(self, action_id: str) -> None:
         board_id, card, _ = self._locate_comment(action_id)
         card["comments"] = [c for c in card["comments"] if c["id"] != action_id]
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "deleteComment",
+                  {"card": {"id": card["id"], "name": card["name"]}})
 
     # ── Labels (labels.json; cards reference them by id in idLabels) ──
 
@@ -750,6 +810,8 @@ class LocalBackend(Backend):
             if "color" in fields:
                 target["color"] = fields["color"] or ""
             self._save_labels(bid, labels)
+            self._log(bid, "updateLabel",
+                      {"label": {"id": label_id, "name": target["name"]}})
             return target
         raise SystemExit(f"Label not found: {label_id}")
 
@@ -764,6 +826,7 @@ class LocalBackend(Backend):
                 if label_id in card.get("idLabels", []):
                     card["idLabels"] = [i for i in card["idLabels"] if i != label_id]
                     self._save_card(bid, card)
+            self._log(bid, "deleteLabel", {"label": {"id": label_id}})
             return
         raise SystemExit(f"Label not found: {label_id}")
 
@@ -781,7 +844,11 @@ class LocalBackend(Backend):
         board_id, card = self._load_card(card_id)
         if label_id in card.get("idLabels", []):
             card["idLabels"] = [i for i in card["idLabels"] if i != label_id]
+            card["dateLastActivity"] = now_iso()
             self._save_card(board_id, card)
+            self._log(board_id, "removeLabelFromCard",
+                      {"card": {"id": card_id, "name": card["name"]},
+                       "label": {"id": label_id}})
 
     # ── Members (single local user from the OS username) ─────────────
 
@@ -794,16 +861,20 @@ class LocalBackend(Backend):
     @staticmethod
     def _parse_iso(value: str) -> datetime | None:
         try:
+            # fromisoformat only learned to parse a trailing "Z" in 3.11; the
+            # project supports 3.10, so normalize it first.
+            if isinstance(value, str) and value.endswith("Z"):
+                value = value[:-1] + "+00:00"
             return datetime.fromisoformat(value)
         except (ValueError, TypeError):
             return None
 
     def get_activity(self, board_id: str, limit: int = 10) -> list[dict]:
         self._load_board(board_id)
-        user = self._local_user()
         actions = self.store.read_activity(board_id)
-        for a in actions:
-            a.setdefault("memberCreator", user)
+        # Entries carry the `memberCreator` stamped at write time; a legacy/foreign
+        # entry that lacks one is left as-is (render-side falls back to "?") rather
+        # than mis-attributed to whoever happens to run this command.
         actions.reverse()  # log is oldest-first; show newest first
         return actions[:limit]
 
@@ -811,7 +882,6 @@ class LocalBackend(Backend):
                           action_types: str | None = None,
                           page: int = 1000) -> list[dict]:
         self._load_board(board_id)
-        user = self._local_user()
         wanted = set(action_types.split(",")) if action_types else None
         cutoff = self._parse_iso(since)
         out = []
@@ -825,7 +895,6 @@ class LocalBackend(Backend):
                         continue
                 except TypeError:  # naive/aware mismatch — keep rather than drop
                     pass
-            a.setdefault("memberCreator", user)
             out.append(a)
         out.reverse()  # newest first
         return out
@@ -856,12 +925,20 @@ class LocalBackend(Backend):
     def delete_checklist(self, checklist_id: str) -> None:
         board_id, card, _ = self._locate_checklist(checklist_id)
         card["checklists"] = [cl for cl in card["checklists"] if cl["id"] != checklist_id]
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "removeChecklistFromCard",
+                  {"card": {"id": card["id"], "name": card["name"]},
+                   "checklist": {"id": checklist_id}})
 
     def rename_checklist(self, checklist_id: str, name: str) -> dict:
         board_id, card, cl = self._locate_checklist(checklist_id)
         cl["name"] = name
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "updateChecklist",
+                  {"card": {"id": card["id"], "name": card["name"]},
+                   "checklist": {"id": checklist_id, "name": name}})
         return cl
 
     def add_checkitem(self, checklist_id: str, name: str) -> dict:
@@ -875,13 +952,21 @@ class LocalBackend(Backend):
             "pos": POS_STEP * (len(items) + 1),
         }
         items.append(item)
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "createCheckItem",
+                  {"card": {"id": card["id"], "name": card["name"]},
+                   "checkItem": {"id": item["id"], "name": name}})
         return item
 
     def delete_checkitem(self, checklist_id: str, item_id: str) -> None:
         board_id, card, cl = self._locate_checklist(checklist_id)
         cl["checkItems"] = [it for it in cl.get("checkItems", []) if it["id"] != item_id]
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
+        self._log(board_id, "deleteCheckItem",
+                  {"card": {"id": card["id"], "name": card["name"]},
+                   "checkItem": {"id": item_id}})
 
     def update_checkitem(self, card_id: str, item_id: str, **fields: Any) -> dict:
         board_id, card = self._load_card(card_id)
@@ -892,18 +977,34 @@ class LocalBackend(Backend):
                         it["name"] = fields["name"]
                     if "state" in fields:
                         it["state"] = fields["state"]
+                    card["dateLastActivity"] = now_iso()
                     self._save_card(board_id, card)
+                    self._log(board_id, "updateCheckItemStateOnCard",
+                              {"card": {"id": card["id"], "name": card["name"]},
+                               "checkItem": {"id": item_id,
+                                             "state": it.get("state", "")}})
                     return it
         raise SystemExit(f"Check item not found: {item_id}")
 
     # ── Attachments (inline metadata; uploaded blobs under attachments/) ──
 
     def _blob_path(self, url: str) -> Path:
-        """Absolute path of an uploaded blob. New stores keep `url` relative to
-        the store root (so the folder is portable across machines / Dropbox);
-        older stores may have an absolute path — honour it as-is."""
+        """Resolved absolute path of an uploaded blob, **guaranteed to stay under
+        the store root**. New stores keep `url` relative to the root (so the folder
+        is portable across machines / Dropbox); older stores may carry an absolute
+        path. Either way the resolved path must be inside the store — a card JSON is
+        untrusted input (Dropbox-shared, or written by `import_board`), so a `url`
+        of `../../etc/hostname` (or an absolute path elsewhere) must not let a
+        consumer (the web `/raw` read, `delete_attachment`, `gc`) reach outside the
+        store. On violation raise SystemExit; every consumer inherits the check."""
+        root = self.store.root.resolve()
         p = Path(url)
-        return p if p.is_absolute() else self.store.root / url
+        dest = (p if p.is_absolute() else root / p).resolve()
+        if dest != root and root not in dest.parents:
+            raise SystemExit(
+                f"Refusing attachment path outside the store: {url!r}"
+            )
+        return dest
 
     def get_attachments(self, card_id: str) -> list[dict]:
         _, card = self._load_card(card_id)
@@ -939,7 +1040,9 @@ class LocalBackend(Backend):
         att_id = new_id()
         dest_dir = self.store.attachments_dir(board_id, card_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f"{att_id}-{src.name}"
+        # Sanitize the filename to a single safe component so the blob is pinned to
+        # the card's own attachments dir (no traversal via a crafted source name).
+        dest = dest_dir / f"{att_id}-{_safe_component(src.name)}"
         shutil.copyfile(src, dest)
         return self._add_attachment(card_id, {
             "id": att_id,
@@ -962,10 +1065,22 @@ class LocalBackend(Backend):
                 keep.append(a)
         if removed is None:
             raise SystemExit(f"Attachment not found: {attachment_id}")
+        # Resolve the blob path *before* mutating the card, so a traversal url
+        # (`_blob_path` raises) refuses the whole delete rather than leaving the
+        # metadata half-removed. A remote url on an isUpload attachment has no
+        # local blob to remove — skip it.
+        blob = None
+        if removed.get("isUpload"):
+            url = removed.get("url", "")
+            if not url.lower().startswith(("http://", "https://")):
+                blob = self._blob_path(url)
         card["attachments"] = keep
+        card["dateLastActivity"] = now_iso()
         self._save_card(board_id, card)
-        if removed.get("isUpload"):  # URL attachments have nothing local to remove
-            blob = self._blob_path(removed.get("url", ""))
+        self._log(board_id, "deleteAttachmentFromCard",
+                  {"card": {"id": card_id, "name": card["name"]},
+                   "attachment": {"id": attachment_id}})
+        if blob is not None:
             try:
                 if blob.is_file():
                     blob.unlink()
@@ -975,9 +1090,21 @@ class LocalBackend(Backend):
 
     def download_attachment(self, url: str, dest: str, authed: bool = True) -> None:
         """Fetch an external URL attachment over http, or copy an uploaded blob
-        (its `url` is a root-relative path) to `dest`. `authed` is unused locally
-        — the file store has no Trello OAuth."""
+        (its `url` is a root-relative path under the store) to `dest`.
+
+        `authed` doubles as the "this is an uploaded attachment" signal: the web
+        `/raw` route and the CLI pass `authed=att.isUpload`. An *upload* whose
+        stored url is remote http (e.g. left behind by `export --to local
+        --no-attachments`) is NOT fetched server-side — the local store has no
+        OAuth and must never fetch an arbitrary URL on a caller's behalf; raise a
+        clean SystemExit so the web `/raw` route 404s. Genuine external URL
+        attachments (`authed` False) are still fetched for the CLI view/open."""
         if url.lower().startswith(("http://", "https://")):
+            if authed:
+                raise SystemExit(
+                    "attachment blob is not stored locally; re-export with "
+                    "attachments to fetch it"
+                )
             import httpx
 
             with httpx.stream("GET", url, timeout=60, follow_redirects=True) as r:
@@ -986,7 +1113,7 @@ class LocalBackend(Backend):
                     for chunk in r.iter_bytes():
                         fh.write(chunk)
             return
-        src = self._blob_path(url)
+        src = self._blob_path(url)  # containment-checked; raises on a traversal url
         if src.is_file():
             shutil.copyfile(src, dest)
             return
@@ -1016,14 +1143,22 @@ class LocalBackend(Backend):
                 if apply:
                     shutil.rmtree(cdir, ignore_errors=True)
                 continue
-            card = read_json(self.store.card_file(board_id, cdir.name))
+            # Tolerant read: a present-but-unreadable card (empty/partial sync,
+            # a `{}`/`null` conflict copy) must not abort the sweep mid-way after
+            # some dirs are already deleted — skip it and keep its blobs.
+            card = read_json_tolerant(self.store.card_file(board_id, cdir.name))
             if not card:  # file exists but unreadable/empty — don't risk its blobs
                 continue
-            referenced = {
-                self._blob_path(a.get("url", "")).name
-                for a in card.get("attachments", [])
-                if a.get("isUpload")
-            }
+            referenced = set()
+            for a in card.get("attachments", []):
+                if not a.get("isUpload"):
+                    continue
+                try:
+                    referenced.add(self._blob_path(a.get("url", "")).name)
+                except SystemExit:
+                    # A traversal/remote url has no legit in-store blob to keep;
+                    # don't let it crash the sweep.
+                    continue
             for f in sorted(cdir.iterdir()):
                 if f.is_file() and f.name not in referenced:
                     freed += f.stat().st_size
@@ -1036,12 +1171,34 @@ class LocalBackend(Backend):
             aroot.rmdir()
         return freed
 
+    def _gc_board_tmp(self, board_id: str, apply: bool,
+                      orphan_files: list[str]) -> int:
+        """Find (and, if `apply`, delete) stray `.<name>.<hex>.tmp` files under a
+        board — atomic-write temp files a hard crash left behind before its
+        `os.replace` (the normal path cleans them up itself). Returns bytes freed."""
+        bdir = self.store.board_dir(board_id)
+        if not bdir.is_dir():
+            return 0
+        freed = 0
+        for f in sorted(bdir.rglob(".*.tmp")):
+            if not f.is_file():
+                continue
+            try:
+                freed += f.stat().st_size
+            except OSError:
+                continue
+            orphan_files.append(str(f))
+            if apply:
+                f.unlink(missing_ok=True)
+        return freed
+
     def gc(self, board_id: str | None = None, apply: bool = False,
            activity_keep: int | None = None) -> dict:
         """Sweep stale data from the store; report what is (or would be) removed,
         deleting only when `apply`. Cleans orphaned attachment blob dirs (no
         owning card), orphaned blob files (not referenced by a live card's
-        attachment metadata), and resulting empty dirs; trims each board's
+        attachment metadata), resulting empty dirs, and stray `.*.tmp` atomic-write
+        leftovers from a hard crash; trims each board's
         activity.log to its newest `activity_keep` lines when that is given.
         Scoped to `board_id` if set, else every board. Local-only."""
         if board_id is not None:
@@ -1055,6 +1212,7 @@ class LocalBackend(Backend):
         activity_trimmed = 0
         for bid in boards:
             freed += self._gc_board_attachments(bid, apply, orphan_dirs, orphan_files)
+            freed += self._gc_board_tmp(bid, apply, orphan_files)
             if activity_keep is not None:
                 drop = max(0, self.store.activity_line_count(bid) - activity_keep)
                 activity_trimmed += drop
