@@ -49,7 +49,7 @@ Global options:
                                 (also: TRELLO_LOCAL_ROOT env var; persist with
                                 `local init <path>`)
   --json                        Emit raw JSON instead of formatted text
-                                (read commands only)
+                                (read commands; some mutators also echo JSON)
 
 Tip: bare nouns default to `ls` — e.g. `trello list` ≡ `trello list ls`,
      `trello card <list>` ≡ `trello card ls <list>`.
@@ -118,7 +118,8 @@ List:
 
 Label:
   label ls                              Show board labels
-  label add <name> <color>              Create a board label
+  label add <name> [color]              Create a board label (a single argument
+                                        is taken as the name; color optional)
   label edit <label> [name] [color]     Update a label
   label delete <label>                  Delete a board label
   label set <card_id> <label>           Add a label to a card
@@ -165,7 +166,7 @@ Data:
                                 Create-new-each-time: re-running makes another board.
 
 Web:
-  serve [--port 8787] [--host 127.0.0.1] [--no-browser]
+  serve [--port 8787] [--host 127.0.0.1] [--token <t>] [--no-browser]
                                 Launch the drag-drop kanban web app for the
                                 selected backend (pip install trello-cli[web]).
                                 Binds 127.0.0.1 by default (local only). Live-
@@ -186,8 +187,15 @@ def _resolve_board_ref(ref: str) -> str:
     for b in boards:
         if b["id"] == ref or short_id(b["id"]) == ref:
             return b["id"]
-    # Name prefix match (case-insensitive)
     lower = ref.lower()
+    # Exact name match (case-insensitive) — wins over a mere prefix
+    exact = [b for b in boards if b["name"].lower() == lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+    if len(exact) > 1:
+        names = ", ".join(m["name"] for m in exact)
+        raise SystemExit(f"Ambiguous board name '{ref}'. Matches: {names}")
+    # Name prefix match (case-insensitive)
     matches = [b for b in boards if b["name"].lower().startswith(lower)]
     if len(matches) == 1:
         return matches[0]["id"]
@@ -213,12 +221,19 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
     for lst in lists:
         if lst["id"] == name_or_id:
             return lst["id"]
+    lower = name_or_id.lower()
+    # Exact name (case-insensitive) — beats both id-prefix and name-prefix
+    exact = [lst for lst in lists if lst["name"].lower() == lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+    if len(exact) > 1:
+        names = ", ".join(m["name"] for m in exact)
+        raise SystemExit(f"Ambiguous list name '{name_or_id}'. Matches: {names}")
     # ID prefix
     id_matches = [lst for lst in lists if lst["id"].startswith(name_or_id)]
     if len(id_matches) == 1:
         return id_matches[0]["id"]
     # Name prefix (case-insensitive)
-    lower = name_or_id.lower()
     name_matches = [lst for lst in lists if lst["name"].lower().startswith(lower)]
     if len(name_matches) == 1:
         return name_matches[0]["id"]
@@ -233,9 +248,22 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
 
 def _resolve_card(card_id_prefix: str, include_closed: bool = False) -> str:
     """Resolve a card ID prefix to a full card ID by searching the active board."""
-    # If it looks like a full 24-char ID, use it directly
+    # A full 24-char ID: validate it belongs to the current board (when one is
+    # set) instead of trusting it blindly — a foreign/deleted id then gets a clean
+    # "Card not found" rather than a cross-board mutation or a raw 404 traceback.
+    # With no board context we can't check, so trust it (the backend errors if bad).
     if len(card_id_prefix) == 24:
-        return card_id_prefix
+        if not config.get_board_override():
+            return card_id_prefix
+        board_id = _require_board()
+        if any(c["id"] == card_id_prefix for c in api.get_board_cards(board_id)):
+            return card_id_prefix
+        if include_closed and any(
+            c["id"] == card_id_prefix
+            for c in api.get_board_cards(board_id, card_filter="closed")
+        ):
+            return card_id_prefix
+        raise SystemExit(f"Card not found on this board: {card_id_prefix}")
     board_id = _require_board()
     cards = api.get_board_cards(board_id)
     matches = [c for c in cards if c["id"].startswith(card_id_prefix)]
@@ -260,13 +288,17 @@ def _resolve_comment(card_id: str, comment_id_prefix: str) -> str:
     """Resolve a comment (action) ID prefix to a full action ID."""
     if len(comment_id_prefix) == 24:
         return comment_id_prefix
-    comments = api.get_comments(card_id, limit=50)
+    limit = 1000
+    comments = api.get_comments(card_id, limit=limit)
     matches = [c for c in comments if c["id"].startswith(comment_id_prefix)]
     if len(matches) == 1:
         return matches[0]["id"]
     if len(matches) > 1:
         ids = ", ".join(short_id(c["id"]) for c in matches[:5])
         raise SystemExit(f"Ambiguous comment ID prefix '{comment_id_prefix}'. Matches: {ids}")
+    if len(comments) >= limit:
+        print(f"  warning: searched only the newest {limit} comments; older ones "
+              "were not checked", file=sys.stderr)
     raise SystemExit(f"Comment not found with prefix: {comment_id_prefix}")
 
 
@@ -277,12 +309,19 @@ def _resolve_checklist(card_id: str, name_or_id: str) -> str:
     for cl in checklists:
         if cl["id"] == name_or_id:
             return cl["id"]
+    lower = name_or_id.lower()
+    # Exact name (case-insensitive)
+    exact = [cl for cl in checklists if cl["name"].lower() == lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+    if len(exact) > 1:
+        names = ", ".join(m["name"] for m in exact)
+        raise SystemExit(f"Ambiguous checklist '{name_or_id}'. Matches: {names}")
     # ID prefix
     id_matches = [cl for cl in checklists if cl["id"].startswith(name_or_id)]
     if len(id_matches) == 1:
         return id_matches[0]["id"]
     # Name prefix (case-insensitive)
-    lower = name_or_id.lower()
     name_matches = [cl for cl in checklists if cl["name"].lower().startswith(lower)]
     if len(name_matches) == 1:
         return name_matches[0]["id"]
@@ -307,12 +346,19 @@ def _resolve_checkitem(card_id: str, checklist_id: str, name_or_id: str) -> str:
     for it in items:
         if it["id"] == name_or_id:
             return it["id"]
+    lower = name_or_id.lower()
+    # Exact name (case-insensitive)
+    exact = [it for it in items if it["name"].lower() == lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+    if len(exact) > 1:
+        names = ", ".join(m["name"] for m in exact)
+        raise SystemExit(f"Ambiguous item '{name_or_id}'. Matches: {names}")
     # ID prefix
     id_matches = [it for it in items if it["id"].startswith(name_or_id)]
     if len(id_matches) == 1:
         return id_matches[0]["id"]
     # Name prefix (case-insensitive)
-    lower = name_or_id.lower()
     name_matches = [it for it in items if it["name"].lower().startswith(lower)]
     if len(name_matches) == 1:
         return name_matches[0]["id"]
@@ -338,12 +384,19 @@ def _resolve_label(board_id: str, name_or_id: str) -> str:
     for lb in labels:
         if lb["id"] == name_or_id:
             return lb["id"]
+    lower = name_or_id.lower()
+    # Exact name (case-insensitive)
+    exact = [lb for lb in labels if lb.get("name") and lb["name"].lower() == lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+    if len(exact) > 1:
+        names = ", ".join(m.get("name", m["id"][:8]) for m in exact)
+        raise SystemExit(f"Ambiguous label '{name_or_id}'. Matches: {names}")
     # ID prefix
     id_matches = [lb for lb in labels if lb["id"].startswith(name_or_id)]
     if len(id_matches) == 1:
         return id_matches[0]["id"]
     # Name prefix (case-insensitive)
-    lower = name_or_id.lower()
     name_matches = [lb for lb in labels if (lb.get("name") or "").lower().startswith(lower) and lb.get("name")]
     if len(name_matches) == 1:
         return name_matches[0]["id"]
@@ -364,12 +417,19 @@ def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     for a in atts:
         if a["id"] == name_or_id:
             return a
+    lower = name_or_id.lower()
+    # Exact name (case-insensitive)
+    exact = [a for a in atts if (a.get("name") or "").lower() == lower and a.get("name")]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        names = ", ".join(a.get("name") or short_id(a["id"]) for a in exact)
+        raise SystemExit(f"Ambiguous attachment '{name_or_id}'. Matches: {names}")
     # ID prefix
     id_matches = [a for a in atts if a["id"].startswith(name_or_id)]
     if len(id_matches) == 1:
         return id_matches[0]
     # Name prefix (case-insensitive)
-    lower = name_or_id.lower()
     name_matches = [a for a in atts if (a.get("name") or "").lower().startswith(lower)]
     if len(name_matches) == 1:
         return name_matches[0]
@@ -382,16 +442,23 @@ def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     raise SystemExit(f"Attachment not found: {name_or_id}")
 
 
-def _dispatch(group: str, subcmds: dict, args: list[str]) -> None:
-    """Dispatch a noun-group subcommand. If the first arg isn't a known
-    verb and the group has an `ls` verb, treat all args as `ls <args>`."""
+def _dispatch(group: str, subcmds: dict, args: list[str],
+              ls_takes_args: bool = False) -> None:
+    """Dispatch a noun-group subcommand.
+
+    A bare noun (no args) falls back to `ls`. When args are present but the first
+    isn't a known verb, only fall back to `ls` if `ls` actually *consumes* those
+    args (e.g. `card ls <list>`); otherwise the args would be silently ignored —
+    a typo'd verb like `list renmae ...` — so error instead of a false success."""
     if args and args[0] in subcmds:
         subcmds[args[0]](args[1:])
         return
-    if "ls" in subcmds:
+    if "ls" in subcmds and (not args or ls_takes_args):
         subcmds["ls"](args)
         return
     verbs = ", ".join(subcmds)
+    if args:
+        raise SystemExit(f"Unknown {group} command: {args[0]}. Valid verbs: {verbs}")
     raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
 
 
@@ -511,25 +578,25 @@ def cmd_board(args: list[str]) -> None:
     if verb == "rename":
         _board_rename(args[1:])
         return
-    if verb == "archive":
-        _board_set_closed(True)
+    if verb in ("archive", "restore", "unarchive"):
+        # These verbs act on the --board board and take NO positionals — a stray
+        # one (`board archive Scratch`) would otherwise be silently dropped and
+        # the *--board* board mutated. Reject it so the wrong board isn't touched.
+        extra = args[1:]
+        if extra:
+            raise SystemExit(
+                f"trello board {verb} takes no arguments (got {extra[0]!r}). "
+                f"It acts on the --board board; pass --board <board> to choose it."
+            )
+        _board_set_closed(verb == "archive")
         return
-    if verb in ("restore", "unarchive"):
-        _board_set_closed(False)
+    if verb in ("", "show"):
+        _board_show(args[1:] if verb == "show" else args)
         return
-    if verb == "show":
-        args = args[1:]
-    _board_show(args)
-
-
-def cmd_labels(_args: list[str]) -> None:
-    board_id = _require_board()
-    labels = api.get_labels(board_id)
-    if _is_json():
-        print_json(labels)
-        return
-    rows = [[short_id(lb["id"]), lb.get("name", ""), lb.get("color", "")] for lb in labels]
-    print_table(["ID", "Name", "Color"], rows)
+    raise SystemExit(
+        f"Unknown board command: {verb}. "
+        "Valid verbs: show, add, rename, archive, restore"
+    )
 
 
 def cmd_members(_args: list[str]) -> None:
@@ -544,7 +611,15 @@ def cmd_members(_args: list[str]) -> None:
 
 def cmd_activity(args: list[str]) -> None:
     board_id = _require_board()
-    limit = int(args[0]) if args else 10
+    if args:
+        try:
+            limit = int(args[0])
+        except ValueError:
+            raise SystemExit(
+                f"Usage: trello activity [n]  (n must be a number, got {args[0]!r})"
+            )
+    else:
+        limit = 10
     actions = api.get_activity(board_id, limit)
     if _is_json():
         print_json(actions)
@@ -571,12 +646,23 @@ def _card_show(args: list[str]) -> None:
     positional, flags = _parse_flags(args, bool_flags=("--no-comments",))
     if not positional:
         raise SystemExit("Usage: trello card show <card_id> [--no-comments]")
-    card = api.get_card(_resolve_card(positional[0]))
+    card = api.get_card(_resolve_card(positional[0], include_closed=True))
     comments = [] if flags.get("--no-comments") else api.get_comments(card["id"], limit=20)
     if _is_json():
         print_json({**card, "comments": comments})
         return
     print_card_detail(card, comments)
+
+
+def _card_row(c: dict) -> list[str]:
+    """One table row for a card (shared by `card ls` and `card mine`)."""
+    return [
+        short_id(c["id"]),
+        (c.get("dateLastActivity") or "")[:10],
+        truncate(c["name"], 50),
+        label_str(c.get("labels", [])),
+        due_str(c.get("due"), c.get("dueComplete", False)),
+    ]
 
 
 def _card_ls(args: list[str]) -> None:
@@ -590,15 +676,7 @@ def _card_ls(args: list[str]) -> None:
     if _is_json():
         print_json(cards)
         return
-    rows = []
-    for c in cards:
-        rows.append([
-            short_id(c["id"]),
-            (c.get("dateLastActivity") or "")[:10],
-            truncate(c["name"], 50),
-            label_str(c.get("labels", [])),
-            due_str(c.get("due")),
-        ])
+    rows = [_card_row(c) for c in cards]
     print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
     if with_comment:
         print()
@@ -619,7 +697,8 @@ def _card_add(args: list[str]) -> None:
     positional, flags = _parse_flags(args, bool_flags=("--bottom",))
     if len(positional) < 2:
         raise SystemExit(
-            "Usage: trello card add <list_name_or_id> <card_name> [description] [--bottom]"
+            "Usage: trello card add <list_name_or_id> <card_name> [description] [--bottom]\n"
+            "  Quote a multi-word card name; any words after it become the description."
         )
     pos = "bottom" if flags.get("--bottom") else "top"
     board_id = _require_board()
@@ -706,7 +785,12 @@ def _parse_due(raw: str) -> str | None:
             "Use ISO (2026-05-01), relative (1d/2w/1m/1y), 'today', 'tomorrow', or 'clear'."
         )
     if dt.tzinfo is None:
-        dt = dt.replace(hour=9, tzinfo=timezone.utc)
+        # Only default to 9am for a date-only input; an explicit time-of-day is
+        # preserved (mirrors _parse_since). ISO date-only has no "T"/":".
+        if "T" in raw or ":" in raw:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.replace(hour=9, tzinfo=timezone.utc)
     return dt.isoformat()
 
 
@@ -807,6 +891,20 @@ def _card_due(args: list[str]) -> None:
         print(f"Set due date on {short_id(card_id)} to {due[:10]}.")
 
 
+def _relative_pos(others: list[dict], other_id: str, keyword: str):
+    """Compute the new `pos` placing an item before/after `other_id` within the
+    sorted `others` list (which excludes the item being moved). Returns a float
+    midpoint, or the string 'top'/'bottom' at the ends, or None if `other_id`
+    isn't present. Shared by `card pos` and `list pos`."""
+    idx = next((i for i, o in enumerate(others) if o["id"] == other_id), None)
+    if idx is None:
+        return None
+    ref_pos = others[idx]["pos"]
+    if keyword == "after":
+        return (ref_pos + others[idx + 1]["pos"]) / 2 if idx + 1 < len(others) else "bottom"
+    return (others[idx - 1]["pos"] + ref_pos) / 2 if idx > 0 else "top"
+
+
 def _card_pos(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit(
@@ -840,16 +938,9 @@ def _card_pos(args: list[str]) -> None:
         cards = api.get_cards_in_list(card["idList"])
         cards.sort(key=lambda c: c.get("pos", 0))
         others = [c for c in cards if c["id"] != card_id]
-        idx = next((i for i, c in enumerate(others) if c["id"] == other_id), None)
-        if idx is None:
+        new_pos = _relative_pos(others, other_id, keyword)
+        if new_pos is None:
             raise SystemExit("Reference card not found in list.")
-        ref_pos = others[idx]["pos"]
-        if keyword == "after":
-            new_pos = (ref_pos + others[idx + 1]["pos"]) / 2 \
-                if idx + 1 < len(others) else "bottom"
-        else:
-            new_pos = (others[idx - 1]["pos"] + ref_pos) / 2 \
-                if idx > 0 else "top"
         api.update_card(card_id, pos=new_pos)
         print(f"Moved {short_id(card_id)} {keyword} {short_id(other_id)}.")
         return
@@ -870,15 +961,7 @@ def _card_mine(_args: list[str]) -> None:
     if _is_json():
         print_json(cards)
         return
-    rows = []
-    for c in cards:
-        rows.append([
-            short_id(c["id"]),
-            (c.get("dateLastActivity") or "")[:10],
-            truncate(c["name"], 50),
-            label_str(c.get("labels", [])),
-            due_str(c.get("due")),
-        ])
+    rows = [_card_row(c) for c in cards]
     print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
 
 
@@ -895,7 +978,7 @@ def cmd_card(args: list[str]) -> None:
         "due": _card_due,
         "pos": _card_pos,
         "mine": _card_mine,
-    }, args)
+    }, args, ls_takes_args=True)
 
 
 # ── List subcommands ────────────────────────────────────────────────
@@ -927,7 +1010,9 @@ def _list_add(args: list[str]) -> None:
         chosen.append(pos_val)
     if len(chosen) > 1:
         raise SystemExit("Use only one of --top, --bottom, or --pos.")
-    pos = chosen[0] if chosen else None
+    # Pass an explicit "top" default so both backends agree (the Trello backend
+    # would otherwise append at the bottom; the local store defaults to top).
+    pos = chosen[0] if chosen else "top"
     board_id = _require_board()
     name = " ".join(positional)
     lst = api.create_list(board_id, name, pos=pos)
@@ -961,16 +1046,9 @@ def _list_pos(args: list[str]) -> None:
         lists = api.get_lists(board_id)
         lists.sort(key=lambda lst: lst.get("pos", 0))
         others = [lst for lst in lists if lst["id"] != list_id]
-        idx = next((i for i, lst in enumerate(others) if lst["id"] == other_id), None)
-        if idx is None:
+        new_pos = _relative_pos(others, other_id, keyword)
+        if new_pos is None:
             raise SystemExit("Reference list not found on board.")
-        ref_pos = others[idx]["pos"]
-        if keyword == "after":
-            new_pos = (ref_pos + others[idx + 1]["pos"]) / 2 \
-                if idx + 1 < len(others) else "bottom"
-        else:
-            new_pos = (others[idx - 1]["pos"] + ref_pos) / 2 \
-                if idx > 0 else "top"
         api.update_list(list_id, pos=new_pos)
         print(f"Moved {short_id(list_id)} {keyword} {short_id(other_id)}.")
         return
@@ -1030,8 +1108,10 @@ def _label_ls(_args: list[str]) -> None:
 
 def _label_add(args: list[str]) -> None:
     if not args:
-        raise SystemExit("Usage: trello label add <name> <color>\n"
-                         f"Colors: {', '.join(sorted(TRELLO_COLORS))}")
+        raise SystemExit("Usage: trello label add <name> [color]\n"
+                         "  A single argument is the (colorless) label name; a\n"
+                         "  trailing known color word sets the color.\n"
+                         f"  Colors: {', '.join(sorted(TRELLO_COLORS))}")
     board_id = _require_board()
     # Last arg may be a color
     color = None
@@ -1224,7 +1304,7 @@ def cmd_checklist(args: list[str]) -> None:
         "delete": _checklist_delete,
         "rename": _checklist_rename,
         "item": _checklist_item,
-    }, args)
+    }, args, ls_takes_args=True)
 
 
 # ── Comment subcommands ─────────────────────────────────────────────
@@ -1286,7 +1366,7 @@ def cmd_comment(args: list[str]) -> None:
         "ls": _comment_ls,
         "edit": _comment_edit,
         "delete": _comment_delete,
-    }, args)
+    }, args, ls_takes_args=True)
 
 
 # ── Attachment subcommands ──────────────────────────────────────────
@@ -1347,9 +1427,19 @@ def _temp_cache_dir() -> str:
     return os.path.join(tempfile.gettempdir(), "trello-cli")
 
 
+def _safe_filename(name: str, fallback: str) -> str:
+    """Sanitize a filename for safe path-joining: strip any directory components
+    (so `reports/q3.pdf` → `q3.pdf`), replace unsafe chars, and drop leading dots
+    so `..` can't escape. Same guard `_export_attachment_blobs` applies."""
+    name = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().lstrip(".")
+    return name or fallback
+
+
 def _attachment_dest(att: dict, dest: str | None) -> str:
     """Resolve the destination path for download/open of an attachment."""
-    filename = att.get("name") or os.path.basename(att.get("url", "")) or att["id"]
+    raw = att.get("name") or os.path.basename(att.get("url", "")) or att["id"]
+    filename = _safe_filename(raw, att["id"])
     if dest is None:
         tmp = _temp_cache_dir()
         os.makedirs(tmp, exist_ok=True)
@@ -1432,7 +1522,7 @@ def cmd_attachment(args: list[str]) -> None:
         "open": _attachment_open,
         "download": _attachment_download,
         "rm": _attachment_rm,
-    }, args)
+    }, args, ls_takes_args=True)
 
 
 # ── Local-backend setup ─────────────────────────────────────────────
@@ -1631,8 +1721,7 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
                 att["url"] = cached.relative_to(root).as_posix()
                 counts["skipped"] += 1
                 continue
-            name = os.path.basename(str(att.get("name") or url).strip())
-            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or att["id"]  # the regex is the path-safety guard
+            name = _safe_filename(att.get("name") or url, att["id"])  # path-safety guard
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / f"{att['id']}-{name}"
             tmp = dest_dir / f"{att['id']}.part"  # stream here, then os.replace (atomic; no truncated cache)
@@ -1651,6 +1740,31 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict]) -> dict:
                     pass
                 counts["failed"] += 1
     return counts
+
+
+def _preserve_local_attachment_urls(backend, board_id: str, cards: list[dict]) -> None:
+    """On a `--no-attachments` re-export, keep attachment urls that a previous
+    export already localized (a store-relative path) instead of overwriting them
+    with the source backend's remote (auth-gated) url — which would orphan the
+    on-disk blob. Mutates `cards` in place. No-op on a first export (board absent).
+    """
+    try:
+        existing = backend.get_board_cards(board_id, card_filter="all")
+    except SystemExit:
+        return  # board not in the store yet — nothing to preserve
+    stored: dict[str, str] = {}
+    for c in existing:
+        for a in c.get("attachments", []):
+            url = a.get("url") or ""
+            if url and not str(url).lower().startswith(("http://", "https://")):
+                stored[a["id"]] = url
+    if not stored:
+        return
+    for card in cards:
+        for att in card.get("attachments", []):
+            local = stored.get(att.get("id"))
+            if local:
+                att["url"] = local
 
 
 def _gather_board(board_id: str) -> tuple[dict, list[dict], list[dict], list[dict]]:
@@ -1672,7 +1786,11 @@ def _gather_board(board_id: str) -> tuple[dict, list[dict], list[dict], list[dic
     cards = []
     for c in summaries:
         merged = {**api.get_card(c["id"]), **c}  # board-cards wins (pos, closed)
-        merged["comments"] = api.get_comments(c["id"], limit=1000)
+        comments = api.get_comments(c["id"], limit=1000)
+        if len(comments) >= 1000:
+            print(f"  warning: card {short_id(c['id'])} has >= 1000 comments; only "
+                  "the newest 1000 were exported", file=sys.stderr)
+        merged["comments"] = comments
         cards.append(merged)
     return board, lists, labels, cards
 
@@ -1893,10 +2011,15 @@ def _export_to_local(flags: dict) -> None:
     from .backends.local import LocalBackend
 
     backend = LocalBackend(config.get_local_root())
-    # Download blobs before import so import_board persists the rewritten (local) urls.
-    blobs = None if flags.get("--no-attachments") else _export_attachment_blobs(
-        backend, board["id"], cards,
-    )
+    if flags.get("--no-attachments"):
+        blobs = None
+        # Don't downgrade already-localized attachment urls back to the source's
+        # (auth-gated) remote urls, which would orphan the on-disk blobs.
+        _preserve_local_attachment_urls(backend, board["id"], cards)
+    else:
+        # Download blobs before import so import_board persists the rewritten
+        # (local) urls.
+        blobs = _export_attachment_blobs(backend, board["id"], cards)
     result = backend.import_board(board, lists, labels, cards)
     # Stable JSON shape: always present, zeroed when --no-attachments skipped it.
     result["attachments"] = blobs or {"downloaded": 0, "skipped": 0, "failed": 0}
@@ -2044,7 +2167,7 @@ COMMANDS = {
     "serve": cmd_serve,
     "grab": cmd_grab,
     "board": cmd_board,
-    "labels": cmd_labels,
+    "labels": _label_ls,  # top-level `labels` == `label ls`
     "members": cmd_members,
     "activity": cmd_activity,
     "updates": cmd_updates,
@@ -2065,10 +2188,13 @@ def main() -> None:
         _JSON_MODE = True
         args = [a for a in args if a != "--json"]
 
-    # Extract --board flag before dispatch
+    # Extract --board flag before dispatch. Each of these consumes the *next*
+    # token as its value; refuse a following flag (starts with "-") so a dropped
+    # value (`trello --board --backend local ...`) is a clean error, not a board
+    # override literally named "--backend".
     if "--board" in args:
         idx = args.index("--board")
-        if idx + 1 >= len(args):
+        if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--board requires a board name or ID.")
         config.set_board_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
@@ -2076,7 +2202,7 @@ def main() -> None:
     # Extract --backend flag before dispatch (selects the data source)
     if "--backend" in args:
         idx = args.index("--backend")
-        if idx + 1 >= len(args):
+        if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--backend requires a name (trello or local).")
         config.set_backend_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
@@ -2084,7 +2210,7 @@ def main() -> None:
     # Extract --local-root flag before dispatch (local file-store folder)
     if "--local-root" in args:
         idx = args.index("--local-root")
-        if idx + 1 >= len(args):
+        if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--local-root requires a path.")
         config.set_local_root_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
@@ -2100,7 +2226,28 @@ def main() -> None:
         print(USAGE)
         sys.exit(1)
 
-    cmd_func(args[1:])
+    try:
+        cmd_func(args[1:])
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001 — backstop for raw transport tracebacks
+        # Translate Trello-backend HTTP/transport errors into a clean one-liner
+        # (the local backend already raises SystemExit). httpx is only present
+        # when the trello backend's deps are installed, so import it guardedly;
+        # anything else re-raises with its real traceback. SystemExit is a
+        # BaseException, so clean CLI errors pass straight through untouched.
+        try:
+            import httpx
+        except ImportError:
+            raise
+        if isinstance(e, httpx.HTTPStatusError):
+            raise SystemExit(
+                f"Trello API error: HTTP {e.response.status_code} for {e.request.url}"
+            )
+        if isinstance(e, httpx.TransportError):
+            raise SystemExit(f"Network error talking to Trello: {e}")
+        raise
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ def label_str(labels: list[dict]) -> str:
         return ""
     parts = []
     for lb in labels:
-        name = lb.get("name") or lb.get("color", "?")
+        # Fall back to the color, then a placeholder — never render "[None]"
+        # (a label can have name:"" and color:null).
+        name = lb.get("name") or lb.get("color") or "(unnamed)"
         parts.append(f"[{name}]")
     return " ".join(parts)
 
