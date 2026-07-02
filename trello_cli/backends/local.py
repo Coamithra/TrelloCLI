@@ -520,7 +520,7 @@ class LocalBackend(Backend):
             target["name"] = fields["name"]
         rebalanced = False
         if "pos" in fields:
-            existing = [l["pos"] for l in lists if l["id"] != list_id and not l.get("closed")]
+            existing = [l.get("pos", 0) for l in lists if l["id"] != list_id and not l.get("closed")]
             target["pos"] = resolve_pos(existing, fields["pos"])
             rebalanced = self._rebalance_lists_inplace(lists)  # respread if the gap collapsed
         if "closed" in fields:

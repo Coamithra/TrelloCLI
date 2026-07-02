@@ -107,13 +107,24 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
     except SystemExit as e:
         # Backends raise SystemExit for BOTH "no such id" and input validation
-        # (a bad sort value, a non-local-only op, …). Map a genuine missing
-        # resource to 404 and everything else to 400 (bad request) so the client
-        # can tell "gone" from "you sent something invalid". Heuristic: every
-        # backend's not-found message contains "not found" (verified: local +
-        # Trello) and no validation message does — cheap and honest.
+        # (a bad sort value, a non-local-only op, …), and the Trello backend
+        # also translates upstream HTTP failures into SystemExit. Map a genuine
+        # missing resource to 404, a rate limit to 429, an upstream credential
+        # failure to 502 (the *server's* Trello token is bad, not the client's
+        # request), and everything else to 400. Heuristic on the message text:
+        # every backend's not-found message contains "not found" (verified:
+        # local + Trello), the Trello backend's 429/401 messages contain "rate
+        # limit"/"(401)", and no validation message does — cheap and honest.
         msg = str(e)
-        code = 404 if "not found" in msg.lower() else 400
+        lower = msg.lower()
+        if "not found" in lower:
+            code = 404
+        elif "rate limit" in lower:
+            code = 429
+        elif "(401)" in msg:
+            code = 502
+        else:
+            code = 400
         raise HTTPException(status_code=code, detail=msg)
     except httpx.HTTPStatusError as e:
         raise HTTPException(

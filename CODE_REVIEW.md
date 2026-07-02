@@ -4,6 +4,17 @@
 **Scope:** Full application — CLI (`main.py`, `fmt.py`), the backend seam (`api.py`, `backends/`), the local file store (`store.py`, `local.py`), the Trello REST client (`trello.py`), config (`config.py`), and the web app (`web/server.py`, `web/live.py`, `web/static/app.js`).
 **Method:** Four parallel per-subsystem reviews, then direct verification of the highest-severity findings against the source. Every finding cites a file and line and quotes the offending code.
 
+## Implementation status (2026-07-02)
+
+Everything below was implemented on this branch by four per-subsystem passes (matching the file groups above), then adversarially re-reviewed and covered by a new 70-test pytest suite (`tests/`, run with `python -m pytest`; also added as the `dev` extra). Line numbers in the findings refer to the pre-fix code. Deliberate deviations, decided during implementation:
+
+- **C7 multi-word names:** every command taking a single trailing name/text joins its positionals — except `card add`, whose optional positional `description` makes joining ambiguous; multi-word card names stay quoted (documented in its usage). Unifying would need a breaking `--desc` flag, beyond this pass's small-local-fix bar.
+- **C6 export blob sequencing** ("blobs written outside the lock"): unchanged. Fixing it needs a lock-scoped import hook on the local backend; the exposure window (concurrent `local gc --apply` deleting a just-downloaded blob before `import_board` commits) is narrow and self-heals on re-export.
+- **L2 gc/delete_board lock narrowing:** unchanged. Narrowing the dry-run phase would mean unwrapping those ops from `_MUTATORS`' single-source-of-truth locking; keeping the invariant was judged worth the (minor, pre-existing) lock hold during a sweep.
+- **T2 cap exhaustion:** `grab` now distinguishes a genuinely empty source list (`None` → "Nothing to grab") from claim-contention exhaustion (clean error suggesting retry).
+- **X3 fail-safe:** an unparseable *own* claim date now counts as a loss (previously a win). In the no-competitor corner case this can leave the card in the dest list unowned, but treating it as a win risks two winners; losing is the safer failure. Like the rest of the handshake, unverified against live Trello.
+- **W4 status fidelity:** with the Trello backend now translating all upstream HTTP errors to `SystemExit` (T1), the web `_ok` maps them by message: not-found → 404, rate limit → 429, upstream credential failure → 502, other validation → 400.
+
 ## Overall assessment
 
 This is well-above-average code for its size and ambition. The architecture is genuinely clean: the `Backend` ABC / `api` facade / concrete-backend seam is signature-exact (all ~40 operations line up), `fmt.py` is backend-agnostic as designed, and the concurrency story in the local store (single re-entrant `StoreLock`, the `_MUTATORS` single-source-of-truth wrapping, atomic temp-file + `os.replace` writes, the transient-vs-persisted `rebalanced` discipline) is carefully thought through and honestly commented. The web frontend is disciplined about DOM construction — no XSS sinks in ~1,500 lines of vanilla JS despite abundant `innerHTML` temptation.

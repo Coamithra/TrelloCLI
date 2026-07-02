@@ -2240,7 +2240,7 @@ def main() -> None:
         try:
             import httpx
         except ImportError:
-            raise
+            raise e from None
         if isinstance(e, httpx.HTTPStatusError):
             raise SystemExit(
                 f"Trello API error: HTTP {e.response.status_code} for {e.request.url}"
