@@ -1,0 +1,9 @@
+# Caddy site for trellno — automatic HTTPS (Let's Encrypt) + reverse proxy.
+# Install: append to /etc/caddy/Caddyfile (replace the domain), then:
+#   sudo systemctl reload caddy
+# Caddy forwards the client's Host header by default, which is exactly what
+# `trello serve --allow-host <domain>` expects.
+
+trellno.example.com {
+	reverse_proxy 127.0.0.1:8787
+}

@@ -171,6 +171,50 @@ renders **both** local and Trello boards for free.
 
 ---
 
+## HTTP backend — a hosted trellno as the canonical store
+
+The deployment story for "one board, many machines/agents" (including Claude
+cloud sessions, which can't reach a Dropbox folder): run `trello serve` on a
+server over its own local file store, and point every client at it with
+`--backend http`. The server becomes the **single source of truth**, and
+because its store lock lives on one machine, every write — including
+`grab_top_card` — is truly atomic for *all* clients; the Dropbox cross-machine
+last-write-wins caveat disappears for boards that move there.
+
+- **Transport, not a store**: `backends/http.py` implements the `Backend` ABC
+  by calling the web app's API; it holds no state. Two channels:
+  - `POST /api/rpc` — the ABC serialized as `{"op", "args", "kwargs"}` →
+    `{"result": ...}`. The op whitelist is **derived from the ABC's abstract
+    methods** (minus the two file-transfer ops), so a new backend op is served
+    the moment it's added — no per-op route to write, no drift. The REST
+    routes remain the *browser's* contract; rpc is the *CLI's*. Local-only
+    maintenance ops (`import_board`, `gc`, `delete_board`) are not exposed.
+  - File transfer — the only ops where a client-side path is meaningless
+    remotely: `add_attachment_file` posts multipart to the browser's upload
+    route (which returns the created attachment under a transient
+    `_attachment` key), and `download_attachment` streams store-relative blob
+    urls from `GET /api/blob` (absolute/external urls are refused there — no
+    SSRF — and fetched directly by the client instead).
+- **Errors**: the server maps backend `SystemExit` to 4xx + `detail`; the
+  http backend maps any non-2xx back to `SystemExit(detail)` — remote errors
+  read exactly like native CLI errors, and `_resolve_*` keeps working since
+  "not found" messages round-trip.
+- **Selection/config**: `--backend http` / `TRELLO_BACKEND=http`. The server
+  location is stable config like credentials: `trello configure-http <url>
+  [<token>]` persists `server_url`/`server_token`; `TRELLO_SERVER` /
+  `TRELLO_SERVER_TOKEN` / `--server` override per-invocation. Statelessness
+  holds — no selection is persisted, only the data location.
+- **Deployment** (see `deploy/`): systemd runs `serve --host 127.0.0.1
+  --token <t> --allow-host <domain>` behind Caddy (TLS + reverse proxy).
+  `--allow-host` extends the Host-header allow-list to the proxied public
+  domain, keeping the DNS-rebinding guard strict for everything else. The
+  token gates `/api/*` as before; the loopback bind means only the proxy can
+  reach uvicorn.
+- **Recursion guard, by convention**: the server must not itself run
+  `--backend http` (a self-loop). Its systemd env pins `TRELLO_BACKEND=local`.
+
+---
+
 ## Delivery phases
 
 | Phase | What ships | User-visible? |

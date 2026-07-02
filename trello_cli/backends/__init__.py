@@ -27,4 +27,10 @@ def get_backend() -> Backend:
         from .local import LocalBackend
 
         return LocalBackend(config.get_local_root())
-    raise SystemExit(f"Unknown backend: {name!r} (use 'trello' or 'local').")
+    if name == "http":
+        from .http import HttpBackend
+
+        return HttpBackend(config.get_server_url(), config.get_server_token())
+    raise SystemExit(
+        f"Unknown backend: {name!r} (use 'trello', 'local' or 'http')."
+    )

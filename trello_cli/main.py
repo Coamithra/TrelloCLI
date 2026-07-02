@@ -38,16 +38,20 @@ def _is_json() -> bool:
     return _JSON_MODE
 
 USAGE = """\
-Usage: trello [--board <name_or_id>] [--backend <trello|local>] [--json] <command> [args]
+Usage: trello [--board <name_or_id>] [--backend <trello|local|http>] [--json] <command> [args]
 
 Global options:
   --board <name_or_id>          Board for this command (required; no active board)
                                 (also: TRELLO_BOARD env var)
-  --backend <trello|local>      Data source for this command (default: trello)
+  --backend <trello|local|http> Data source for this command (default: trello;
+                                http = a hosted trellno server, see configure-http)
                                 (also: TRELLO_BACKEND env var)
   --local-root <path>           Local-backend store folder for this command
                                 (also: TRELLO_LOCAL_ROOT env var; persist with
                                 `local init <path>`)
+  --server <url>                Trellno server URL for --backend http
+                                (also: TRELLO_SERVER env var; token via
+                                TRELLO_SERVER_TOKEN; persist with configure-http)
   --json                        Emit raw JSON instead of formatted text
                                 (read commands; some mutators also echo JSON)
 
@@ -56,6 +60,9 @@ Tip: bare nouns default to `ls` — e.g. `trello list` ≡ `trello list ls`,
 
 Global:
   configure <key> <token>       Save API credentials
+  configure-http <url> [<tok>]  Save a hosted trellno server (its `serve --token`
+                                value) for --backend http; omit the token to
+                                keep a previously saved one
   boards [--archived|--all]     List boards (open by default; --archived shows
                                 only archived, --all shows both with state)
   local init [path]             Set up the local file backend root
@@ -167,10 +174,14 @@ Data:
 
 Web:
   serve [--port 8787] [--host 127.0.0.1] [--token <t>] [--no-browser]
-                                Launch the drag-drop kanban web app for the
+        [--allow-host <h1,h2>]  Launch the drag-drop kanban web app for the
                                 selected backend (pip install trello-cli[web]).
                                 Binds 127.0.0.1 by default (local only). Live-
                                 refreshes a local board as its files change.
+                                Hosted (see deploy/): bind loopback behind a
+                                reverse proxy with --token and --allow-host
+                                <public domain>; point other machines at it
+                                with configure-http + --backend http.
 """
 
 
@@ -501,6 +512,22 @@ def cmd_configure(args: list[str]) -> None:
         raise SystemExit("Usage: trello configure <api_key> <token>")
     config.save_credentials(args[0], args[1])
     print("Credentials saved.")
+
+
+def cmd_configure_http(args: list[str]) -> None:
+    if not args or len(args) > 2 or args[0].startswith("-"):
+        raise SystemExit("Usage: trello configure-http <server_url> [<token>]")
+    url = args[0].rstrip("/")
+    if not url.lower().startswith(("http://", "https://")):
+        raise SystemExit(
+            f"Server URL must start with http:// or https:// (got {url!r})."
+        )
+    token = args[1] if len(args) > 1 else None
+    config.save_http_server(url, token)
+    print(f"Trellno server saved: {url}"
+          + ("" if token else "  (existing token kept)"))
+    print("Use it with:  trello --backend http <command>"
+          "  (or TRELLO_BACKEND=http)")
 
 
 def cmd_boards(args: list[str]) -> None:
@@ -2090,12 +2117,12 @@ def _export_to_trello(flags: dict) -> None:
 def cmd_serve(args: list[str]) -> None:
     positional, flags = _parse_flags(
         args, bool_flags=("--no-browser",),
-        value_flags=("--port", "--host", "--token"),
+        value_flags=("--port", "--host", "--token", "--allow-host"),
     )
     if positional:
         raise SystemExit(
             "Usage: trello serve [--port <n>] [--host <addr>] [--token <t>] "
-            "[--no-browser]"
+            "[--no-browser] [--allow-host <h1,h2>]"
         )
     try:
         from .web.server import serve
@@ -2112,8 +2139,15 @@ def cmd_serve(args: list[str]) -> None:
     host = flags.get("--host") or "127.0.0.1"
     token_raw = flags.get("--token")
     token = str(token_raw) if token_raw else None
+    # Extra Host-header names to accept (comma-separated) — the public
+    # domain(s) a reverse proxy forwards when this binds loopback behind it.
+    allow_raw = flags.get("--allow-host")
+    allow_hosts = tuple(
+        h.strip() for h in str(allow_raw).split(",") if h.strip()
+    ) if allow_raw else ()
     serve(host=str(host), port=port, token=token,
-          open_browser=not flags.get("--no-browser"))
+          open_browser=not flags.get("--no-browser"),
+          allow_hosts=allow_hosts)
 
 
 # ── Workflow commands ───────────────────────────────────────────────
@@ -2161,6 +2195,7 @@ def cmd_grab(args: list[str]) -> None:
 
 COMMANDS = {
     "configure": cmd_configure,
+    "configure-http": cmd_configure_http,
     "boards": cmd_boards,
     "local": cmd_local,
     "export": cmd_export,
@@ -2203,8 +2238,16 @@ def main() -> None:
     if "--backend" in args:
         idx = args.index("--backend")
         if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
-            raise SystemExit("--backend requires a name (trello or local).")
+            raise SystemExit("--backend requires a name (trello, local or http).")
         config.set_backend_override(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+
+    # Extract --server flag before dispatch (hosted trellno URL, http backend)
+    if "--server" in args:
+        idx = args.index("--server")
+        if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+            raise SystemExit("--server requires a URL.")
+        config.set_server_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
     # Extract --local-root flag before dispatch (local file-store folder)

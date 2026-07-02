@@ -30,8 +30,10 @@ Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `
 
 ```
 --board <name_or_id>   Board for this command, required (also: TRELLO_BOARD env var)
---backend <trello|local>  Data source (default: trello; also: TRELLO_BACKEND env var)
+--backend <trello|local|http>  Data source (default: trello; also: TRELLO_BACKEND env var)
 --local-root <path>    Local store folder (also: TRELLO_LOCAL_ROOT env var)
+--server <url>         Hosted trellno server for --backend http (also: TRELLO_SERVER
+                       env var; token via TRELLO_SERVER_TOKEN)
 --json                 Emit raw JSON instead of formatted text (read commands)
 ```
 
@@ -42,6 +44,8 @@ commands. The CLI keeps no shared session state so concurrent invocations never 
 
 ```
 trello configure <key> <token>     Save API credentials
+trello configure-http <url> [<tok>]  Save a hosted trellno server + its API token
+                                   for --backend http (see "Hosted server" below)
 trello boards [--archived|--all]   List boards (open by default; --archived =
                                    only archived, --all = both with a State column)
 trello local init [path]           Set up the local file-backend root
@@ -356,6 +360,35 @@ remote access with something stronger:
 
 Binding a non-loopback `--host` is safe-by-default (token required) but is best used *inside* one of
 the above — the token alone publishes a read/write board, in cleartext, to anyone who has it.
+
+## Hosted server (`--backend http`)
+
+Run trellno on a server and make it the **canonical home** of your boards: the web UI is
+reachable from anywhere, and the CLI works against it from any machine — every command,
+including a truly atomic `grab` (the claim runs under the *server's* store lock, so concurrent
+grabbers on different machines get distinct cards). This is how agents that can't see your
+Dropbox (CI jobs, Claude cloud sessions) share the same board.
+
+Server side (full runbook, systemd unit, and Caddyfile in [`deploy/`](deploy/README.md)):
+
+```bash
+TRELLO_BACKEND=local TRELLO_LOCAL_ROOT=/srv/trellno/data \
+  trello serve --host 127.0.0.1 --port 8787 --no-browser \
+               --token <secret> --allow-host trellno.example.com
+```
+
+behind Caddy/nginx terminating HTTPS for `trellno.example.com` → `127.0.0.1:8787`
+(`--allow-host` admits the proxied domain through the Host-header guard). Client side:
+
+```bash
+trello configure-http https://trellno.example.com <secret>   # persist once
+trello --backend http --board myboard list ls                # then use normally
+# or per-session: TRELLO_BACKEND=http TRELLO_SERVER=... TRELLO_SERVER_TOKEN=...
+```
+
+Remote errors surface as normal CLI errors, name/prefix resolvers work unchanged, and
+attachments upload/download through the server (external URL attachments are fetched
+directly). The browser UI for the same server is `https://trellno.example.com/?token=<secret>`.
 
 ## Updating
 

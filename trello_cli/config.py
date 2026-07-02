@@ -17,6 +17,7 @@ DEFAULT_LOCAL_ROOT = Path.home() / "Dropbox" / "trello-cli"
 _board_override: str | None = None
 _backend_override: str | None = None
 _local_root_override: str | None = None
+_server_override: str | None = None
 
 
 def set_board_override(value: str) -> None:
@@ -106,6 +107,44 @@ def get_local_root() -> str:
 def set_local_root(path: str) -> None:
     cfg = _load()
     cfg["local_root"] = path
+    _save(cfg)
+
+
+def set_server_override(value: str) -> None:
+    """Set a per-invocation server-URL override (from --server flag)."""
+    global _server_override
+    _server_override = value
+
+
+def get_server_url() -> str | None:
+    """Base URL of a hosted trellno server, for the http backend.
+
+    --server flag > TRELLO_SERVER env > config 'server_url'. Like credentials
+    and `local_root`, the URL is stable config (a data location), so the config
+    value persists; the flag/env are per-invocation overrides. None when no
+    server was ever configured — the http backend turns that into a clear
+    error with the setup command."""
+    return (
+        _server_override
+        or os.environ.get("TRELLO_SERVER")
+        or _load().get("server_url")
+    )
+
+
+def get_server_token() -> str | None:
+    """API token for the hosted trellno server (the `serve --token` value):
+    TRELLO_SERVER_TOKEN env > config 'server_token'. None means "send no
+    token" — fine for a server that doesn't require one."""
+    return os.environ.get("TRELLO_SERVER_TOKEN") or _load().get("server_token")
+
+
+def save_http_server(url: str, token: str | None = None) -> None:
+    """Persist the hosted server URL (+ token, when given — omitting it keeps
+    any stored token, so the URL can be updated without re-entering it)."""
+    cfg = _load()
+    cfg["server_url"] = url
+    if token is not None:
+        cfg["server_token"] = token
     _save(cfg)
 
 
