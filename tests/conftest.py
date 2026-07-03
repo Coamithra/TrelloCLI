@@ -32,13 +32,15 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DEFAULT_LOCAL_ROOT", fake_home / "Dropbox" / "trello-cli")
     monkeypatch.setenv("HOME", str(fake_home))
     for var in ("TRELLO_API_KEY", "TRELLO_TOKEN", "TRELLO_BOARD",
-                "TRELLO_BACKEND", "TRELLO_LOCAL_ROOT"):
+                "TRELLO_BACKEND", "TRELLO_LOCAL_ROOT",
+                "TRELLO_SERVER", "TRELLO_SERVER_TOKEN"):
         monkeypatch.delenv(var, raising=False)
 
     config.set_board_override.__globals__["_board_override"] = None
     config._board_override = None
     config._backend_override = None
     config._local_root_override = None
+    config._server_override = None
 
     get_backend.cache_clear()
     yield
@@ -46,6 +48,7 @@ def _hermetic(monkeypatch, tmp_path):
     config._board_override = None
     config._backend_override = None
     config._local_root_override = None
+    config._server_override = None
 
 
 @pytest.fixture

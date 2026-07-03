@@ -1,0 +1,31 @@
+# Trellno hosted web app — systemd unit.
+# Install: copy to /etc/systemd/system/trellno.service, fill /etc/trellno.env
+# (see trellno.env.example), then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now trellno
+# Binds loopback only; Caddy (see Caddyfile) terminates TLS and proxies to it.
+
+[Unit]
+Description=Trellno web (TrelloCLI hosted board)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=trellno
+Group=trellno
+EnvironmentFile=/etc/trellno.env
+# ${VAR} (curly form) expands to a single argument even if empty — no word
+# splitting surprises. TRELLO_BACKEND/TRELLO_LOCAL_ROOT come from the env file.
+ExecStart=/srv/trellno/venv/bin/trello serve --host 127.0.0.1 --port 8787 \
+    --no-browser --token ${TRELLNO_TOKEN} --allow-host ${TRELLNO_DOMAIN}
+Restart=on-failure
+RestartSec=3
+
+# Hardening: the process only needs to read/write the store.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/trellno/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

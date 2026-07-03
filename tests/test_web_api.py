@@ -81,6 +81,17 @@ def test_loopback_host_ok(web):
     assert r.status_code == 200
 
 
+def test_allow_host_accepts_proxy_domain(store_root):
+    # The hosted deployment: loopback bind behind a reverse proxy forwarding
+    # the public domain in Host — allowed via extra_hosts, others still 400.
+    use_local_cli(store_root)
+    app = create_app(host="127.0.0.1", extra_hosts=("trellno.example.com",))
+    ok = TestClient(app, base_url="http://trellno.example.com")
+    assert ok.get("/api/boards").status_code == 200
+    evil = TestClient(app, base_url="http://evil.example")
+    assert evil.get("/api/boards").status_code == 400
+
+
 # ── token gate ────────────────────────────────────────────────────────
 
 @pytest.fixture

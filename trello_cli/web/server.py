@@ -28,9 +28,21 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import api, config
+from ..backends.base import Backend
 from . import live
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# The ops `POST /api/rpc` will dispatch to the facade — exactly the Backend
+# ABC, derived from it so a new abstract op is served the moment it exists.
+# The two file-transfer ops are excluded: they take a *client-side* file path,
+# which is meaningless on the server — the HTTP backend uses the dedicated
+# multipart-upload and `/api/blob` routes instead. Local-only extras
+# (`import_board`, `gc`, `delete_board`) are deliberately NOT reachable here;
+# `delete_board` keeps its own confirm-gated REST route.
+_RPC_OPS = frozenset(Backend.__abstractmethods__) - {
+    "add_attachment_file", "download_attachment",
+}
 
 # The board and detail panel let the browser move/reorder cards, rename them,
 # edit the description, and set/clear the due date; the board also archives a
@@ -47,7 +59,7 @@ _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
 _STREAM_CHUNK = 64 * 1024  # /raw blob streaming chunk size
 
 
-def _allowed_hosts(host: str) -> list[str]:
+def _allowed_hosts(host: str, extra: tuple[str, ...] = ()) -> list[str]:
     """The Host-header allow-list for TrustedHostMiddleware (DNS-rebinding guard).
 
     Always allow the loopback names — a browser reaching `trello serve` uses one
@@ -55,7 +67,12 @@ def _allowed_hosts(host: str) -> list[str]:
     hostname/IP and is already token-gated, so accept any Host there (there's no
     single name to pin, and the token is the real gate). A specific non-loopback
     bind adds exactly that host so it keeps working while foreign Hosts (a
-    DNS-rebinding attacker's domain) are rejected with a 400."""
+    DNS-rebinding attacker's domain) are rejected with a 400.
+
+    `extra` allow-lists additional names — the reverse-proxy case (`serve
+    --allow-host trellno.example.com`): the app binds loopback behind
+    Caddy/nginx, which forwards the client's Host (the public domain), so that
+    domain must be accepted alongside the loopback names."""
     if host in _WILDCARD_HOSTS:
         return ["*"]
     allowed = {"127.0.0.1", "localhost", "::1"}
@@ -63,6 +80,7 @@ def _allowed_hosts(host: str) -> list[str]:
         # Strip IPv6 brackets: TrustedHostMiddleware matches the bracket-less,
         # port-stripped host from the Host header.
         allowed.add(host.strip("[]"))
+    allowed.update(h.strip().strip("[]") for h in extra if h.strip())
     return sorted(allowed)
 
 
@@ -93,6 +111,37 @@ def _guard(fields: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
             status_code=400, detail=f"No updatable fields. Allowed: {sorted(allowed)}"
         )
     return out
+
+
+def _stream_temp_file(tmp_path: str, media: str, fname: str) -> StreamingResponse:
+    """Stream a temp file inline and unlink it when the response ends.
+
+    The finally runs on normal completion AND on client disconnect (Starlette
+    closes the generator, firing the finally) — the leak-proof alternative to
+    FileResponse's background task, which is skipped when send raises
+    mid-download, stranding the temp file. RFC 5987 `filename*` encodes the
+    (possibly non-ASCII / attacker-influenced) name so it can't break out of
+    the header."""
+
+    def _gen() -> Iterator[bytes]:
+        try:
+            with open(tmp_path, "rb") as blob:
+                while True:
+                    chunk = blob.read(_STREAM_CHUNK)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type=media,
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(fname)}"},
+    )
 
 
 def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -135,7 +184,8 @@ def _ok(fn: Any, *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
 
 
-def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
+def create_app(token: str | None = None, host: str = "127.0.0.1",
+               extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     app = FastAPI(title="Trellno Web", docs_url=None, redoc_url=None)
 
     # DNS-rebinding guard (applies to EVERY request — API, SSE, and the static
@@ -143,7 +193,9 @@ def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
     # the user visits can't rebind its hostname to 127.0.0.1 and drive this API,
     # because its forged Host won't match. Loopback binds are covered too (that's
     # exactly the rebinding target).
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts(host))
+    app.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=_allowed_hosts(host, extra_hosts)
+    )
 
     if token:
         @app.middleware("http")
@@ -167,6 +219,38 @@ def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
             return await call_next(request)
 
     # ── JSON API (1:1 with the api facade / Backend ABC) ─────────────
+
+    @app.post("/api/rpc")
+    def rpc(body: dict[str, Any]) -> dict:
+        """The Backend ABC over HTTP — the CLI's `--backend http` transport.
+
+        Dispatches `{"op": <ABC method>, "args": [...], "kwargs": {...}}` to
+        the `api` facade and returns `{"result": ...}` (wrapped so a `None`
+        result — e.g. `grab_top_card` on an empty list — survives the trip
+        unambiguously). The op whitelist is `_RPC_OPS`, derived from the ABC;
+        anything else (local-only maintenance ops, dunder tricks) is a 400.
+        The REST routes above/below remain the *browser's* contract; this one
+        exists so `HttpBackend` covers every CLI command — including a truly
+        atomic `grab` executed under the server's store lock — without a
+        hand-mapped route per op. Token-gated like every other /api route."""
+        op = body.get("op")
+        if op not in _RPC_OPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown rpc op: {op!r}. Allowed: {sorted(_RPC_OPS)}",
+            )
+        args = body.get("args") or []
+        kwargs = body.get("kwargs") or {}
+        if not isinstance(args, list) or not isinstance(kwargs, dict):
+            raise HTTPException(
+                status_code=400, detail="rpc args must be a list, kwargs a dict."
+            )
+        try:
+            return {"result": _ok(getattr(api, op), *args, **kwargs)}
+        except TypeError as e:
+            # A signature mismatch (wrong arity, unexpected kwarg) is the
+            # caller's malformed request, not a server fault.
+            raise HTTPException(status_code=400, detail=f"Bad rpc arguments: {e}")
 
     @app.get("/api/boards")
     def list_boards(include_closed: bool = False) -> list[dict]:
@@ -287,10 +371,15 @@ def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
             with open(tmp_path, "wb") as out:
                 shutil.copyfileobj(file.file, out)
             att_name = (name or "").strip() or file.filename or None
-            _ok(api.add_attachment_file, card_id, tmp_path, name=att_name)
+            att = _ok(api.add_attachment_file, card_id, tmp_path, name=att_name)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        return _ok(api.get_card, card_id)
+        # The fresh card (what app.js consumes), plus the created attachment
+        # under a transient `_attachment` key — `HttpBackend.add_attachment_file`
+        # must return the attachment dict (the ABC's contract) and would
+        # otherwise have to guess it back out of the card. Optional-transient
+        # per base.py's convention; the web client ignores it.
+        return {**_ok(api.get_card, card_id), "_attachment": att}
 
     @app.get("/api/cards/{card_id}/attachments/{attachment_id}/raw")
     def attachment_raw(card_id: str, attachment_id: str) -> StreamingResponse:
@@ -323,42 +412,41 @@ def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
             or mimetypes.guess_type(att.get("name") or "")[0]
             or "application/octet-stream"
         )
-
-        def _stream_and_cleanup() -> Iterator[bytes]:
-            # Stream the temp blob, then unlink it in a finally that runs on
-            # normal completion AND on client disconnect (Starlette closes the
-            # generator, firing the finally). This is the leak-proof alternative
-            # to FileResponse's background task, which is skipped when send raises
-            # mid-download — stranding the temp file. (We still copy the blob into
-            # a temp per view; serving a local blob's path directly would need a
-            # backend path accessor we can't add here without touching local.py.)
-            try:
-                with open(tmp_path, "rb") as blob:
-                    while True:
-                        chunk = blob.read(_STREAM_CHUNK)
-                        if not chunk:
-                            break
-                        yield chunk
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
-        # Serve inline so images/PDFs render in-tab. RFC 5987 `filename*` encodes
-        # the (possibly non-ASCII / attacker-influenced) name so it can't break
-        # out of the header.
-        fname = att.get("name") or attachment_id
-        return StreamingResponse(
-            _stream_and_cleanup(),
-            media_type=media,
-            headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(fname)}"},
-        )
+        # Serve inline so images/PDFs render in-tab. (We still copy the blob
+        # into a temp per view; serving a local blob's path directly would need
+        # a backend path accessor we can't add here without touching local.py.)
+        return _stream_temp_file(tmp_path, media, att.get("name") or attachment_id)
 
     @app.delete("/api/cards/{card_id}/attachments/{attachment_id}")
     def remove_attachment(card_id: str, attachment_id: str) -> dict:
         _ok(api.delete_attachment, card_id, attachment_id)
         return _ok(api.get_card, card_id)
+
+    @app.get("/api/blob")
+    def blob(url: str) -> StreamingResponse:
+        """Serve an uploaded attachment's bytes by its *stored* url — the
+        `HttpBackend.download_attachment` counterpart of the browser's `/raw`
+        route (which addresses by card+attachment id; the ABC's download op
+        only has the url). Store-relative urls ONLY: an absolute url is
+        refused, so this can never be steered into fetching an arbitrary
+        remote URL (external link attachments are downloaded by the *client*
+        directly), and the local backend's `_blob_path` containment check
+        rejects traversal urls. Token-gated like every /api route."""
+        if url.lower().startswith(("http://", "https://")) or url.startswith("//"):
+            raise HTTPException(
+                status_code=400,
+                detail="Only store-relative attachment urls are served here.",
+            )
+        fd, tmp_path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            _ok(api.download_attachment, url, tmp_path, authed=True)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
+        fname = os.path.basename(url) or "attachment"
+        media = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+        return _stream_temp_file(tmp_path, media, fname)
 
     @app.patch("/api/lists/{list_id}")
     def patch_list(list_id: str, fields: dict[str, Any]) -> dict:
@@ -468,7 +556,7 @@ def create_app(token: str | None = None, host: str = "127.0.0.1") -> FastAPI:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
-          token: str | None = None) -> None:
+          token: str | None = None, allow_hosts: tuple[str, ...] = ()) -> None:
     """Boot the web server (blocking).
 
     Single-process — no uvicorn reload/workers — so the in-process `--backend`
@@ -477,7 +565,9 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
     default. A non-loopback bind exposes the read/write API to the network, so it
     is token-gated: if no `token` is given for such a bind one is auto-generated,
     and the token is required (Bearer header or `?token=`) on every API request.
-    Loopback stays token-free unless a token is passed explicitly."""
+    Loopback stays token-free unless a token is passed explicitly — a hosted
+    deployment behind a reverse proxy binds loopback and passes `token` plus
+    `allow_hosts` (the public domain(s) the proxy forwards in the Host header)."""
     import threading
     import webbrowser
 
@@ -487,7 +577,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True,
     if not is_loopback and not token:
         token = secrets.token_urlsafe(16)
 
-    app = create_app(token=token, host=host)
+    app = create_app(token=token, host=host, extra_hosts=tuple(allow_hosts))
     browse_host = "127.0.0.1" if host in _WILDCARD_HOSTS else host
     browse_url = f"http://{browse_host}:{port}/"
     if token:
