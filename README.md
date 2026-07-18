@@ -22,6 +22,127 @@ trello configure <api_key> <token>
 
 Get your API key and token from https://trello.com/power-ups/admin.
 
+## How to use with Claude (or any other harness)
+
+This CLI is built to be driven by an agent, not memorized by a human. Tell your project's
+CLAUDE.md where the board lives (id, backend, list names) and then just talk to Claude in
+plain language. Real phrasings that come up all the time, pulled from actual sessions
+(lightly edited for clarity):
+
+### Setting up a project
+
+> "create a board for this project, my key is in .env"
+
+> "Create a local trello board using the CLI to track this project. Move the plan over
+> (most will be in Done of course). Add the information of the board to claude.md."
+
+One-time setup per project: Claude runs `board add`, seeds lists/cards, and records the
+board id + backend in CLAUDE.md so every future session knows where the board is. After
+that you never mention ids again.
+
+> "can you move this board into a local trello project? the CLI has an export function for that, right?"
+
+Migrating an existing Trello board into the local file store — `trello export --to local`
+pulls it in with ids preserved, so it's also a repeatable refresh.
+
+### Picking up work
+
+> "grab the top to do ticket!"
+
+> "atomically grab the top ticket from the backlog and implement it using contributing"
+
+> "grab a random card" / "grab the 2nd ticket" / "take the BOTTOM card from the backlog
+> and implement it using @CONTRIBUTING.md!"
+
+The killer feature for agent workflows: `trello grab` atomically claims the top card of a
+list and moves it to Doing, so you can say this to **several agents at once** and each gets
+a distinct card — no two agents ever land on the same ticket.
+
+The "contributing" in those quotes is a runbook file the user keeps (any
+CONTRIBUTING.md-style instructions file the agent can read) that says what to do with a
+card once grabbed — roughly: claim the card with `trello grab`, branch off in a git
+worktree, implement, verify, open a PR and merge it, then move the card to Done with a
+closing comment. Write one of those for your own projects and "grab the top ticket and
+implement it using contributing" becomes a complete, self-serve work order.
+
+> "start the server, then spin up subagents to do all of the tasks on the to do list"
+
+> "I added two more tickets btw, let's get some more agents up in this"
+
+The scaled-up version: you watch the board live in the web UI while a fleet of subagents
+grabs and burns down the To Do column, and you feed it by dropping new cards on the board.
+
+### Creating cards mid-conversation
+
+> "create a card to track this"
+
+> "make a trello about it"
+
+> "Feel free to card that up in trello actually."
+
+> "Create trellno tickets for these phases so I can tackle them one by one."
+
+The most common use by far: something comes up mid-session — a bug you don't want to fix
+right now, a follow-up, a whole plan that needs splitting into phases — and instead of
+losing it, Claude files a card with a real title and description. `card add`, `card desc`,
+`comment add`, `checklist` all take plain arguments, so Claude can write rich cards
+without you dictating syntax.
+
+> "put a card in Later to revisit that module, my hunch is it can be refactored away."
+
+Columns are addressed by name, so "later", "for me", "backlog" all just work.
+(And the inverse request exists too: "don't card it - just implement it for me now :)")
+
+### Cards as handoff notes between sessions
+
+> "ask the agent to wrap up with a status report, and add that to the card so we can
+> continue where it left off"
+
+> "Continue the model-spritesheet-pipeline card: check the review agent's findings,
+> triage, fix, merge, move card to Done."
+
+> "Let us continue the multiplayer implementation, card 11.2 has detailed handoff notes
+> in the comments!"
+
+Cards outlive context windows. When a session ends mid-task, Claude writes a status
+comment on the card; the next session (or a different agent entirely) reads the card and
+picks up exactly where things stopped. The board becomes shared memory across sessions,
+agents, and machines.
+
+### Closing out and checking status
+
+> "close all the trello cards this branch completed"
+
+> "so we all good, everything's on main, trello up to date, nothing for me here?"
+
+Claude reads the board (`card ls`, `card show`), moves finished cards to Done, comments
+outcomes on cards, and answers status questions by diffing the board against reality.
+
+### The web UI and a hosted server
+
+> "hey can you show me the local fake trello website? :)"
+
+`trello serve` boots the drag-drop kanban over whatever backend you pick and opens your
+browser. Live-refresh means the page updates as agents mutate the board from the CLI.
+
+> "set it up so the trellno server boots when my PC starts"
+
+Also a one-liner to Claude: it registers `trello serve` as a startup task (Task Scheduler
+on Windows, launchd/systemd elsewhere) pointed at your local store, so the board is just
+always there. For the always-on, reachable-from-anywhere version — including agents in
+cloud sandboxes that can't see your disk — see [Hosted server](#hosted-server---backend-http)
+and the full runbook in [`deploy/`](deploy/README.md).
+
+### Why this works well for agents
+
+- **Compact output** — tables sized for a context window, `--json` when the agent needs
+  structure. No API pagination, no auth dance per call.
+- **Stateless** — board and backend are per-invocation flags, so concurrent agents and
+  sessions never fight over an "active board".
+- **Atomic `grab`** — the coordination primitive that makes "everyone take a ticket" safe.
+- **Name/prefix resolution** — agents can say `--board myproj` or `card show 3fa2` without
+  exact ids.
+
 ## Usage
 
 Commands are organized into noun groups (`card`, `list`, `label`, `checklist`, `comment`, `attachment`). Bare nouns default to `ls`, so `trello list` ≡ `trello list ls` and `trello card <list>` ≡ `trello card ls <list>`.
@@ -81,8 +202,8 @@ trello grab [--from "To Do"] [--to "Doing"]  Atomically claim the top card of
 Made for "tell several agents to grab the top To Do ticket" without them racing
 onto the **same** card. On the **local** backend it's truly atomic — the move
 runs under the store lock, so concurrent grabbers each get a distinct card. On
-the **Trello** backend (no atomic primitive) it fakes the
-[CONTRIBUTING.md](CONTRIBUTING.md) claim handshake instead: grab, post a claim
+the **Trello** backend (no atomic primitive) it fakes a comment-based claim
+handshake instead: grab, post a claim
 comment, wait ~10-30s, and let the earliest claim win (retrying the next card on
 a loss) — so a `trello grab` blocks for that wait. Cross-machine Dropbox
 concurrency is out of scope (OS locks don't cross machines).
