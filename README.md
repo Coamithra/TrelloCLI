@@ -63,7 +63,9 @@ CONTRIBUTING.md-style instructions file the agent can read) that says what to do
 card once grabbed — roughly: claim the card with `trello grab`, branch off in a git
 worktree, implement, verify, open a PR and merge it, then move the card to Done with a
 closing comment. Write one of those for your own projects and "grab the top ticket and
-implement it using contributing" becomes a complete, self-serve work order.
+implement it using contributing" becomes a complete, self-serve work order. A full
+example ships in this repo — [CONTRIBUTING.example.md](CONTRIBUTING.example.md) — copy
+it next to your project and adapt the specifics.
 
 > "start the server, then spin up subagents to do all of the tasks on the to do list"
 
