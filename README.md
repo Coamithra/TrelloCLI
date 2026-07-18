@@ -74,6 +74,23 @@ it next to your project and adapt the specifics.
 The scaled-up version: you watch the board live in the web UI while a fleet of subagents
 grabs and burns down the To Do column, and you feed it by dropping new cards on the board.
 
+> "Manage opus subagents to tackle the top 4 cards of to do. There is some overlap in
+> these so decide how much can be parallelized, or if tasks need to be combined. Act as
+> advisor to the subagents if they have questions or run into tough choices. For design
+> questions that need a human, forward those to me."
+
+> "split the work and direct Opus and Sonnet agents (based on complexity) to implement
+> the items using the CONTRIBUTING workflow. You act as orchestrator and director,
+> checking their work. Inform them that if they hit difficult problems or need guidance
+> they shall ask you."
+
+A refinement that works well in practice: run the *session* on your smartest model and
+have it act as orchestrator and resident expert — it decides what can run in parallel,
+farms the cards out to cheaper/faster agents, reviews their work, and answers their
+questions. Escalation flows agent -> orchestrator -> you, so you only get pinged for
+genuine design decisions. The board is what makes this safe: `grab` hands each agent its
+own card, and comments/moves let the orchestrator track everyone's progress.
+
 ### Creating cards mid-conversation
 
 > "create a card to track this"
