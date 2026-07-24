@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 POS_STEP = 65536.0  # Trello's default spacing between adjacent positions
 
@@ -96,11 +96,62 @@ def even_positions(n: int) -> list[float]:
     return [POS_STEP * (i + 1) for i in range(n)]
 
 
+# ── Transient file-lock retries (synced folders / antivirus) ─────────
+#
+# A store file that another program has momentarily open cannot be replaced or
+# read: on Windows that surfaces as WinError 5 (access denied) or 32/33
+# (sharing/lock violation). On a Dropbox- or OneDrive-synced store this happens
+# routinely and briefly — the sync client, the Search indexer and Defender all
+# open files behind our back for a few hundred milliseconds — so every store
+# read and write retries before giving up.
+#
+# This is not cosmetic. Unretried, one such blip aborted `grab_top_card`
+# mid-move: the card never left the source list, so the *next* agent to grab
+# claimed the very same card, and the raw traceback (which names the card file)
+# read enough like success that the first agent thought it held the card too.
+# Two agents, one card — observed 2026-07-24 on the RotEA26 board.
+
+_T = TypeVar("_T")
+
+# ~1.4s all told, which comfortably outlasts a real sync/scan hold (hundreds of
+# ms). Deliberately not longer: a mutator retries while HOLDING the store lock,
+# so this budget is also every other process's added queueing delay — several
+# queued writers each stalling the full budget must still fit inside
+# LOCK_TIMEOUT (15s) or the waiters start failing instead.
+LOCK_RETRY_DELAYS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.6)
+
+
+def is_transient_lock(e: BaseException) -> bool:
+    """True for the OS errors another program's open handle produces.
+    `PermissionError` is what a synced folder raises on every platform;
+    WinError 32/33 (sharing / lock violation) arrive as plain `OSError`."""
+    if isinstance(e, PermissionError):
+        return True
+    return isinstance(e, OSError) and getattr(e, "winerror", None) in (32, 33)
+
+
+def retry_on_lock(op: Callable[[], _T]) -> _T:
+    """Run `op`, retrying while another program holds the file open.
+
+    Re-raises the original error if the lock never clears (callers decide
+    whether that is fatal), and any non-lock error immediately — a real
+    permission or disk problem must not be papered over with a 1.4s stall.
+    """
+    for delay in LOCK_RETRY_DELAYS:
+        try:
+            return op()
+        except BaseException as e:
+            if not is_transient_lock(e):
+                raise
+            time.sleep(delay)
+    return op()  # last attempt: its error propagates as-is
+
+
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(retry_on_lock(lambda: path.read_text(encoding="utf-8")))
     except json.JSONDecodeError as e:
         # A store file can be externally corrupted (e.g. a Dropbox conflict copy);
         # fail with a clean message rather than a traceback. Used for the
@@ -114,11 +165,15 @@ def read_json_tolerant(path: Path) -> Any:
     decode error or unreadable/empty file instead of raising. Per-card reads use
     this so one corrupt or half-synced card file (a Dropbox mid-sync writes a
     zero-byte file; `json.loads("")` raises) never aborts a whole-board scan or a
-    cross-board comment/checklist lookup. Mirrors the tolerant `read_activity`."""
+    cross-board comment/checklist lookup. Mirrors the tolerant `read_activity`.
+
+    A *transiently* locked file is retried first: skipping it would silently
+    drop a real card from its list, which for `grab_top_card` means handing the
+    caller a different card than the one actually on top."""
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(retry_on_lock(lambda: path.read_text(encoding="utf-8")))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
         print(f"warning: skipping unreadable store file {path}: {e}", file=sys.stderr)
         return None
@@ -128,14 +183,35 @@ def atomic_write_text(path: Path, text: str) -> None:
     """Write `text` to `path` atomically (temp file in the same dir + os.replace),
     so a Dropbox-synced folder never observes a half-written file. The temp file
     is cleaned up if the write or replace fails, so a mid-write crash doesn't
-    leave a `.tmp` stray behind (`gc` sweeps any that a hard crash does)."""
+    leave a `.tmp` stray behind (`gc` sweeps any that a hard crash does).
+
+    A transient lock on the destination (sync client / antivirus holding it
+    open) is retried; if it never clears the write fails as a clean `SystemExit`
+    saying nothing changed, rather than a traceback. That wording is load-
+    bearing: an agent that read the raw traceback — which names the card file —
+    took it for a successful claim and worked a card another agent then grabbed.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
+
+    def write_once() -> None:
+        tmp.write_text(text, encoding="utf-8")  # truncates: a retry restarts clean
         os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
+
+    try:
+        retry_on_lock(write_once)
+    except BaseException as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass  # the stray .tmp is `gc`'s problem; don't mask the real error
+        if is_transient_lock(e):
+            raise SystemExit(
+                f"Could not write {path}: another program (Dropbox/OneDrive "
+                f"sync, antivirus, or an open editor) held the file locked for "
+                f"{sum(LOCK_RETRY_DELAYS):.1f}s. Nothing was changed; run the "
+                f"command again."
+            ) from e
         raise
 
 
@@ -213,7 +289,16 @@ class StoreLock:
         self._rlock.acquire()  # same thread re-enters freely; other threads wait
         if self._depth == 0:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(self._path, "a+")
+            try:
+                # A sync client / antivirus can hold `.lock` open for a moment;
+                # retry rather than failing the mutation before it starts. Any
+                # failure here must release the RLock we just took, or a
+                # long-lived process (the web server) deadlocks on the next
+                # mutation instead of surfacing the error.
+                fh = retry_on_lock(lambda: open(self._path, "a+"))
+            except BaseException:
+                self._rlock.release()
+                raise
             deadline = time.monotonic() + self._timeout
             while not _os_trylock(fh):
                 if time.monotonic() >= deadline:
@@ -343,8 +428,21 @@ class LocalStore:
     def append_activity(self, board_id: str, entry: dict) -> None:
         path = self.activity_file(board_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+        def append_once() -> None:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+
+        # The log is the last step of a mutation that has already been saved, so
+        # a lock that never clears must not undo it: warn and drop the entry.
+        try:
+            retry_on_lock(append_once)
+        except OSError as e:
+            if not is_transient_lock(e):
+                raise
+            print(f"warning: activity log locked, entry not recorded: {e}",
+                  file=sys.stderr)
 
     def read_activity(self, board_id: str) -> list[dict]:
         """Every activity-log entry, oldest first (file order). Blank or
@@ -353,7 +451,7 @@ class LocalStore:
         if not path.exists():
             return []
         out = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in retry_on_lock(lambda: path.read_text(encoding="utf-8")).splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -368,9 +466,8 @@ class LocalStore:
         path = self.activity_file(board_id)
         if not path.exists():
             return 0
-        return sum(
-            1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-        )
+        text = retry_on_lock(lambda: path.read_text(encoding="utf-8"))
+        return sum(1 for line in text.splitlines() if line.strip())
 
     def tail_activity(self, board_id: str, keep: int) -> int:
         """Trim the activity log to its newest `keep` non-blank lines (atomic
@@ -378,9 +475,8 @@ class LocalStore:
         path = self.activity_file(board_id)
         if keep < 0 or not path.exists():
             return 0
-        lines = [
-            line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-        ]
+        text = retry_on_lock(lambda: path.read_text(encoding="utf-8"))
+        lines = [line for line in text.splitlines() if line.strip()]
         if len(lines) <= keep:
             return 0
         kept = lines[len(lines) - keep:] if keep else []

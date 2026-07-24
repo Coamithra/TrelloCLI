@@ -81,6 +81,112 @@ def test_grab_empty_list_returns_none(board):
     assert backend.grab_top_card(lists[0]["id"], lists[1]["id"]) is None
 
 
+# ── Transient Windows sharing violations (Dropbox / antivirus) ────────
+#
+# A store on a synced folder gets its files momentarily opened by Dropbox, the
+# Search indexer or Defender. On Windows that makes `os.replace` fail with
+# WinError 5/32 — a *transient* error. Unretried, it crashed `grab` mid-move and
+# left the card in the source list, so the next agent grabbed the same card
+# (observed 2026-07-24: two agents both claimed card 2e0f908b).
+
+def _flaky(monkeypatch, attr, fail_times, match=".json"):
+    """Make `store.os.<attr>` / `Path.<attr>` raise a Windows-style sharing
+    violation the first `fail_times` calls that touch a matching path, then
+    behave normally. Returns a counter dict so a test can assert it fired."""
+    real = getattr(store.os, attr)
+    state = {"failures": 0}
+
+    def fake(src, dst, *a, **kw):
+        if match in str(dst) and state["failures"] < fail_times:
+            state["failures"] += 1
+            raise PermissionError(13, "Access is denied", str(dst))
+        return real(src, dst, *a, **kw)
+
+    monkeypatch.setattr(store.os, attr, fake)
+    return state
+
+
+def test_grab_survives_transient_file_lock(board, monkeypatch):
+    """The bug: a transient lock on the card file aborted the move, leaving the
+    card in the source list — so two grabbers in a row got the SAME card."""
+    backend, bid, lists = board
+    src, dst = lists[0]["id"], lists[1]["id"]
+    backend.create_card(src, "A")
+    backend.create_card(src, "B")
+
+    state = _flaky(monkeypatch, "replace", fail_times=2)
+    first = backend.grab_top_card(src, dst)
+    second = backend.grab_top_card(src, dst)
+
+    assert state["failures"] == 2, "the simulated lock never fired"
+    assert first is not None and second is not None
+    assert first["id"] != second["id"], "two grabbers claimed the same card"
+    assert first["idList"] == dst and second["idList"] == dst
+    assert backend.get_cards_in_list(src) == []
+
+
+def test_store_write_gives_up_cleanly_when_lock_never_clears(board, monkeypatch):
+    """A permanent lock must fail as a clean CLI error that says nothing moved —
+    not a traceback naming the card file (which an agent misreads as a claim) —
+    and must leave the store and its temp files untouched."""
+    backend, bid, lists = board
+    src, dst = lists[0]["id"], lists[1]["id"]
+    card = backend.create_card(src, "A")
+    cards_dir = store.LocalStore(str(backend.store.root)).cards_dir(bid)
+
+    _flaky(monkeypatch, "replace", fail_times=10_000)
+    with pytest.raises(SystemExit) as e:
+        backend.grab_top_card(src, dst)
+
+    msg = str(e.value)
+    assert "locked" in msg.lower() and "nothing was changed" in msg.lower()
+    assert backend.get_card(card["id"])["idList"] == src, "card moved anyway"
+    assert list(cards_dir.glob("*.tmp")) == [], "left a temp file behind"
+
+
+def test_store_lock_releases_when_the_lock_file_cannot_be_opened(tmp_path, monkeypatch):
+    """If opening `.lock` fails outright, the in-process RLock must be released.
+    Leaking it would deadlock a long-lived process (the web server) on its next
+    mutation instead of surfacing the error."""
+    lock = store.StoreLock(tmp_path / ".lock", timeout=0.1)
+    monkeypatch.setattr(store, "LOCK_RETRY_DELAYS", (0.0,))
+
+    def boom(*a, **kw):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("builtins.open", boom)
+    with pytest.raises(PermissionError):
+        with lock:
+            pass
+    monkeypatch.undo()
+
+    acquired = lock._rlock.acquire(blocking=False)
+    assert acquired, "the RLock leaked — the next mutation would deadlock"
+    lock._rlock.release()
+
+
+def test_transient_lock_does_not_make_a_card_vanish(board, monkeypatch):
+    """A transient lock on a *read* must not silently drop the card from the
+    list (which would hand the next grabber a different card than the top one)."""
+    backend, bid, lists = board
+    src = lists[0]["id"]
+    top = backend.create_card(src, "A")
+
+    real_read = store.Path.read_text
+    state = {"failures": 0}
+
+    def flaky_read(self, *a, **kw):
+        if self.suffix == ".json" and "cards" in str(self) and state["failures"] < 2:
+            state["failures"] += 1
+            raise PermissionError(13, "Access is denied", str(self))
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(store.Path, "read_text", flaky_read)
+    names = [c["id"] for c in backend.get_cards_in_list(src)]
+    assert state["failures"] == 2, "the simulated lock never fired"
+    assert names == [top["id"]], "a transiently locked card vanished from the list"
+
+
 # ── update_card returns an ENRICHED dict (X4 fix) ─────────────────────
 
 def test_update_card_returns_enriched_shape(board):
