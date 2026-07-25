@@ -33,6 +33,10 @@ def _rescore(r: dict) -> dict:
     return r
 
 
+def _bypassed(r: dict) -> bool:
+    return bool(r.get("bypassed_cli") or ("bypassed_cli" not in r and r.get("peeked_at_source")))
+
+
 def load(run_dir: Path) -> dict[str, dict]:
     rows = json.loads((run_dir / "results.json").read_text())
     return {r["case"]: _rescore(r) for r in rows}
@@ -67,9 +71,11 @@ def compare(before_dir: Path, after_dir: Path) -> str:
          sum(1 for c in shared if after[c]["over_budget"]), True),
         ("calls over budget",
          agg(before, "over_budget"), agg(after, "over_budget"), True),
+        # Runs recorded before `bypassed_cli` existed folded store reads into
+        # `peeked_at_source`, so fall back to it rather than scoring them zero.
         ("went around the CLI",
-         sum(1 for c in shared if before[c].get("bypassed_cli")),
-         sum(1 for c in shared if after[c].get("bypassed_cli")), True),
+         sum(1 for c in shared if _bypassed(before[c])),
+         sum(1 for c in shared if _bypassed(after[c])), True),
     ):
         delta = a - b
         arrow = "" if delta == 0 else ("✅" if (delta < 0) == better_is_low else "⚠️")

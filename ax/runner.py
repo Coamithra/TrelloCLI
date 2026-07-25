@@ -262,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
     if old.exists():
         for r in json.loads(old.read_text()):
             merged[(r["case"], r.get("rep", 0))] = r
+    else:
+        # No index yet — a previous invocation was killed before it wrote one.
+        # Each case wrote its own result as it finished, so nothing is lost.
+        for path in sorted(run_dir.glob("*/result.json")):
+            r = json.loads(path.read_text())
+            merged.setdefault((r["case"], r.get("rep", 0)), r)
     for r in results:
         merged[(r["case"], r.get("rep", 0))] = r
     results = list(merged.values())

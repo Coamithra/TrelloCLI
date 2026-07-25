@@ -6,19 +6,29 @@ run: `runs/baseline-haiku`. Patched run: `runs/patched-haiku`. Comparison:
 
 ## The headline is not the pass rate
 
-The baseline scored **35/35**. That number is nearly worthless on its own — a
+The baseline scored **34/35**. That number is nearly worthless on its own — a
 capable model will brute-force its way to the right board state eventually. What
-it cost to get there is the actual measurement:
+it cost to get there is the actual measurement, and it is what moved:
 
-| | baseline |
-| --- | --- |
-| tool calls | **212** against a 146-call budget (+45%) |
-| runs that hit at least one tool error | **16 / 35** |
-| runs that gave up on the CLI and read the store files directly | **1** |
-| runs that reached the intended command | **34 / 35** (`grab` was never found) |
+| | baseline | patched | |
+| --- | --- | --- | --- |
+| passed | 34 | 35 | +1 |
+| tool calls (budget: 146) | **212** | **121** | **−43%** |
+| tool errors | 23 | 7 | −70% |
+| runs hitting at least one error | 16 / 35 | 3 / 35 | −13 |
+| runs over budget | 24 / 35 | 3 / 35 | −21 |
+| calls over budget | 71 | 5 | −93% |
+| runs that gave up and read the store files | 1 | 0 | −1 |
 
-Every one of those errors is a turn a real caller paid for, on a task the tool
-supports. That is the tax AX testing measures and unit tests cannot see.
+Same corpus, same model, same prompts — only the CLI's surface changed. The 91
+calls that disappeared were pure tax: turns real callers were paying to
+rediscover, one error at a time, things the tool could simply have told them.
+
+Fifteen runs went from "hit an error" to "clean": `t1-card-detail`, `t1-labels`,
+`t1-json`, `t1-mine`, `t2-move-card`, `t2-rename-card`, `t2-due`,
+`t2-archive-card`, `t2-add-board`, `t3-grab`, `t3-new-label-apply`,
+`t3-checklist`, `t3-attachment`, `t3-reorder-relative`, `t3-move-across-boards`.
+`t1-json` alone went from 6 calls and 3 errors to 1 call and none.
 
 ---
 
@@ -132,7 +142,7 @@ just specified the board, only positionally.
 trello card ls "To Do"`), `board show <name>` says where `--board` goes, and an
 unknown top-level command gets `difflib` suggestions (`attach` → `attachment`).
 
-## F7 — `grab` is invisible, and that one is not fixed
+## F7 — `grab` was invisible (fixed, and the case now checks the mechanism)
 
 `t3-grab` states the race condition explicitly: *several agents are working this
 board, claim the top ticket so no two get the same one*. `grab` exists for
@@ -146,12 +156,36 @@ Two things came out of that:
 1. The case now asserts on the **mechanism** (`expect_cmd=r"\bgrab\b"`), not just
    the outcome. Scored under that rule the baseline is 34/35, and this is the
    one real failure in the corpus.
-2. `card move` and the `card --help` *See also* now point at `grab`. That is a
-   partial fix at best: it only helps an agent that already opened the card
-   help. An agent that guesses its way to `card move` on the first try still
-   never learns `grab` exists. Left open.
+2. `card move`'s help line and the `card --help` *See also* now point at `grab`.
+
+That was enough: in the patched run `t3-grab` found `grab` and finished in **2
+calls with no errors** (baseline: 9 calls, 4 errors, wrong mechanism). It is
+still an indirect fix — it only helps an agent that reads help before guessing —
+so keep the mechanism assertion in place to catch it silently reverting.
 
 ---
+
+---
+
+## What survived — the round-2 backlog
+
+Only three runs still hit an error, and two of them now recover in a single turn
+because the error names the right command (`board list` → *Did you mean: trello
+boards*; `board show <id>` → *the board is a global flag*). Those are working as
+intended: a first guess that costs one turn and teaches the tool.
+
+The third was a genuinely bad message. `comment add` takes free text, so it
+can't run its arguments through `_parse_flags` — an invented flag sailed
+through as a positional and came back as:
+
+```
+$ trello comment add --board Roadmap --card "Migrate database" --text "..."
+Card not found with prefix: --card
+```
+
+**Fixed after the round-1 rerun** (so it is not in the comparison above, and is
+covered by unit test rather than a fresh fanout): every resolver now rejects a
+`--flag` where a value belongs and says values are positional here.
 
 ## Not fixed, deliberately
 
@@ -170,5 +204,10 @@ Two things came out of that:
   regression. `--repeat 3` before believing any one flip.
 - Provider-side 429/529s produce runs with no tool calls and no signal. The
   runner now retries them rather than scoring them.
-- Cases assert on the store, not the agent's summary — several runs described
-  work they had not done, and the store caught it.
+- Cases assert on the store, not the agent's summary, and it matters: the
+  baseline `t3-grab` run signed off with "the grab command atomically claimed
+  this card" having never run `grab`.
+- The patched run was executed in two batches — the provider was returning 529s
+  and a first attempt was killed partway. The runner merges a re-run subset over
+  an existing run for exactly this reason; every case in the comparison is a
+  complete run against the patched CLI.

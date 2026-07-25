@@ -199,11 +199,28 @@ Web:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _reject_flag_value(ref: str, what: str) -> None:
+    """Refuse a `--flag` where a value belongs, with a message that says why.
+
+    Commands that take free text can't use `_parse_flags` (the text may itself
+    start with `--`), so an invented flag used to sail through as a positional
+    and surface as nonsense three layers down: `comment add --card "Migrate
+    database"` reported "Card not found with prefix: --card"."""
+    if ref.startswith("--"):
+        hint = _FLAG_HINTS.get(ref)
+        raise SystemExit(
+            f"Expected a {what}, got the flag {ref}. "
+            f"This CLI takes values positionally."
+            + (f"\n{hint}" if hint else "")
+        )
+
+
 def _resolve_board_ref(ref: str) -> str:
     """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD).
 
     Includes archived boards so an archived board can still be addressed (e.g. to
     `board restore` or `board show` it) — `get_boards()` alone hides them."""
+    _reject_flag_value(ref, "board name or ID")
     boards = api.get_boards(include_closed=True)
     # Exact ID match
     for b in boards:
@@ -238,6 +255,7 @@ def _require_board() -> str:
 
 def _resolve_list(board_id: str, name_or_id: str) -> str:
     """Resolve a list name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "list name or ID")
     lists = api.get_lists(board_id)
     # Exact ID
     for lst in lists:
@@ -270,6 +288,7 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
 
 def _resolve_card(card_id_prefix: str, include_closed: bool = False) -> str:
     """Resolve a card ID prefix to a full card ID by searching the active board."""
+    _reject_flag_value(card_id_prefix, "card ID")
     # A full 24-char ID: validate it belongs to the current board (when one is
     # set) instead of trusting it blindly — a foreign/deleted id then gets a clean
     # "Card not found" rather than a cross-board mutation or a raw 404 traceback.
@@ -326,6 +345,7 @@ def _resolve_comment(card_id: str, comment_id_prefix: str) -> str:
 
 def _resolve_checklist(card_id: str, name_or_id: str) -> str:
     """Resolve a checklist name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "checklist name or ID")
     checklists = api.get_checklists(card_id)
     # Exact ID
     for cl in checklists:
@@ -401,6 +421,7 @@ TRELLO_COLORS = {
 
 def _resolve_label(board_id: str, name_or_id: str) -> str:
     """Resolve a label name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "label name or ID")
     labels = api.get_labels(board_id)
     # Exact ID
     for lb in labels:
@@ -434,6 +455,7 @@ def _resolve_label(board_id: str, name_or_id: str) -> str:
 def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     """Resolve an attachment by ID, ID prefix, or case-insensitive name prefix.
     Returns the full attachment dict (callers need its url/isUpload/mimeType)."""
+    _reject_flag_value(name_or_id, "attachment name or ID")
     atts = api.get_attachments(card_id)
     # Exact ID
     for a in atts:

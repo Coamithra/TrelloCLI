@@ -226,6 +226,27 @@ def test_unknown_flag_names_the_positional_form(board):
     assert "positional" in str(e.value)
 
 
+def test_flag_where_a_value_belongs_says_so(board):
+    """`comment add` takes free text, so it can't use _parse_flags — an invented
+    flag used to reach the resolver and come back as "Card not found: --card"."""
+    with pytest.raises(SystemExit) as e:
+        main.cmd_comment(["add", "--card", "Migrate database", "--text", "hi"])
+    msg = str(e.value)
+    assert "--card" in msg and "positionally" in msg
+    assert "not found" not in msg.lower()
+
+
+@pytest.mark.parametrize("argv,cmd", [
+    (["ls", "--nope"], main.cmd_comment),
+    (["set", "--nope", "bug"], main.cmd_label),
+    (["add", "--nope", "Steps"], main.cmd_checklist),
+])
+def test_flag_guard_covers_the_other_resolvers(argv, cmd, board):
+    with pytest.raises(SystemExit) as e:
+        cmd(argv)
+    assert "positionally" in str(e.value)
+
+
 def test_quoted_relative_position_is_accepted(board, capsys):
     be, bid, lists = board
     a = be.create_card(lists["To Do"], "A")
