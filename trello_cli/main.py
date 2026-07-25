@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import subprocess
@@ -97,12 +98,22 @@ Workflow:
 
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
-  card ls <list> [--with-comment]      Show cards in a list (Activity column;
-                                       --with-comment adds latest comment)
+  card ls [<list>] [--with-comment]    Show cards. With a list: that column.
+          [--archived] [--limit <n>]   Without one: every card on the board,
+                                       with a List column, capped at 50 to keep
+                                       big boards from flooding your context
+                                       (the footer says what was left out and
+                                       which column to ask for; --limit 0 shows
+                                       all). --archived shows archived cards
+                                       instead of open ones (that's how you
+                                       find a card to unarchive)
   card add <list> <name> [desc] Create a card at the top (--bottom to append)
-  card move <card_id> <list>    Move a card to a list
+  card move <card_id> <list>    Move a card to a list (to claim the *top* card of
+                                a list when other agents are racing you, use
+                                `grab` instead — it can't hand out duplicates)
   card archive <card_id>        Archive a card
-  card unarchive <card_id>      Restore an archived card
+  card unarchive <card_id>      Restore an archived card (find it with
+                                `card ls --archived`)
   card rename <card_id> <name>  Rename a card
   card desc <card_id> <text>    Update card description
   card due <card_id> <date>     Set card due date (ISO 2026-05-01,
@@ -453,6 +464,112 @@ def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     raise SystemExit(f"Attachment not found: {name_or_id}")
 
 
+_HELP_FLAGS = {"-h", "--help", "help"}
+
+# Wrong-but-reasonable verbs, and where the thing they wanted actually lives.
+# Every entry here was an actual first guess made by a cold agent (see ax/):
+# the noun groups don't nest, so `card comment` and `list cards` read as
+# perfectly sensible commands right up until they aren't.
+_VERB_HINTS = {
+    ("card", "comment"): "trello comment add <card_id> <text>",
+    ("card", "comments"): "trello card show <card_id>",
+    ("card", "label"): "trello label set <card_id> <label>",
+    ("card", "checklist"): "trello checklist add <card_id> <name>",
+    ("card", "attachment"): "trello attachment add <card_id> <url>",
+    ("card", "attach"): "trello attachment add <card_id> <url>",
+    ("card", "create"): "trello card add <list> <name>",
+    ("card", "delete"): "trello card archive <card_id>",
+    ("card", "assign"): "trello card mine (this CLI is single-user)",
+    ("board", "list"): "trello boards",
+    ("board", "ls"): "trello boards",
+    ("board", "cards"): "trello card ls",
+    ("board", "delete"): "trello board archive (or `local rm <board> --yes`)",
+    ("list", "cards"): "trello card ls <list>",
+    ("list", "card"): "trello card ls <list>",
+    ("list", "delete"): "trello list archive <list>",
+    ("label", "delete"): "trello label delete <label>",
+    ("comment", "list"): "trello comment ls <card_id>",
+}
+
+# Words that are a verb *somewhere* in this CLI. When one shows up where a group
+# expects a verb, the caller meant it as a verb — so say so, rather than letting
+# the bare-noun `ls` fallback swallow it and fail three layers down with
+# "List not found: comment Migrate database Blocked on design review."
+_VERB_WORDS = {
+    "add", "archive", "assign", "attach", "attachment", "attachments", "board",
+    "boards", "card", "cards", "check", "checklist", "checklists", "comment",
+    "comments", "create", "del", "delete", "desc", "describe", "download",
+    "due", "edit", "item", "items", "label", "labels", "list", "lists", "ls",
+    "mine", "move", "new", "open", "pos", "position", "remove", "rename",
+    "reorder", "restore", "rm", "set", "show", "uncheck", "unarchive", "unset",
+    "update",
+}
+
+# What else a caller in this group probably needs to know about.
+_SEE_ALSO = {
+    "card": (
+        "`grab --from <list> --to <list>` claims the top card of a list atomically\n"
+        "          (use it instead of `card ls` + `card move` when other agents are\n"
+        "          working the same board); comments, labels, checklists and\n"
+        "          attachments are their own noun groups and all take a <card_id>."
+    ),
+    "list": "`card ls <list>` shows the cards in a column.",
+    "board": "`--board <name_or_id>` picks the board for every other command.",
+    "label": "`label set <card_id> <label>` puts a board label on a card.",
+    "comment": "`card show <card_id>` already prints a card's comments.",
+}
+
+
+def _usage_section(group: str) -> str:
+    """The USAGE lines describing one noun group (plus its plural, so
+    `board --help` also turns up `boards`)."""
+    head = group.split()[0]
+    wanted = {head, head + "s"}
+    out: list[str] = []
+    keep = False
+    for line in USAGE.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            keep = False
+            continue
+        if line.startswith("  ") and not line.startswith("   "):
+            keep = stripped.split()[0] in wanted
+        if keep:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _print_group_help(group: str) -> None:
+    """`trello card --help` — the section of USAGE that group owns.
+
+    Agents reach for `<noun> --help` before they reach for the top-level help;
+    answering that with "Unknown flag: --help" burns a turn and teaches nothing."""
+    body = _usage_section(group)
+    if not body:
+        print(USAGE)
+        return
+    print(f"Usage: trello [--board <name_or_id>] [--json] {group} <verb> [args]")
+    print()
+    print(body)
+    see = _SEE_ALSO.get(group.split()[0])
+    if see:
+        print(f"\nSee also: {see}")
+
+
+def _unknown_verb(group: str, subcmds: dict, verb: str, ls_takes_args: bool) -> None:
+    verbs = ", ".join(subcmds)
+    lines = [f"Unknown {group} command: {verb}. Valid verbs: {verbs}"]
+    hint = _VERB_HINTS.get((group, verb.lower()))
+    if hint is None and verb.lower() in ("list", "ls") and "ls" in subcmds:
+        hint = f"trello {group} ls"
+    if hint:
+        lines.append(f"Did you mean: {hint}")
+    if ls_takes_args:
+        lines.append(f'If {verb!r} is a name, not a verb: trello {group} ls "{verb}"')
+    lines.append(f"Full help: trello {group} --help")
+    raise SystemExit("\n".join(lines))
+
+
 def _dispatch(group: str, subcmds: dict, args: list[str],
               ls_takes_args: bool = False) -> None:
     """Dispatch a noun-group subcommand.
@@ -460,17 +577,37 @@ def _dispatch(group: str, subcmds: dict, args: list[str],
     A bare noun (no args) falls back to `ls`. When args are present but the first
     isn't a known verb, only fall back to `ls` if `ls` actually *consumes* those
     args (e.g. `card ls <list>`); otherwise the args would be silently ignored —
-    a typo'd verb like `list renmae ...` — so error instead of a false success."""
+    a typo'd verb like `list renmae ...` — so error instead of a false success.
+    A first arg that is a verb *elsewhere* in the CLI never falls through either,
+    however much `ls` would accept it."""
+    if args and set(args) & _HELP_FLAGS:
+        _print_group_help(group)
+        return
     if args and args[0] in subcmds:
         subcmds[args[0]](args[1:])
         return
+    if args and args[0].lower() in _VERB_WORDS:
+        _unknown_verb(group, subcmds, args[0], ls_takes_args)
     if "ls" in subcmds and (not args or ls_takes_args):
         subcmds["ls"](args)
         return
-    verbs = ", ".join(subcmds)
     if args:
-        raise SystemExit(f"Unknown {group} command: {args[0]}. Valid verbs: {verbs}")
-    raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
+        _unknown_verb(group, subcmds, args[0], ls_takes_args)
+    raise SystemExit(f"Usage: trello {group} <{', '.join(subcmds)}> [args]")
+
+
+# Flags agents invent because every other CLI has them. Naming the positional
+# form costs one line and saves a turn.
+_FLAG_HINTS = {
+    "--list": 'The list is positional: trello card ls "To Do"',
+    "--card": "The card is positional: trello card show <card_id>",
+    "--name": "The name is positional, e.g. trello card add <list> <name>",
+    "--all": "For archived cards use --archived; for archived boards, boards --all",
+    "--assigned-to": "This CLI is single-user: trello card mine",
+    "--assignee": "This CLI is single-user: trello card mine",
+    "--filter": "Filter by column instead: trello card ls <list>",
+    "--limit": "Counts are positional where supported, e.g. trello activity 20",
+}
 
 
 def _parse_flags(
@@ -497,7 +634,8 @@ def _parse_flags(
             flags[a] = args[i + 1]
             i += 1
         elif a.startswith("--"):
-            raise SystemExit(f"Unknown flag: {a}")
+            hint = _FLAG_HINTS.get(a)
+            raise SystemExit(f"Unknown flag: {a}" + (f"\n{hint}" if hint else ""))
         else:
             positional.append(a)
         i += 1
@@ -551,6 +689,14 @@ def cmd_boards(args: list[str]) -> None:
 
 
 def _board_show(_args: list[str]) -> None:
+    # `trello board show Roadmap` is the obvious guess, and the board is *not* a
+    # positional anywhere in this CLI — so say where it goes instead of letting
+    # _require_board() answer a question the caller already tried to answer.
+    if _args and not config.get_board_override():
+        raise SystemExit(
+            f"The board is a global flag, not an argument: "
+            f"trello --board {_args[0]!r} board show".replace("'", '"')
+        )
     board_id = _require_board()
     b = api.get_board(board_id)
     if _is_json():
@@ -597,8 +743,15 @@ def _board_set_closed(closed: bool) -> None:
     print(f"{verb} board: {b['name']} ({short_id(b['id'])})")
 
 
+_BOARD_VERBS = {"show": None, "add": None, "rename": None,
+                "archive": None, "restore": None}
+
+
 def cmd_board(args: list[str]) -> None:
     verb = args[0] if args else ""
+    if args and set(args) & _HELP_FLAGS:
+        _print_group_help("board")
+        return
     if verb == "add":
         _board_add(args[1:])
         return
@@ -620,10 +773,9 @@ def cmd_board(args: list[str]) -> None:
     if verb in ("", "show"):
         _board_show(args[1:] if verb == "show" else args)
         return
-    raise SystemExit(
-        f"Unknown board command: {verb}. "
-        "Valid verbs: show, add, rename, archive, restore"
-    )
+    # `board list` is the single commonest wrong guess here — the plural command
+    # `boards` is what lists them, and nothing said so.
+    _unknown_verb("board", _BOARD_VERBS, verb, ls_takes_args=False)
 
 
 def cmd_members(_args: list[str]) -> None:
@@ -692,19 +844,114 @@ def _card_row(c: dict) -> list[str]:
     ]
 
 
+# How many cards a board-wide `card ls` prints before it stops and tells you how
+# to narrow. The whole point of this CLI is not flooding a caller's context, and
+# a board-wide listing is the one read whose size nobody controls — a 400-card
+# board would otherwise cost more context than the task that asked for it. The
+# per-list view is deliberately NOT capped by default: its size is something the
+# caller already chose by naming the column.
+_BOARD_LS_LIMIT = 50
+
+
+def _card_ls_board(board_id: str, archived: bool, limit: int) -> None:
+    """Every card on the board in one table, with the list each one is in.
+
+    `card ls` used to require a list, but "show me the cards on this board" is
+    the first thing anyone asks of a board — asking it without naming a column
+    was the single most common wrong turn in the AX corpus (see ax/). One table
+    with a List column stays greppable and costs less context than a table per
+    column."""
+    lists = api.get_lists(board_id)
+    order = {lst["id"]: i for i, lst in enumerate(lists)}
+    names = {lst["id"]: lst["name"] for lst in lists}
+    cards = api.get_board_cards(
+        board_id, card_filter="closed" if archived else "visible"
+    )
+    cards.sort(key=lambda c: (order.get(c.get("idList"), len(order)), c.get("pos", 0)))
+    total = len(cards)
+    shown = cards if limit <= 0 else cards[:limit]
+
+    # Per-column counts, so a truncated listing still says where the rest are —
+    # it turns "there's more" into "here is which column to ask for next".
+    counts = []
+    for lst in lists:
+        n = sum(1 for c in cards if c.get("idList") == lst["id"])
+        if n:
+            counts.append(f"{lst['name']} {n}")
+    note = (
+        f"Showing {len(shown)} of {total} cards ({' · '.join(counts)}). "
+        f'Narrow with: trello card ls "<list>"   ·   all of them: --limit 0'
+    ) if len(shown) < total else ""
+
+    if _is_json():
+        print_json(shown)
+        # stdout stays a clean JSON array, so the truncation notice goes to
+        # stderr — visible to a human or an agent reading combined output,
+        # invisible to `| jq`.
+        if note:
+            print(note, file=sys.stderr)
+        return
+    if not cards:
+        print("No archived cards." if archived else "No cards on this board.")
+        return
+    rows = [
+        [
+            short_id(c["id"]),
+            truncate(names.get(c.get("idList"), "?"), 18),
+            (c.get("dateLastActivity") or "")[:10],
+            truncate(c["name"], 50),
+            label_str(c.get("labels", [])),
+            due_str(c.get("due"), c.get("dueComplete", False)),
+        ]
+        for c in shown
+    ]
+    print_table(["ID", "List", "Activity", "Name", "Labels", "Due"], rows)
+    if note:
+        print(f"\n  {note}")
+
+
 def _card_ls(args: list[str]) -> None:
-    positional, flags = _parse_flags(args, bool_flags=("--with-comment",))
-    if not positional:
-        raise SystemExit("Usage: trello card ls <list_name_or_id> [--with-comment]")
+    positional, flags = _parse_flags(
+        args, bool_flags=("--with-comment", "--archived"), value_flags=("--limit",)
+    )
     with_comment = bool(flags.get("--with-comment"))
+    archived = bool(flags.get("--archived"))
+    if with_comment and archived:
+        raise SystemExit("--with-comment cannot be combined with --archived.")
+    raw_limit = flags.get("--limit")
+    if raw_limit is not None and not str(raw_limit).lstrip("-").isdigit():
+        raise SystemExit(f"--limit takes a number (0 for no limit), got {raw_limit!r}.")
     board_id = _require_board()
+    if not positional:
+        limit = _BOARD_LS_LIMIT if raw_limit is None else int(raw_limit)
+        _card_ls_board(board_id, archived, limit)
+        return
     list_id = _resolve_list(board_id, " ".join(positional))
-    cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
+    if archived:
+        cards = [
+            c for c in api.get_board_cards(board_id, card_filter="closed")
+            if c.get("idList") == list_id
+        ]
+        cards.sort(key=lambda c: c.get("pos", 0))
+    else:
+        cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
+    # A named column is a size the caller already chose, so this view has no
+    # default cap — but an explicit --limit still has to be honoured, not
+    # silently accepted and ignored.
+    total = len(cards)
+    if raw_limit is not None and int(raw_limit) > 0:
+        cards = cards[: int(raw_limit)]
+    note = f"Showing {len(cards)} of {total} cards. Raise or drop with --limit <n>." \
+        if len(cards) < total else ""
     if _is_json():
         print_json(cards)
+        if note:
+            print(note, file=sys.stderr)
         return
     rows = [_card_row(c) for c in cards]
     print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
+    if note:
+        print(f"\n  {note}")
     if with_comment:
         print()
         print("  Latest comments:")
@@ -918,6 +1165,19 @@ def _card_due(args: list[str]) -> None:
         print(f"Set due date on {short_id(card_id)} to {due[:10]}.")
 
 
+def _split_relative_pos(args: list[str]) -> list[str]:
+    """Accept `pos <id> "after <other>"` as well as `pos <id> after <other>`.
+
+    The help text quotes the relative form — `'after <other_card_id>'` — so a
+    caller quoting it exactly, as agents reliably do, used to get
+    "Invalid position: 'after 8c5d782e'" for following the documentation."""
+    if len(args) >= 2:
+        parts = args[1].split()
+        if len(parts) == 2 and parts[0].lower() in ("after", "before"):
+            return [args[0], parts[0].lower(), parts[1], *args[2:]]
+    return args
+
+
 def _relative_pos(others: list[dict], other_id: str, keyword: str):
     """Compute the new `pos` placing an item before/after `other_id` within the
     sorted `others` list (which excludes the item being moved). Returns a float
@@ -933,6 +1193,7 @@ def _relative_pos(others: list[dict], other_id: str, keyword: str):
 
 
 def _card_pos(args: list[str]) -> None:
+    args = _split_relative_pos(args)
     if len(args) < 2:
         raise SystemExit(
             "Usage: trello card pos <card_id> <position>\n"
@@ -1047,6 +1308,7 @@ def _list_add(args: list[str]) -> None:
 
 
 def _list_pos(args: list[str]) -> None:
+    args = _split_relative_pos(args)
     if len(args) < 2:
         raise SystemExit(
             "Usage: trello list pos <list_id> <position>\n"
@@ -2259,6 +2521,10 @@ def main() -> None:
         args = args[:idx] + args[idx + 2:]
 
     if not args or args[0] in ("-h", "--help", "help"):
+        # `trello help card` / `trello --help card` — the one group, not all ten.
+        if len(args) > 1 and args[1] in COMMANDS:
+            _print_group_help(args[1])
+            return
         print(USAGE)
         return
 
@@ -2266,6 +2532,9 @@ def main() -> None:
     cmd_func = COMMANDS.get(cmd_name)
     if not cmd_func:
         print(f"Unknown command: {cmd_name}")
+        near = difflib.get_close_matches(cmd_name, COMMANDS, n=3, cutoff=0.6)
+        if near:
+            print("Did you mean: " + ", ".join(near))
         print(USAGE)
         sys.exit(1)
 
