@@ -285,6 +285,64 @@ def test_flag_guard_covers_the_other_resolvers(argv, cmd, board):
     assert "positionally" in str(e.value)
 
 
+# ── ...and the free *text* a resolver never sees ─────────────────────
+
+def test_invented_flags_do_not_become_a_label_name(board):
+    """`label add --card X --label Y` created a label *named* "--card X --label
+    Y" and exited 0 — nothing resolves a new name, so the resolver guard above
+    never ran. A wrong write reported as a success."""
+    with pytest.raises(SystemExit) as e:
+        main.cmd_label(["add", "--card", "Add dark mode", "--label", "feature"])
+    assert "--card" in str(e.value)
+    assert not main.api.get_labels(main._require_board())
+
+
+@pytest.mark.parametrize("group,argv", [
+    ("card", ["rename", "<id>", "--name", "Nope"]),
+    ("card", ["desc", "<id>", "--text", "Nope"]),
+    ("card", ["due", "<id>", "--date", "tomorrow"]),
+    ("checklist", ["add", "<id>", "--name", "Steps"]),
+    ("list", ["rename", "Doing", "--name", "Later"]),
+    ("board", ["rename", "--name", "Nope"]),
+    ("comment", ["add", "<id>", "--text", "hi"]),
+])
+def test_free_text_verbs_refuse_an_invented_flag(group, argv, board):
+    be, bid, _lists = board
+    card = [c for c in be.get_board_cards(bid) if c["name"] == "Migrate database"][0]
+    argv = [card["id"] if a == "<id>" else a for a in argv]
+    with pytest.raises(SystemExit) as e:
+        getattr(main, f"cmd_{group}")(argv)
+    msg = str(e.value)
+    assert "positionally" in msg and argv[-2] in msg
+
+
+def test_a_comment_is_not_silently_built_out_of_flags(board):
+    be, bid, _lists = board
+    card = [c for c in be.get_board_cards(bid) if c["name"] == "Migrate database"][0]
+    with pytest.raises(SystemExit):
+        main.cmd_comment(["add", card["id"], "--text", "Blocked on design review."])
+    assert be.get_comments(card["id"]) == []
+
+
+def test_a_dashed_value_is_still_reachable_after_a_separator(board, capsys):
+    """The guard can't be a wall: `--` ends flag parsing everywhere."""
+    main.cmd_label(["add", "--", "--dashed-label"])
+    assert "--dashed-label" in capsys.readouterr().out
+    main.cmd_card(["add", "To Do", "--", "--dashed card"])
+    assert "--dashed card" in capsys.readouterr().out
+
+
+def test_ordinary_text_is_untouched(board, capsys):
+    be, bid, _lists = board
+    card = [c for c in be.get_board_cards(bid) if c["name"] == "Migrate database"][0]
+    main.cmd_comment(["add", card["id"], "Blocked on design review."])
+    main.cmd_card(["rename", card["id"], "Migrate the database"])
+    capsys.readouterr()
+    assert [a["data"]["text"] for a in be.get_comments(card["id"])] \
+        == ["Blocked on design review."]
+    assert be.get_card(card["id"])["name"] == "Migrate the database"
+
+
 def test_quoted_relative_position_is_accepted(board, capsys):
     be, bid, lists = board
     a = be.create_card(lists["To Do"], "A")

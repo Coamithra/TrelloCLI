@@ -208,6 +208,30 @@ They need each other.
   `lstrip("-").isdigit()`, so a negative passed and then read downstream as the
   unlimited case that `0` is documented for.
 
+### F8 — an invented flag became the *data* (found by replaying the corpus)
+
+The round-2 fix stopped a `--flag` reaching a resolver. It did nothing for the
+sink no resolver ever sees: a **name, description or comment body**, which is
+free text joined straight out of `args`. Replaying the corpus turned up a
+command that had been sitting in a passing run the whole time:
+
+```
+$ trello label add --board Roadmap --card "Add dark mode" --label "feature"
+Created label: --card Add dark mode --label feature (09564aed)   # exit 0
+```
+
+`t2-label-set` passed — the agent went on to find `label set` — so neither the
+verifier nor the scoreboard ever saw it. It is the same defect as the three
+above and the worst-shaped one: a wrong write, reported as a success, leaving
+junk on the board.
+
+**Fixed:** `_free_text` guards every free-text sink (label add/edit, card
+rename/desc/due, list/board/checklist rename, checklist + item add, comment
+add/edit, attachment name). Text meant as one value should arrive as one quoted
+argument, so a bare `--token` there is a flag. A value that really does start
+with dashes stays reachable after a bare `--`, which `_parse_flags` now honours
+too, so the escape hatch is the same everywhere.
+
 ### The rerun that says these fixes made it worse (they didn't)
 
 `runs/review-fixes` is the corpus against the fixed CLI, and
@@ -225,7 +249,11 @@ from freshly minted random ids. No command in the run even reaches a line this
 patch changed, so the delta cannot be caused by it.
 
 That replay is cheaper and stronger than a repeat when the question is "did my
-diff do this?" — repeats measure the model, a replay measures the tool.
+diff do this?" — repeats measure the model, a replay measures the tool. It is
+also how F8 above was found and then verified: replaying all 482 commands from
+all three runs against the CLI before and after that patch, exactly one changed
+behaviour — the `label add --card …` line, which now exits 1 instead of
+creating junk.
 
 ## Not fixed, deliberately
 

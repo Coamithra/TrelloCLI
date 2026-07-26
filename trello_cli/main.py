@@ -215,6 +215,35 @@ def _reject_flag_value(ref: str, what: str) -> None:
         )
 
 
+def _free_text(args: list[str], what: str) -> str:
+    """Join `args` into a free-text value, refusing an invented `--flag` in it.
+
+    The same hole as `_reject_flag_value`, one step further along: a command
+    whose value is *text* can't run its arguments through `_parse_flags`, so
+    nothing stopped a made-up flag from becoming part of the text. That is how
+
+        trello label add --card "Add dark mode" --label "feature"
+
+    created a label named `--card Add dark mode --label feature` and exited 0 —
+    a wrong write reported as a success, which is the one outcome an agent
+    caller can't see. Text meant to be one value should arrive as one quoted
+    argument, so a bare `--token` here is a flag; a literal one is still
+    reachable after a `--` separator."""
+    if args and args[0] == "--":  # everything after is literal
+        return " ".join(args[1:])
+    for a in args:
+        if a.startswith("--"):
+            hint = _FLAG_HINTS.get(a)
+            raise SystemExit(
+                f"Expected {what}, got the flag {a}. This CLI takes values "
+                f"positionally — quote the text as one argument."
+                + (f"\n{hint}" if hint else "")
+                + "\nIf the text really does start with dashes, put it after "
+                  "a bare `--`."
+            )
+    return " ".join(args)
+
+
 def _resolve_board_ref(ref: str) -> str:
     """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD).
 
@@ -661,12 +690,17 @@ def _parse_flags(
     `bool_flags` are valueless (presence → True). `value_flags` consume the
     following token as their value. Any other `--`-prefixed token raises
     SystemExit, so a mistyped flag is reported instead of being silently
-    swallowed into a positional argument (e.g. a list/card name)."""
+    swallowed into a positional argument (e.g. a list/card name). A bare `--`
+    ends flag parsing, the same escape hatch `_free_text` offers, so a value
+    that really does start with dashes stays reachable."""
     positional: list[str] = []
     flags: dict[str, str | bool] = {}
     i = 0
     while i < len(args):
         a = args[i]
+        if a == "--":
+            positional.extend(args[i + 1:])
+            break
         if a in bool_flags:
             flags[a] = True
         elif a in value_flags:
@@ -769,7 +803,7 @@ def _board_rename(args: list[str]) -> None:
     if not args:
         raise SystemExit("Usage: trello --board <board> board rename <new name>")
     board_id = _require_board()
-    b = api.update_board(board_id, name=" ".join(args))
+    b = api.update_board(board_id, name=_free_text(args, "a new board name"))
     if _is_json():
         print_json(b)
         return
@@ -1060,7 +1094,7 @@ def _card_rename(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello card rename <card_id> <new_name>")
     card_id = _resolve_card(args[0])
-    new_name = " ".join(args[1:])
+    new_name = _free_text(args[1:], "a new card name")
     api.update_card(card_id, name=new_name)
     print(f"Renamed card {short_id(card_id)} to: {new_name}")
 
@@ -1069,7 +1103,7 @@ def _card_desc(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello card desc <card_id> <description>")
     card_id = _resolve_card(args[0])
-    desc = " ".join(args[1:])
+    desc = _free_text(args[1:], "a description")
     api.update_card(card_id, desc=desc)
     print(f"Updated description for {short_id(card_id)}.")
 
@@ -1204,7 +1238,7 @@ def _card_due(args: list[str]) -> None:
             "        'today', 'tomorrow', or 'clear' to remove."
         )
     card_id = _resolve_card(args[0])
-    due = _parse_due(" ".join(args[1:]))
+    due = _parse_due(_free_text(args[1:], "a due date"))
     api.update_card(card_id, due=due if due is not None else "")
     if due is None:
         print(f"Cleared due date on {short_id(card_id)}.")
@@ -1414,7 +1448,7 @@ def _list_rename(args: list[str]) -> None:
         raise SystemExit("Usage: trello list rename <list_name_or_id> <new_name>")
     board_id = _require_board()
     list_id = _resolve_list(board_id, args[0])
-    new_name = " ".join(args[1:])
+    new_name = _free_text(args[1:], "a new list name")
     api.rename_list(list_id, new_name)
     print(f"Renamed list to: {new_name}")
 
@@ -1453,9 +1487,9 @@ def _label_add(args: list[str]) -> None:
     color = None
     if len(args) >= 2 and args[-1].lower() in TRELLO_COLORS:
         color = args[-1].lower()
-        name = " ".join(args[:-1])
+        name = _free_text(args[:-1], "a label name")
     else:
-        name = " ".join(args)
+        name = _free_text(args, "a label name")
     lb = api.create_label(board_id, name, color)
     print(f"Created label: {lb.get('name', '')} ({short_id(lb['id'])})"
           f"{' [' + lb.get('color', '') + ']' if lb.get('color') else ''}")
@@ -1474,7 +1508,7 @@ def _label_edit(args: list[str]) -> None:
         fields["color"] = rest[-1].lower()
         rest = rest[:-1]
     if rest:
-        fields["name"] = " ".join(rest)
+        fields["name"] = _free_text(rest, "a label name")
     if not fields:
         raise SystemExit("Nothing to update. Provide a new name and/or color.")
     api.update_label(label_id, **fields)
@@ -1548,7 +1582,7 @@ def _checklist_add(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello checklist add <card_id> <name>")
     card_id = _resolve_card(args[0])
-    name = " ".join(args[1:])
+    name = _free_text(args[1:], "a checklist name")
     cl = api.create_checklist(card_id, name)
     print(f"Created checklist: {cl['name']} ({short_id(cl['id'])})")
 
@@ -1567,7 +1601,7 @@ def _checklist_rename(args: list[str]) -> None:
         raise SystemExit("Usage: trello checklist rename <card_id> <checklist> <name>")
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
-    new_name = " ".join(args[2:])
+    new_name = _free_text(args[2:], "a new checklist name")
     api.rename_checklist(cl_id, new_name)
     print(f"Renamed checklist {short_id(cl_id)} to: {new_name}")
 
@@ -1577,7 +1611,7 @@ def _checklist_item_add(args: list[str]) -> None:
         raise SystemExit("Usage: trello checklist item add <card_id> <checklist> <text>")
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
-    name = " ".join(args[2:])
+    name = _free_text(args[2:], "item text")
     it = api.add_checkitem(cl_id, name)
     print(f"Added item: {it['name']} ({short_id(it['id'])})")
 
@@ -1598,7 +1632,7 @@ def _checklist_item_rename(args: list[str]) -> None:
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
     item_id = _resolve_checkitem(card_id, cl_id, args[2])
-    new_name = " ".join(args[3:])
+    new_name = _free_text(args[3:], "new item text")
     api.update_checkitem(card_id, item_id, name=new_name)
     print(f"Renamed item {short_id(item_id)} to: {new_name}")
 
@@ -1650,7 +1684,7 @@ def _comment_add(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello comment add <card_id> <text>")
     card_id = _resolve_card(args[0])
-    api.add_comment(card_id, " ".join(args[1:]))
+    api.add_comment(card_id, _free_text(args[1:], "comment text"))
     print("Comment added.")
 
 
@@ -1683,7 +1717,7 @@ def _comment_edit(args: list[str]) -> None:
         raise SystemExit("Usage: trello comment edit <card_id> <comment_id> <new_text>")
     card_id = _resolve_card(args[0])
     comment_id = _resolve_comment(card_id, args[1])
-    api.update_comment(comment_id, " ".join(args[2:]))
+    api.update_comment(comment_id, _free_text(args[2:], "comment text"))
     print(f"Comment {short_id(comment_id)} updated.")
 
 
@@ -1747,7 +1781,7 @@ def _attachment_add(args: list[str]) -> None:
         )
     card_id = _resolve_card(args[0])
     source = args[1]
-    name = " ".join(args[2:]) if len(args) > 2 else None
+    name = _free_text(args[2:], "an attachment name") if len(args) > 2 else None
     if source.startswith(("http://", "https://")):
         a = api.add_attachment_url(card_id, source, name=name)
     else:
