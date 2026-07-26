@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import subprocess
@@ -97,12 +98,22 @@ Workflow:
 
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
-  card ls <list> [--with-comment]      Show cards in a list (Activity column;
-                                       --with-comment adds latest comment)
+  card ls [<list>] [--with-comment]    Show cards. With a list: that column.
+          [--archived] [--limit <n>]   Without one: every card on the board,
+                                       with a List column, capped at 50 to keep
+                                       big boards from flooding your context
+                                       (the footer says what was left out and
+                                       which column to ask for; --limit 0 shows
+                                       all). --archived shows archived cards
+                                       instead of open ones (that's how you
+                                       find a card to unarchive)
   card add <list> <name> [desc] Create a card at the top (--bottom to append)
-  card move <card_id> <list>    Move a card to a list
+  card move <card_id> <list>    Move a card to a list (to claim the *top* card of
+                                a list when other agents are racing you, use
+                                `grab` instead — it can't hand out duplicates)
   card archive <card_id>        Archive a card
-  card unarchive <card_id>      Restore an archived card
+  card unarchive <card_id>      Restore an archived card (find it with
+                                `card ls --archived`)
   card rename <card_id> <name>  Rename a card
   card desc <card_id> <text>    Update card description
   card due <card_id> <date>     Set card due date (ISO 2026-05-01,
@@ -188,11 +199,57 @@ Web:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _reject_flag_value(ref: str, what: str) -> None:
+    """Refuse a `--flag` where a value belongs, with a message that says why.
+
+    Commands that take free text can't use `_parse_flags` (the text may itself
+    start with `--`), so an invented flag used to sail through as a positional
+    and surface as nonsense three layers down: `comment add --card "Migrate
+    database"` reported "Card not found with prefix: --card"."""
+    if ref.startswith("--"):
+        hint = _FLAG_HINTS.get(ref)
+        raise SystemExit(
+            f"Expected a {what}, got the flag {ref}. "
+            f"This CLI takes values positionally."
+            + (f"\n{hint}" if hint else "")
+        )
+
+
+def _free_text(args: list[str], what: str) -> str:
+    """Join `args` into a free-text value, refusing an invented `--flag` in it.
+
+    The same hole as `_reject_flag_value`, one step further along: a command
+    whose value is *text* can't run its arguments through `_parse_flags`, so
+    nothing stopped a made-up flag from becoming part of the text. That is how
+
+        trello label add --card "Add dark mode" --label "feature"
+
+    created a label named `--card Add dark mode --label feature` and exited 0 —
+    a wrong write reported as a success, which is the one outcome an agent
+    caller can't see. Text meant to be one value should arrive as one quoted
+    argument, so a bare `--token` here is a flag; a literal one is still
+    reachable after a `--` separator."""
+    if args and args[0] == "--":  # everything after is literal
+        return " ".join(args[1:])
+    for a in args:
+        if a.startswith("--"):
+            hint = _FLAG_HINTS.get(a)
+            raise SystemExit(
+                f"Expected {what}, got the flag {a}. This CLI takes values "
+                f"positionally — quote the text as one argument."
+                + (f"\n{hint}" if hint else "")
+                + "\nIf the text really does start with dashes, put it after "
+                  "a bare `--`."
+            )
+    return " ".join(args)
+
+
 def _resolve_board_ref(ref: str) -> str:
     """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD).
 
     Includes archived boards so an archived board can still be addressed (e.g. to
     `board restore` or `board show` it) — `get_boards()` alone hides them."""
+    _reject_flag_value(ref, "board name or ID")
     boards = api.get_boards(include_closed=True)
     # Exact ID match
     for b in boards:
@@ -227,6 +284,7 @@ def _require_board() -> str:
 
 def _resolve_list(board_id: str, name_or_id: str) -> str:
     """Resolve a list name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "list name or ID")
     lists = api.get_lists(board_id)
     # Exact ID
     for lst in lists:
@@ -259,6 +317,7 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
 
 def _resolve_card(card_id_prefix: str, include_closed: bool = False) -> str:
     """Resolve a card ID prefix to a full card ID by searching the active board."""
+    _reject_flag_value(card_id_prefix, "card ID")
     # A full 24-char ID: validate it belongs to the current board (when one is
     # set) instead of trusting it blindly — a foreign/deleted id then gets a clean
     # "Card not found" rather than a cross-board mutation or a raw 404 traceback.
@@ -315,6 +374,7 @@ def _resolve_comment(card_id: str, comment_id_prefix: str) -> str:
 
 def _resolve_checklist(card_id: str, name_or_id: str) -> str:
     """Resolve a checklist name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "checklist name or ID")
     checklists = api.get_checklists(card_id)
     # Exact ID
     for cl in checklists:
@@ -390,6 +450,7 @@ TRELLO_COLORS = {
 
 def _resolve_label(board_id: str, name_or_id: str) -> str:
     """Resolve a label name (case-insensitive prefix) or ID prefix."""
+    _reject_flag_value(name_or_id, "label name or ID")
     labels = api.get_labels(board_id)
     # Exact ID
     for lb in labels:
@@ -423,6 +484,7 @@ def _resolve_label(board_id: str, name_or_id: str) -> str:
 def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     """Resolve an attachment by ID, ID prefix, or case-insensitive name prefix.
     Returns the full attachment dict (callers need its url/isUpload/mimeType)."""
+    _reject_flag_value(name_or_id, "attachment name or ID")
     atts = api.get_attachments(card_id)
     # Exact ID
     for a in atts:
@@ -453,6 +515,130 @@ def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     raise SystemExit(f"Attachment not found: {name_or_id}")
 
 
+_HELP_FLAGS = {"-h", "--help"}
+# The bare word `help` only reads as a help request where a *verb* belongs.
+# Scanning every position for it made `card add "To Do" help` (a card named
+# "help") print the usage and exit 0 — a write silently turned into a no-op that
+# still looked like a success, which is the one thing an agent caller can't see.
+_HELP_WORDS = _HELP_FLAGS | {"help"}
+
+
+def _wants_help(args: list[str], subcmds: dict) -> bool:
+    """True when `args` asks for help, rather than carrying one of these as text.
+
+    Either the first argument is a help word, or the last is a help *flag* and
+    the first is a real verb (`card ls --help`, `comment add <id> --help`)."""
+    if not args:
+        return False
+    if args[0] in _HELP_WORDS:
+        return True
+    return args[-1] in _HELP_FLAGS and args[0] in subcmds
+
+
+# Wrong-but-reasonable verbs, and where the thing they wanted actually lives.
+# Every entry here was an actual first guess made by a cold agent (see ax/):
+# the noun groups don't nest, so `card comment` and `list cards` read as
+# perfectly sensible commands right up until they aren't.
+_VERB_HINTS = {
+    ("card", "comment"): "trello comment add <card_id> <text>",
+    ("card", "comments"): "trello card show <card_id>",
+    ("card", "label"): "trello label set <card_id> <label>",
+    ("card", "checklist"): "trello checklist add <card_id> <name>",
+    ("card", "attachment"): "trello attachment add <card_id> <url>",
+    ("card", "attach"): "trello attachment add <card_id> <url>",
+    ("card", "create"): "trello card add <list> <name>",
+    ("card", "delete"): "trello card archive <card_id>",
+    ("card", "assign"): "trello card mine (this CLI is single-user)",
+    ("board", "list"): "trello boards",
+    ("board", "ls"): "trello boards",
+    ("board", "cards"): "trello card ls",
+    ("board", "delete"): "trello board archive (or `local rm <board> --yes`)",
+    ("list", "cards"): "trello card ls <list>",
+    ("list", "card"): "trello card ls <list>",
+    ("list", "delete"): "trello list archive <list>",
+    ("label", "delete"): "trello label delete <label>",
+    ("comment", "list"): "trello comment ls <card_id>",
+}
+
+# Words that are a verb *somewhere* in this CLI. When one shows up where a group
+# expects a verb, the caller meant it as a verb — so say so, rather than letting
+# the bare-noun `ls` fallback swallow it and fail three layers down with
+# "List not found: comment Migrate database Blocked on design review."
+_VERB_WORDS = {
+    "add", "archive", "assign", "attach", "attachment", "attachments", "board",
+    "boards", "card", "cards", "check", "checklist", "checklists", "comment",
+    "comments", "create", "del", "delete", "desc", "describe", "download",
+    "due", "edit", "item", "items", "label", "labels", "list", "lists", "ls",
+    "mine", "move", "new", "open", "pos", "position", "remove", "rename",
+    "reorder", "restore", "rm", "set", "show", "uncheck", "unarchive", "unset",
+    "update",
+}
+
+# What else a caller in this group probably needs to know about.
+_SEE_ALSO = {
+    "card": (
+        "`grab --from <list> --to <list>` claims the top card of a list atomically\n"
+        "          (use it instead of `card ls` + `card move` when other agents are\n"
+        "          working the same board); comments, labels, checklists and\n"
+        "          attachments are their own noun groups and all take a <card_id>."
+    ),
+    "list": "`card ls <list>` shows the cards in a column.",
+    "board": "`--board <name_or_id>` picks the board for every other command.",
+    "label": "`label set <card_id> <label>` puts a board label on a card.",
+    "comment": "`card show <card_id>` already prints a card's comments.",
+}
+
+
+def _usage_section(group: str) -> str:
+    """The USAGE lines describing one noun group (plus its plural, so
+    `board --help` also turns up `boards`)."""
+    head = group.split()[0]
+    wanted = {head, head + "s"}
+    out: list[str] = []
+    keep = False
+    for line in USAGE.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            keep = False
+            continue
+        if line.startswith("  ") and not line.startswith("   "):
+            keep = stripped.split()[0] in wanted
+        if keep:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _print_group_help(group: str) -> None:
+    """`trello card --help` — the section of USAGE that group owns.
+
+    Agents reach for `<noun> --help` before they reach for the top-level help;
+    answering that with "Unknown flag: --help" burns a turn and teaches nothing."""
+    body = _usage_section(group)
+    if not body:
+        print(USAGE)
+        return
+    print(f"Usage: trello [--board <name_or_id>] [--json] {group} <verb> [args]")
+    print()
+    print(body)
+    see = _SEE_ALSO.get(group.split()[0])
+    if see:
+        print(f"\nSee also: {see}")
+
+
+def _unknown_verb(group: str, subcmds: dict, verb: str, ls_takes_args: bool) -> None:
+    verbs = ", ".join(subcmds)
+    lines = [f"Unknown {group} command: {verb}. Valid verbs: {verbs}"]
+    hint = _VERB_HINTS.get((group, verb.lower()))
+    if hint is None and verb.lower() in ("list", "ls") and "ls" in subcmds:
+        hint = f"trello {group} ls"
+    if hint:
+        lines.append(f"Did you mean: {hint}")
+    if ls_takes_args:
+        lines.append(f'If {verb!r} is a name, not a verb: trello {group} ls "{verb}"')
+    lines.append(f"Full help: trello {group} --help")
+    raise SystemExit("\n".join(lines))
+
+
 def _dispatch(group: str, subcmds: dict, args: list[str],
               ls_takes_args: bool = False) -> None:
     """Dispatch a noun-group subcommand.
@@ -460,17 +646,38 @@ def _dispatch(group: str, subcmds: dict, args: list[str],
     A bare noun (no args) falls back to `ls`. When args are present but the first
     isn't a known verb, only fall back to `ls` if `ls` actually *consumes* those
     args (e.g. `card ls <list>`); otherwise the args would be silently ignored —
-    a typo'd verb like `list renmae ...` — so error instead of a false success."""
+    a typo'd verb like `list renmae ...` — so error instead of a false success.
+    A first arg that is a verb *elsewhere* in the CLI never falls through either,
+    however much `ls` would accept it."""
+    if _wants_help(args, subcmds):
+        _print_group_help(group)
+        return
     if args and args[0] in subcmds:
         subcmds[args[0]](args[1:])
         return
+    if args and args[0].lower() in _VERB_WORDS:
+        _unknown_verb(group, subcmds, args[0], ls_takes_args)
     if "ls" in subcmds and (not args or ls_takes_args):
         subcmds["ls"](args)
         return
-    verbs = ", ".join(subcmds)
     if args:
-        raise SystemExit(f"Unknown {group} command: {args[0]}. Valid verbs: {verbs}")
-    raise SystemExit(f"Usage: trello {group} <{verbs}> [args]")
+        _unknown_verb(group, subcmds, args[0], ls_takes_args)
+    raise SystemExit(f"Usage: trello {group} <{', '.join(subcmds)}> [args]")
+
+
+# Flags agents invent because every other CLI has them. Naming the positional
+# form costs one line and saves a turn.
+_FLAG_HINTS = {
+    "--list": 'The list is positional: trello card ls "To Do"',
+    "--card": "The card is positional: trello card show <card_id>",
+    "--name": "The name is positional, e.g. trello card add <list> <name>",
+    "--all": "For archived cards use --archived; for archived boards, boards --all",
+    "--assigned-to": "This CLI is single-user: trello card mine",
+    "--assignee": "This CLI is single-user: trello card mine",
+    "--filter": "Filter by column instead: trello card ls <list>",
+    "--limit": "`card ls` takes --limit <n>; elsewhere counts are positional, "
+               "e.g. trello activity 20",
+}
 
 
 def _parse_flags(
@@ -483,12 +690,17 @@ def _parse_flags(
     `bool_flags` are valueless (presence → True). `value_flags` consume the
     following token as their value. Any other `--`-prefixed token raises
     SystemExit, so a mistyped flag is reported instead of being silently
-    swallowed into a positional argument (e.g. a list/card name)."""
+    swallowed into a positional argument (e.g. a list/card name). A bare `--`
+    ends flag parsing, the same escape hatch `_free_text` offers, so a value
+    that really does start with dashes stays reachable."""
     positional: list[str] = []
     flags: dict[str, str | bool] = {}
     i = 0
     while i < len(args):
         a = args[i]
+        if a == "--":
+            positional.extend(args[i + 1:])
+            break
         if a in bool_flags:
             flags[a] = True
         elif a in value_flags:
@@ -497,7 +709,8 @@ def _parse_flags(
             flags[a] = args[i + 1]
             i += 1
         elif a.startswith("--"):
-            raise SystemExit(f"Unknown flag: {a}")
+            hint = _FLAG_HINTS.get(a)
+            raise SystemExit(f"Unknown flag: {a}" + (f"\n{hint}" if hint else ""))
         else:
             positional.append(a)
         i += 1
@@ -551,6 +764,16 @@ def cmd_boards(args: list[str]) -> None:
 
 
 def _board_show(_args: list[str]) -> None:
+    # `trello board show Roadmap` is the obvious guess, and the board is *not* a
+    # positional anywhere in this CLI — so say where it goes instead of letting
+    # _require_board() answer a question the caller already tried to answer.
+    # This fires whenever a name was given, override or not: with one set, the
+    # positional used to be dropped silently and a *different* board reported.
+    if _args:
+        raise SystemExit(
+            f"The board is a global flag, not an argument: "
+            f"trello --board {_args[0]!r} board show".replace("'", '"')
+        )
     board_id = _require_board()
     b = api.get_board(board_id)
     if _is_json():
@@ -580,7 +803,7 @@ def _board_rename(args: list[str]) -> None:
     if not args:
         raise SystemExit("Usage: trello --board <board> board rename <new name>")
     board_id = _require_board()
-    b = api.update_board(board_id, name=" ".join(args))
+    b = api.update_board(board_id, name=_free_text(args, "a new board name"))
     if _is_json():
         print_json(b)
         return
@@ -597,8 +820,15 @@ def _board_set_closed(closed: bool) -> None:
     print(f"{verb} board: {b['name']} ({short_id(b['id'])})")
 
 
+_BOARD_VERBS = {"show": None, "add": None, "rename": None,
+                "archive": None, "restore": None}
+
+
 def cmd_board(args: list[str]) -> None:
     verb = args[0] if args else ""
+    if _wants_help(args, _BOARD_VERBS):
+        _print_group_help("board")
+        return
     if verb == "add":
         _board_add(args[1:])
         return
@@ -620,10 +850,9 @@ def cmd_board(args: list[str]) -> None:
     if verb in ("", "show"):
         _board_show(args[1:] if verb == "show" else args)
         return
-    raise SystemExit(
-        f"Unknown board command: {verb}. "
-        "Valid verbs: show, add, rename, archive, restore"
-    )
+    # `board list` is the single commonest wrong guess here — the plural command
+    # `boards` is what lists them, and nothing said so.
+    _unknown_verb("board", _BOARD_VERBS, verb, ls_takes_args=False)
 
 
 def cmd_members(_args: list[str]) -> None:
@@ -692,19 +921,118 @@ def _card_row(c: dict) -> list[str]:
     ]
 
 
+# How many cards a board-wide `card ls` prints before it stops and tells you how
+# to narrow. The whole point of this CLI is not flooding a caller's context, and
+# a board-wide listing is the one read whose size nobody controls — a 400-card
+# board would otherwise cost more context than the task that asked for it. The
+# per-list view is deliberately NOT capped by default: its size is something the
+# caller already chose by naming the column.
+_BOARD_LS_LIMIT = 50
+
+
+def _card_ls_board(board_id: str, archived: bool, limit: int) -> None:
+    """Every card on the board in one table, with the list each one is in.
+
+    `card ls` used to require a list, but "show me the cards on this board" is
+    the first thing anyone asks of a board — asking it without naming a column
+    was the single most common wrong turn in the AX corpus (see ax/). One table
+    with a List column stays greppable and costs less context than a table per
+    column."""
+    lists = api.get_lists(board_id)
+    order = {lst["id"]: i for i, lst in enumerate(lists)}
+    names = {lst["id"]: lst["name"] for lst in lists}
+    cards = api.get_board_cards(
+        board_id, card_filter="closed" if archived else "visible"
+    )
+    cards.sort(key=lambda c: (order.get(c.get("idList"), len(order)), c.get("pos", 0)))
+    total = len(cards)
+    shown = cards if limit <= 0 else cards[:limit]
+
+    # Per-column counts, so a truncated listing still says where the rest are —
+    # it turns "there's more" into "here is which column to ask for next".
+    counts = []
+    for lst in lists:
+        n = sum(1 for c in cards if c.get("idList") == lst["id"])
+        if n:
+            counts.append(f"{lst['name']} {n}")
+    note = (
+        f"Showing {len(shown)} of {total} cards ({' · '.join(counts)}). "
+        f'Narrow with: trello card ls "<list>"   ·   all of them: --limit 0'
+    ) if len(shown) < total else ""
+
+    if _is_json():
+        print_json(shown)
+        # stdout stays a clean JSON array, so the truncation notice goes to
+        # stderr — visible to a human or an agent reading combined output,
+        # invisible to `| jq`.
+        if note:
+            print(note, file=sys.stderr)
+        return
+    if not cards:
+        print("No archived cards." if archived else "No cards on this board.")
+        return
+    rows = [
+        [
+            short_id(c["id"]),
+            truncate(names.get(c.get("idList"), "?"), 18),
+            (c.get("dateLastActivity") or "")[:10],
+            truncate(c["name"], 50),
+            label_str(c.get("labels", [])),
+            due_str(c.get("due"), c.get("dueComplete", False)),
+        ]
+        for c in shown
+    ]
+    print_table(["ID", "List", "Activity", "Name", "Labels", "Due"], rows)
+    if note:
+        print(f"\n  {note}")
+
+
 def _card_ls(args: list[str]) -> None:
-    positional, flags = _parse_flags(args, bool_flags=("--with-comment",))
-    if not positional:
-        raise SystemExit("Usage: trello card ls <list_name_or_id> [--with-comment]")
+    positional, flags = _parse_flags(
+        args, bool_flags=("--with-comment", "--archived"), value_flags=("--limit",)
+    )
     with_comment = bool(flags.get("--with-comment"))
+    archived = bool(flags.get("--archived"))
+    if with_comment and archived:
+        raise SystemExit("--with-comment cannot be combined with --archived.")
+    raw_limit = flags.get("--limit")
+    # `.isdigit()` and not `lstrip("-").isdigit()`: a negative used to pass here
+    # and then read as "no limit" downstream, which is what 0 is documented for.
+    if raw_limit is not None and not str(raw_limit).isdigit():
+        raise SystemExit(
+            f"--limit takes a number of 0 or more (0 for no limit), got {raw_limit!r}."
+        )
     board_id = _require_board()
+    if not positional:
+        limit = _BOARD_LS_LIMIT if raw_limit is None else int(raw_limit)
+        _card_ls_board(board_id, archived, limit)
+        return
     list_id = _resolve_list(board_id, " ".join(positional))
-    cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
+    if archived:
+        cards = [
+            c for c in api.get_board_cards(board_id, card_filter="closed")
+            if c.get("idList") == list_id
+        ]
+        cards.sort(key=lambda c: c.get("pos", 0))
+    else:
+        cards = api.get_cards_in_list(list_id, with_latest_comment=with_comment)
+    # A named column is a size the caller already chose, so this view has no
+    # default cap — but an explicit --limit still has to be honoured, not
+    # silently accepted and ignored.
+    total = len(cards)
+    if raw_limit is not None and int(raw_limit) > 0:
+        cards = cards[: int(raw_limit)]
+    note = f"Showing {len(cards)} of {total} cards. Raise or drop with --limit <n>." \
+        if len(cards) < total else ""
     if _is_json():
         print_json(cards)
+        if note:
+            print(note, file=sys.stderr)
         return
     rows = [_card_row(c) for c in cards]
     print_table(["ID", "Activity", "Name", "Labels", "Due"], rows)
+    if note:
+        print(f"\n  {note}")
     if with_comment:
         print()
         print("  Latest comments:")
@@ -766,7 +1094,7 @@ def _card_rename(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello card rename <card_id> <new_name>")
     card_id = _resolve_card(args[0])
-    new_name = " ".join(args[1:])
+    new_name = _free_text(args[1:], "a new card name")
     api.update_card(card_id, name=new_name)
     print(f"Renamed card {short_id(card_id)} to: {new_name}")
 
@@ -775,7 +1103,7 @@ def _card_desc(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello card desc <card_id> <description>")
     card_id = _resolve_card(args[0])
-    desc = " ".join(args[1:])
+    desc = _free_text(args[1:], "a description")
     api.update_card(card_id, desc=desc)
     print(f"Updated description for {short_id(card_id)}.")
 
@@ -910,12 +1238,25 @@ def _card_due(args: list[str]) -> None:
             "        'today', 'tomorrow', or 'clear' to remove."
         )
     card_id = _resolve_card(args[0])
-    due = _parse_due(" ".join(args[1:]))
+    due = _parse_due(_free_text(args[1:], "a due date"))
     api.update_card(card_id, due=due if due is not None else "")
     if due is None:
         print(f"Cleared due date on {short_id(card_id)}.")
     else:
         print(f"Set due date on {short_id(card_id)} to {due[:10]}.")
+
+
+def _split_relative_pos(args: list[str]) -> list[str]:
+    """Accept `pos <id> "after <other>"` as well as `pos <id> after <other>`.
+
+    The help text quotes the relative form — `'after <other_card_id>'` — so a
+    caller quoting it exactly, as agents reliably do, used to get
+    "Invalid position: 'after 8c5d782e'" for following the documentation."""
+    if len(args) >= 2:
+        parts = args[1].split()
+        if len(parts) == 2 and parts[0].lower() in ("after", "before"):
+            return [args[0], parts[0].lower(), parts[1], *args[2:]]
+    return args
 
 
 def _relative_pos(others: list[dict], other_id: str, keyword: str):
@@ -933,6 +1274,7 @@ def _relative_pos(others: list[dict], other_id: str, keyword: str):
 
 
 def _card_pos(args: list[str]) -> None:
+    args = _split_relative_pos(args)
     if len(args) < 2:
         raise SystemExit(
             "Usage: trello card pos <card_id> <position>\n"
@@ -1047,6 +1389,7 @@ def _list_add(args: list[str]) -> None:
 
 
 def _list_pos(args: list[str]) -> None:
+    args = _split_relative_pos(args)
     if len(args) < 2:
         raise SystemExit(
             "Usage: trello list pos <list_id> <position>\n"
@@ -1105,7 +1448,7 @@ def _list_rename(args: list[str]) -> None:
         raise SystemExit("Usage: trello list rename <list_name_or_id> <new_name>")
     board_id = _require_board()
     list_id = _resolve_list(board_id, args[0])
-    new_name = " ".join(args[1:])
+    new_name = _free_text(args[1:], "a new list name")
     api.rename_list(list_id, new_name)
     print(f"Renamed list to: {new_name}")
 
@@ -1144,9 +1487,9 @@ def _label_add(args: list[str]) -> None:
     color = None
     if len(args) >= 2 and args[-1].lower() in TRELLO_COLORS:
         color = args[-1].lower()
-        name = " ".join(args[:-1])
+        name = _free_text(args[:-1], "a label name")
     else:
-        name = " ".join(args)
+        name = _free_text(args, "a label name")
     lb = api.create_label(board_id, name, color)
     print(f"Created label: {lb.get('name', '')} ({short_id(lb['id'])})"
           f"{' [' + lb.get('color', '') + ']' if lb.get('color') else ''}")
@@ -1165,7 +1508,7 @@ def _label_edit(args: list[str]) -> None:
         fields["color"] = rest[-1].lower()
         rest = rest[:-1]
     if rest:
-        fields["name"] = " ".join(rest)
+        fields["name"] = _free_text(rest, "a label name")
     if not fields:
         raise SystemExit("Nothing to update. Provide a new name and/or color.")
     api.update_label(label_id, **fields)
@@ -1239,7 +1582,7 @@ def _checklist_add(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello checklist add <card_id> <name>")
     card_id = _resolve_card(args[0])
-    name = " ".join(args[1:])
+    name = _free_text(args[1:], "a checklist name")
     cl = api.create_checklist(card_id, name)
     print(f"Created checklist: {cl['name']} ({short_id(cl['id'])})")
 
@@ -1258,7 +1601,7 @@ def _checklist_rename(args: list[str]) -> None:
         raise SystemExit("Usage: trello checklist rename <card_id> <checklist> <name>")
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
-    new_name = " ".join(args[2:])
+    new_name = _free_text(args[2:], "a new checklist name")
     api.rename_checklist(cl_id, new_name)
     print(f"Renamed checklist {short_id(cl_id)} to: {new_name}")
 
@@ -1268,7 +1611,7 @@ def _checklist_item_add(args: list[str]) -> None:
         raise SystemExit("Usage: trello checklist item add <card_id> <checklist> <text>")
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
-    name = " ".join(args[2:])
+    name = _free_text(args[2:], "item text")
     it = api.add_checkitem(cl_id, name)
     print(f"Added item: {it['name']} ({short_id(it['id'])})")
 
@@ -1289,7 +1632,7 @@ def _checklist_item_rename(args: list[str]) -> None:
     card_id = _resolve_card(args[0])
     cl_id = _resolve_checklist(card_id, args[1])
     item_id = _resolve_checkitem(card_id, cl_id, args[2])
-    new_name = " ".join(args[3:])
+    new_name = _free_text(args[3:], "new item text")
     api.update_checkitem(card_id, item_id, name=new_name)
     print(f"Renamed item {short_id(item_id)} to: {new_name}")
 
@@ -1341,7 +1684,7 @@ def _comment_add(args: list[str]) -> None:
     if len(args) < 2:
         raise SystemExit("Usage: trello comment add <card_id> <text>")
     card_id = _resolve_card(args[0])
-    api.add_comment(card_id, " ".join(args[1:]))
+    api.add_comment(card_id, _free_text(args[1:], "comment text"))
     print("Comment added.")
 
 
@@ -1374,7 +1717,7 @@ def _comment_edit(args: list[str]) -> None:
         raise SystemExit("Usage: trello comment edit <card_id> <comment_id> <new_text>")
     card_id = _resolve_card(args[0])
     comment_id = _resolve_comment(card_id, args[1])
-    api.update_comment(comment_id, " ".join(args[2:]))
+    api.update_comment(comment_id, _free_text(args[2:], "comment text"))
     print(f"Comment {short_id(comment_id)} updated.")
 
 
@@ -1438,7 +1781,7 @@ def _attachment_add(args: list[str]) -> None:
         )
     card_id = _resolve_card(args[0])
     source = args[1]
-    name = " ".join(args[2:]) if len(args) > 2 else None
+    name = _free_text(args[2:], "an attachment name") if len(args) > 2 else None
     if source.startswith(("http://", "https://")):
         a = api.add_attachment_url(card_id, source, name=name)
     else:
@@ -2259,6 +2602,10 @@ def main() -> None:
         args = args[:idx] + args[idx + 2:]
 
     if not args or args[0] in ("-h", "--help", "help"):
+        # `trello help card` / `trello --help card` — the one group, not all ten.
+        if len(args) > 1 and args[1] in COMMANDS:
+            _print_group_help(args[1])
+            return
         print(USAGE)
         return
 
@@ -2266,6 +2613,9 @@ def main() -> None:
     cmd_func = COMMANDS.get(cmd_name)
     if not cmd_func:
         print(f"Unknown command: {cmd_name}")
+        near = difflib.get_close_matches(cmd_name, COMMANDS, n=3, cutoff=0.6)
+        if near:
+            print("Did you mean: " + ", ".join(near))
         print(USAGE)
         sys.exit(1)
 

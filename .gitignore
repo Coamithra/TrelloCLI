@@ -8,3 +8,7 @@ build/
 .trees/
 plans/tracker_*.md
 .claude/
+
+# AX runs: keep the run-level evidence (index.md / corpus.md / results.json),
+# not the per-case working dirs — corpus.md already inlines every transcript.
+ax/runs/*/*/

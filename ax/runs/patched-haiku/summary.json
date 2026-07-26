@@ -1,0 +1,177 @@
+{
+  "total": 35,
+  "passed": 35,
+  "pass_rate": 1.0,
+  "calls_total": 121,
+  "calls_budget": 146,
+  "over_budget_runs": 3,
+  "error_runs": 3,
+  "cost_usd": 0.491,
+  "wall_s": 3508.7,
+  "peeked": [],
+  "bypassed_cli": [],
+  "by_tier": {
+    "1": {
+      "n": 10,
+      "passed": 10
+    },
+    "2": {
+      "n": 13,
+      "passed": 13
+    },
+    "3": {
+      "n": 12,
+      "passed": 12
+    }
+  },
+  "by_tag": {
+    "aggregate": {
+      "n": 2,
+      "passed": 2
+    },
+    "ambiguity": {
+      "n": 1,
+      "passed": 1
+    },
+    "attachment": {
+      "n": 1,
+      "passed": 1
+    },
+    "board": {
+      "n": 2,
+      "passed": 2
+    },
+    "board-scope": {
+      "n": 1,
+      "passed": 1
+    },
+    "card": {
+      "n": 7,
+      "passed": 7
+    },
+    "checklist": {
+      "n": 2,
+      "passed": 2
+    },
+    "comment": {
+      "n": 1,
+      "passed": 1
+    },
+    "cross-board": {
+      "n": 1,
+      "passed": 1
+    },
+    "date": {
+      "n": 2,
+      "passed": 2
+    },
+    "discovery": {
+      "n": 5,
+      "passed": 5
+    },
+    "hard": {
+      "n": 2,
+      "passed": 2
+    },
+    "json": {
+      "n": 2,
+      "passed": 2
+    },
+    "label": {
+      "n": 2,
+      "passed": 2
+    },
+    "list": {
+      "n": 3,
+      "passed": 3
+    },
+    "multi": {
+      "n": 5,
+      "passed": 5
+    },
+    "pos": {
+      "n": 2,
+      "passed": 2
+    },
+    "read": {
+      "n": 12,
+      "passed": 12
+    },
+    "resolver": {
+      "n": 4,
+      "passed": 4
+    },
+    "semantic": {
+      "n": 3,
+      "passed": 3
+    },
+    "workflow": {
+      "n": 1,
+      "passed": 1
+    },
+    "write": {
+      "n": 23,
+      "passed": 23
+    }
+  },
+  "first_commands": [
+    [
+      "card ls",
+      13
+    ],
+    [
+      "boards",
+      7
+    ],
+    [
+      "(none)",
+      4
+    ],
+    [
+      "list ls",
+      2
+    ],
+    [
+      "card add",
+      2
+    ],
+    [
+      "labels list",
+      1
+    ],
+    [
+      "card mine",
+      1
+    ],
+    [
+      "list add",
+      1
+    ],
+    [
+      "board add",
+      1
+    ],
+    [
+      "list rename",
+      1
+    ],
+    [
+      "grab \"To",
+      1
+    ],
+    [
+      "updates yesterday",
+      1
+    ]
+  ],
+  "error_classes": [
+    [
+      "unknown board command: list. valid verbs: show, add, rename,",
+      2
+    ],
+    [
+      "not found",
+      1
+    ]
+  ]
+}
