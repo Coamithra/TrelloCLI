@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from trello_cli import main
@@ -151,6 +153,25 @@ def test_grab_prints_claim_id_when_the_backend_supplies_one(cli, capsys, monkeyp
     out = capsys.readouterr().out
     assert "Grabbed: Fix login bug" in out
     assert "Claim: 3f9a1c2d" in out
+
+
+def test_grab_json_carries_the_claim_id(cli, capsys, monkeypatch):
+    """`--json` prints the card dict as-is, so the transient key rides along —
+    an agent parsing JSON must not have to fall back to the formatted output."""
+    _grab_board(cli)
+    real = main.api.grab_top_card
+
+    def _claimed(src, dst):
+        got = real(src, dst)
+        assert got is not None
+        return {**got, "claimId": "3f9a1c2d"}
+
+    monkeypatch.setattr(main.api, "grab_top_card", _claimed)
+    monkeypatch.setattr(main, "_JSON_MODE", True)
+
+    main.cmd_grab([])
+
+    assert json.loads(capsys.readouterr().out)["claimId"] == "3f9a1c2d"
 
 
 def test_grab_omits_claim_line_without_a_claim(cli, capsys):

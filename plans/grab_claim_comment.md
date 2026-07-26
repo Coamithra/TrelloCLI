@@ -97,8 +97,10 @@ forwards whatever the server's backend produced — JSON round-trips the extra k
   `Claim:` line and no `claimId` key. The remote path cannot be exercised (no creds; the
   handshake has never been verified against live Trello — pre-existing, stated in CLAUDE.md),
   so its proof is unit-level.
-- AX gate (CLI-surface change): `python -m ax.runner --cases all --model haiku` then
-  `python -m ax.compare ax/runs/baseline-haiku <new>`.
+- **No AX corpus run.** User's call this session: the corpus rerun is an occasional
+  ergonomics sweep, not a per-card gate — one extra output line does not warrant fanning the
+  whole corpus across billed cold `claude -p` runs. CLAUDE.md's verification-gate bullet is
+  amended to say so, and `tests/test_ax_affordances.py` remains the per-change guard.
 
 ## Out of scope
 

@@ -102,9 +102,12 @@ def test_claim_text_explains_itself_to_a_cold_reader():
     """The winner's comment is never retracted, so it must say what it is."""
     body = trello_mod._claim_text("abc123")
     assert "trello grab" in body
-    assert "Claim: abc123" in body          # points at what the grab printed
+    assert "Claim:" in body                 # points at what the grab printed
     assert "in-progress list" in body       # where the real claim lives
     assert f"{int(trello_mod._GRAB_CLAIM_WINDOW.total_seconds())}s" in body
+    # It lands on every grabbed card forever, and `card show` pads continuation
+    # lines — one trailing line, not a paragraph.
+    assert len(body.splitlines()) == 2
 
 
 def test_won_claim_ranks_rival_posting_the_verbose_body():
@@ -117,9 +120,10 @@ def test_won_claim_ranks_rival_posting_the_verbose_body():
     assert be._won_claim("c", "mine", my) is False
 
 
-def _grab_backend(monkeypatch, cards, *, wins):
+def _grab_backend(monkeypatch, cards, *, wins, get_card_fails=False):
     """A TrelloBackend with the network stubbed out, recording the comments it
-    posts. `wins` is consumed one adjudication at a time."""
+    posts and the moves it makes. `wins` is consumed one adjudication at a
+    time; `get_card_fails` simulates a blip on the post-win read-back."""
     monkeypatch.setattr(trello_mod.time, "sleep", lambda *_: None)
     be = TrelloBackend()
     be._auth = ("k", "t")
@@ -142,8 +146,11 @@ def _grab_backend(monkeypatch, cards, *, wins):
     be.add_comment = _add_comment  # type: ignore
     be.delete_comment = lambda action_id: None  # type: ignore
     be._won_claim = lambda *a, **k: verdicts.pop(0)  # type: ignore
-    be.get_card = lambda card_id: next(  # type: ignore
-        {**c, "desc": "full"} for c in cards if c["id"] == card_id)
+    def _get_card(card_id):
+        if get_card_fails:
+            raise SystemExit(f"Not found: GET /cards/{card_id}")
+        return next({**c, "desc": "full"} for c in cards if c["id"] == card_id)
+    be.get_card = _get_card  # type: ignore
     return be, posted, moved
 
 
@@ -160,22 +167,41 @@ def test_grab_win_returns_the_id_it_posted(monkeypatch):
     assert got["claimId"] == trello_mod._parse_claim(posted[0])
 
 
-def test_grab_claim_id_survives_a_lost_first_card(monkeypatch):
-    """One claim id spans the whole grab; a loss on card 1 then a win on card 2
-    still reports the id that is actually on the card we came away with."""
+def test_grab_after_a_lost_card_reports_only_the_won_claim(monkeypatch):
+    """Each attempt mints its own claim id. Retracting a lost claim is only
+    best-effort, so reusing one id would risk printing an id that is also
+    sitting on a card the rival owns."""
     cards = [
         {"id": "c1", "name": "First", "idList": "src", "pos": 1},
         {"id": "c2", "name": "Second", "idList": "src", "pos": 2},
     ]
-    be, posted, _ = _grab_backend(monkeypatch, cards, wins=[False, True])
+    be, posted, moved = _grab_backend(monkeypatch, cards, wins=[False, True])
 
     got = be.grab_top_card("src", "dst")
 
     assert got is not None and got["id"] == "c2"
     assert got["claimId"] == trello_mod._parse_claim(posted[1])
+    assert got["claimId"] != trello_mod._parse_claim(posted[0])
+    # Phase 2: a LOST card is never moved back to the source list — the winner
+    # owns it now.
+    assert moved == [("c1", "dst"), ("c2", "dst")]
 
 
-def test_grab_empty_list_has_no_claim(monkeypatch):
+def test_grab_win_reports_the_claim_even_if_the_readback_blips(monkeypatch):
+    """A failed post-win `get_card` falls back to the card we already hold; the
+    claim id must survive that path too — it is where the caller most needs it."""
+    cards = [{"id": "c1", "name": "First", "idList": "src", "pos": 1}]
+    be, posted, _ = _grab_backend(monkeypatch, cards, wins=[True],
+                                  get_card_fails=True)
+
+    got = be.grab_top_card("src", "dst")
+
+    assert got is not None and got["name"] == "First"
+    assert "desc" not in got                     # the fallback, not the re-fetch
+    assert got["claimId"] == trello_mod._parse_claim(posted[0])
+
+
+def test_grab_empty_list_returns_none(monkeypatch):
     be, _, _ = _grab_backend(monkeypatch, [], wins=[])
     assert be.grab_top_card("src", "dst") is None
 

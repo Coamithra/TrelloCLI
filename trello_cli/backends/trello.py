@@ -90,13 +90,14 @@ def _claim_text(claim_id: str) -> str:
     printed back by `grab` (`claimId` on the returned card) so the caller that
     posted it can recognize its own."""
     window = int(_GRAB_CLAIM_WINDOW.total_seconds())
+    # One trailing line, not a paragraph: this lands permanently on every grabbed
+    # card and `card show` pads continuation lines, so keep it short.
     return (
-        f"{_CLAIM_MARKER}{claim_id}\n\n"
-        f"(Automated bookkeeping posted by `trello grab`. The grab prints this id"
-        f" back to whoever ran it, so if your grab output says `Claim: {claim_id}`,"
-        f" this claim is yours. The real claim is the card sitting in the"
-        f" in-progress list — this comment only settles ties between simultaneous"
-        f" grabbers, and one older than {window}s settles nothing at all.)"
+        f"{_CLAIM_MARKER}{claim_id}\n"
+        "(`trello grab` bookkeeping, not a person's hold — the grab printed this"
+        " id back to whoever ran it as `Claim:`. The real claim is the card"
+        f" sitting in the in-progress list; a claim older than {window}s settles"
+        " nothing.)"
     )
 
 
@@ -313,9 +314,13 @@ class TrelloBackend(Backend):
         #     rollback trigger); on a loss the winner owns it, so we only retract
         #     our own claim and move to the next card.
         # NOTE: not verified against live Trello (see module docstring).
-        claim_id = secrets.token_hex(4)
         lost: set[str] = set()
         for _ in range(_GRAB_MAX_ATTEMPTS):
+            # A fresh id per attempt. Retracting a lost claim is best-effort (it
+            # only warns on failure), so reusing one id across attempts could
+            # leave the id we ultimately *print* sitting on a card a rival owns
+            # — the exact misattribution `claimId` exists to prevent.
+            claim_id = secrets.token_hex(4)
             cards = sorted(self.get_cards_in_list(source_list_id),
                            key=lambda c: c.get("pos", 0))
             candidates = [c for c in cards if c["id"] not in lost]
