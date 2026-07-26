@@ -26,10 +26,11 @@ from .base import Backend
 BASE = "https://api.trello.com/1"
 
 # `grab_top_card` claim-handshake tunables (Trello has no atomic primitive, so we
-# fake it like CONTRIBUTING.md). The marker phrase (em-dash and all) must match
-# CONTRIBUTING's exactly — other agents and hand-run claims scan for this string.
-# NOTE: this handshake is NOT verified against live Trello (no creds here); it
-# mirrors CONTRIBUTING.md's known-good algorithm. See CLAUDE.md.
+# fake it like CONTRIBUTING.md). The marker phrase (em-dash and all) is the
+# adjudication key — every claim comment, ours or a rival's, is matched on this
+# exact prefix, so it must never change. Anything appended AFTER the id is free
+# (see `_claim_text`). NOTE: this handshake is NOT verified against live Trello
+# (no creds here); it mirrors CONTRIBUTING.md's known-good algorithm. See CLAUDE.md.
 _CLAIM_MARKER = "I am doing this now — claim "
 _GRAB_WAIT_RANGE = (10.0, 30.0)   # randomized blocking wait, seconds
 _GRAB_CLAIM_WINDOW = timedelta(seconds=60)  # ignore claims older than this (stale)
@@ -78,12 +79,37 @@ def _parse_claim(text: str) -> str | None:
 
     A claim comment must *start* with the exact marker (so a comment merely
     quoting the phrase mid-sentence isn't mistaken for a claim) and be followed
-    by a non-empty id token."""
+    by a non-empty id token. Everything after that first token is ignored, which
+    is what lets `_claim_text` append an explanation for human/agent readers
+    without breaking adjudication — in either direction, since a rival running an
+    older build posts the bare id and still parses."""
     body = text.strip()
     if not body.startswith(_CLAIM_MARKER):
         return None
     rest = body[len(_CLAIM_MARKER):].split()
     return rest[0] if rest else None
+
+
+def _claim_text(claim_id: str) -> str:
+    """The body of a claim comment: the marker + id that `_parse_claim` reads,
+    then an explanation of what the comment is.
+
+    The winner's claim is never retracted — deleting it would let a competitor
+    still inside its own wait see no earlier claim and also declare a win — so it
+    lingers on the card forever. A later reader must therefore be able to tell
+    from the comment alone that it is machinery, not a person's hold; the id is
+    printed back by `grab` (`claimId` on the returned card) so the caller that
+    posted it can recognize its own."""
+    window = int(_GRAB_CLAIM_WINDOW.total_seconds())
+    # One trailing line, not a paragraph: this lands permanently on every grabbed
+    # card and `card show` pads continuation lines, so keep it short.
+    return (
+        f"{_CLAIM_MARKER}{claim_id}\n"
+        "(`trello grab` bookkeeping, not a person's hold — the grab printed this"
+        " id back to whoever ran it as `Claim:`. The real claim is the card"
+        f" sitting in the in-progress list; a claim older than {window}s settles"
+        " nothing.)"
+    )
 
 
 class TrelloBackend(Backend):
@@ -354,9 +380,13 @@ class TrelloBackend(Backend):
         #     rollback trigger); on a loss the winner owns it, so we only retract
         #     our own claim and move to the next card.
         # NOTE: not verified against live Trello (see module docstring).
-        claim_id = secrets.token_hex(4)
         lost: set[str] = set()
         for _ in range(_GRAB_MAX_ATTEMPTS):
+            # A fresh id per attempt. Retracting a lost claim is best-effort (it
+            # only warns on failure), so reusing one id across attempts could
+            # leave the id we ultimately *print* sitting on a card a rival owns
+            # — the exact misattribution `claimId` exists to prevent.
+            claim_id = secrets.token_hex(4)
             cards = sorted(self.get_cards_in_list(source_list_id),
                            key=lambda c: c.get("pos", 0))
             candidates = [c for c in cards if c["id"] not in lost]
@@ -369,7 +399,7 @@ class TrelloBackend(Backend):
             self.move_card(card_id, dest_list_id)
             mine: dict | None = None
             try:
-                mine = self.add_comment(card_id, f"{_CLAIM_MARKER}{claim_id}")
+                mine = self.add_comment(card_id, _claim_text(claim_id))
                 my_date = _parse_dt(mine.get("date"))
                 time.sleep(random.uniform(*_GRAB_WAIT_RANGE))
                 won = self._won_claim(card_id, claim_id, my_date)
@@ -385,9 +415,14 @@ class TrelloBackend(Backend):
                 # We own it. A blip reading the full card must NOT roll back;
                 # fall back to the minimal card info we already hold.
                 try:
-                    return self.get_card(card_id)
+                    got = self.get_card(card_id)
                 except SystemExit:
-                    return card
+                    got = card
+                # Hand the claim id back (transient key, never persisted — see
+                # base.py). Our claim comment stays on the card forever, so the
+                # only way the caller can later recognize it as its own is to
+                # have been told the id.
+                return {**got, "claimId": claim_id}
             # Legit loss: the winner owns the card now. Retract our own claim so
             # it doesn't linger, but do NOT move the card back. If the retraction
             # fails, just warn and move on to the next card.
