@@ -408,6 +408,83 @@ by card `6a366ff2`, left open for that decision.
 
 ---
 
+## `search` — native on Trello, a documented approximation locally
+
+`trello search <query>` finds cards by text; `trello boards <query>` filters the board
+list. Search is a **Backend ABC method** (`search_cards`), not a client-side filter over
+`get_board_cards`, because the two backends can genuinely answer it differently and the
+Trello one should not be second-guessed.
+
+**Trello backend** → forwards to native `GET /1/search`, query **verbatim**, so Trello's
+operators keep working exactly as documented. **Local backend** → an in-process scan that
+*mirrors* those semantics rather than inventing its own.
+
+### Why mirror instead of picking our own (simpler) semantics
+
+The obvious design — case-insensitive substring on both backends — was rejected: one
+command must not mean two different things depending on `--backend`. Mirroring makes the
+local store the thing that behaves like Trello, and confines the divergence to a single
+explicit, opt-in flag.
+
+### What was measured
+
+Probed live against a real board (2026-07-26, read-only). Native search:
+
+| query | probing | plain | `partial=true` |
+|---|---|---|---|
+| `scrollbar` / `SCROLLBAR` | title word, case | hit | hit |
+| `crollba` | **mid-word substring** | **miss** | **miss** |
+| `scroll`, `flicker` | word prefix | miss | hit |
+| `Ideally` | desc-only | hit | hit |
+| `respread`, `b61a95ea` | **comment-only** | hit | hit |
+| `scrollbar bananas` | 2nd term absent | miss (AND) | miss |
+| `the` | stopword | many (not stopworded) | many |
+| `-scrollbar` | negation | correct | correct |
+| `is:archived` | operator | **returned OPEN cards** | same |
+| `drop` | plain word | cards not obviously containing it | *more*, different |
+
+So the index covers **name + desc + comments + checklists**, ANDs its terms, honours
+negation — and is **fuzzy and relevance-ranked**. Tokenisation, stemming, ranking, and the
+`partial` parameter itself are **undocumented** (the REST reference hides 11 params,
+`partial` among them; the operator list lives only in the help centre).
+
+### What local duplicates, and what it deliberately doesn't
+
+**Duplicated** (observable rules): field coverage; whole-word matching by default;
+word-prefix under `partial`; AND across terms; `-term` negation; and the operators whose
+data the store actually holds — `name:` `description:` `comment:` `checklist:` (field
+scoping), `list:` `label:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
+
+**Not duplicated** — and this is the whole delta:
+
+- **Relevance ranking and fuzzy expansion.** Unknowable from outside. Local returns board
+  order (list, then `pos`), which beats a score the caller can't see.
+- **`created:` / `sort:created`.** The local store records **no creation time**:
+  `store.new_id()` is `secrets.token_hex(12)`, random, whereas Trello ids encode creation
+  time in their first 8 hex chars. Cards *imported* from Trello keep Trello ids, so this
+  would work for some cards and silently not for others — absent beats inconsistent.
+  (Tracked separately, along with the fact that the web's `newest`/`oldest` column sort is
+  really `dateLastActivity`, not creation.)
+- **`has:cover` / `has:stickers`** — no such concept locally. **`member:`/`@name`** —
+  single-user store. **`board:`** — search is `--board`-scoped.
+
+Unknown operators degrade to literal text rather than erroring, so a query is never
+rejected for using one; the CLI *hints* when a query uses a Trello-only operator on local.
+
+### The one deliberate divergence: `--substring`
+
+Mid-word matching is the thing a word index physically cannot do, so it is **local-only**,
+opt-in, and the Trello backend **refuses** it (flag or `substring:` operator) with a message
+naming `--partial` and `export --to local`. Silently degrading to a word match would return
+plausible results for a query that meant something else — the worst outcome for an agent
+caller. Granularity is available per-query (`--word`/`--partial`/`--substring` defaults) and
+per-term (`word:` / `partial:` / `substring:`), so one query can mix strict and loose terms.
+
+`boards <query>` is plain substring on name (or id prefix) on every backend: board listing
+is client-side everywhere, so there is no remote index to mirror and no divergence to create.
+
+---
+
 ## Risks / open decisions
 
 - **Dropbox conflicts** on multi-machine simultaneous edits -> mitigated by

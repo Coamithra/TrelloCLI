@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import secrets
 import sys
 import time
@@ -36,6 +37,16 @@ _GRAB_CLAIM_WINDOW = timedelta(seconds=60)  # ignore claims older than this (sta
 # to the next). NOT an infinite-loop guard — the loop already ends when the
 # source list drains; this just bounds a pathologically contended list.
 _GRAB_MAX_ATTEMPTS = 50
+
+# `search_cards` tunables. Trello's own `cards_limit` default is 10, which turns
+# "find my card" into a silent miss; ask for the documented maximum instead.
+_SEARCH_LIMIT = 1000
+# Per-term granularity operators (`substring:foo`) are a LOCAL extension — see
+# local.py's operator table. Trello's index has no per-term knob and no substring
+# matching at all, so they're refused here rather than passed up as literal text
+# (which would return plausible-looking wrong results).
+_GRANULARITY_OP_RE = re.compile(r"(?:^|\s)-?(?:word|partial|substring):",
+                                re.IGNORECASE)
 
 # Shared-transport retry tunables.
 _MAX_RETRIES = 3            # attempts beyond the first for 429 / transient errors
@@ -233,6 +244,53 @@ class TrelloBackend(Backend):
             fields="id,name,shortUrl,labels,due,dueComplete,idList,idMembers,dateLastActivity,pos",
             filter=card_filter,
         )
+
+    def search_cards(self, board_id: str, query: str, *,
+                     list_id: str | None = None, include_closed: bool = False,
+                     partial: bool = False,
+                     substring: bool = False) -> list[dict]:
+        """Board-scoped card search via Trello's native `GET /1/search`.
+
+        The query goes up VERBATIM, so Trello's own operators (`due:`, `label:`,
+        `has:`, `member:`, `sort:`, negation, …) work exactly as documented — this
+        backend deliberately doesn't reimplement them. `partial` is Trello's own
+        parameter (word-prefix matching); it is undocumented in the REST
+        reference but real (verified against the live API).
+
+        `list_id` / `include_closed` are applied as POST-FILTERS rather than via
+        the `list:` / `is:archived` operators: probing showed `is:archived`
+        returning open cards, so the operators aren't trustworthy for control
+        flow even though they're documented. Note that Trello's index appears to
+        cover open cards, so `include_closed` widens nothing here — it does not
+        reach archived cards the way the local backend's does.
+        """
+        if substring or _GRANULARITY_OP_RE.search(query):
+            raise SystemExit(
+                "Substring matching isn't supported on the trello backend: "
+                "Trello's search is a word index, so mid-word matches are "
+                "impossible server-side.\n"
+                "Use --partial for word-prefix matching, or export the board "
+                "(trello export --to local) and search it with --backend local."
+            )
+        params: dict[str, Any] = {
+            "query": query,
+            "idBoards": board_id,
+            "modelTypes": "cards",
+            "card_fields": ("id,name,shortUrl,labels,due,dueComplete,idList,"
+                            "idMembers,dateLastActivity,pos,desc,closed"),
+            # The API's own default is 10 — far too few for "find my card", and
+            # a silent truncation reads as "no such card".
+            "cards_limit": _SEARCH_LIMIT,
+        }
+        if partial:
+            params["partial"] = "true"
+        result = self._get("/search", **params)
+        cards = result.get("cards", []) if isinstance(result, dict) else []
+        if list_id is not None:
+            cards = [c for c in cards if c.get("idList") == list_id]
+        if not include_closed:
+            cards = [c for c in cards if not c.get("closed")]
+        return cards
 
     def get_cards_in_list(self, list_id: str,
                           with_latest_comment: bool = False) -> list[dict]:

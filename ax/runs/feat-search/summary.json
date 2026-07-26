@@ -1,0 +1,269 @@
+{
+  "total": 37,
+  "passed": 36,
+  "pass_rate": 0.973,
+  "calls_total": 155,
+  "calls_budget": 151,
+  "over_budget_runs": 11,
+  "error_runs": 26,
+  "cost_usd": 1.012,
+  "wall_s": 689.5,
+  "peeked": [],
+  "bypassed_cli": [],
+  "by_tier": {
+    "1": {
+      "n": 12,
+      "passed": 11
+    },
+    "2": {
+      "n": 13,
+      "passed": 13
+    },
+    "3": {
+      "n": 12,
+      "passed": 12
+    }
+  },
+  "by_tag": {
+    "aggregate": {
+      "n": 2,
+      "passed": 1
+    },
+    "ambiguity": {
+      "n": 1,
+      "passed": 1
+    },
+    "attachment": {
+      "n": 1,
+      "passed": 1
+    },
+    "board": {
+      "n": 2,
+      "passed": 2
+    },
+    "board-scope": {
+      "n": 1,
+      "passed": 1
+    },
+    "card": {
+      "n": 7,
+      "passed": 7
+    },
+    "checklist": {
+      "n": 2,
+      "passed": 2
+    },
+    "comment": {
+      "n": 1,
+      "passed": 1
+    },
+    "cross-board": {
+      "n": 1,
+      "passed": 1
+    },
+    "date": {
+      "n": 2,
+      "passed": 2
+    },
+    "discovery": {
+      "n": 7,
+      "passed": 7
+    },
+    "hard": {
+      "n": 2,
+      "passed": 2
+    },
+    "json": {
+      "n": 2,
+      "passed": 2
+    },
+    "label": {
+      "n": 2,
+      "passed": 2
+    },
+    "list": {
+      "n": 3,
+      "passed": 3
+    },
+    "multi": {
+      "n": 5,
+      "passed": 5
+    },
+    "pos": {
+      "n": 2,
+      "passed": 2
+    },
+    "read": {
+      "n": 14,
+      "passed": 13
+    },
+    "resolver": {
+      "n": 4,
+      "passed": 4
+    },
+    "search": {
+      "n": 2,
+      "passed": 2
+    },
+    "semantic": {
+      "n": 3,
+      "passed": 3
+    },
+    "workflow": {
+      "n": 1,
+      "passed": 1
+    },
+    "write": {
+      "n": 23,
+      "passed": 23
+    }
+  },
+  "first_commands": [
+    [
+      "boards",
+      7
+    ],
+    [
+      "! search",
+      5
+    ],
+    [
+      "boards roadmap",
+      2
+    ],
+    [
+      "! list",
+      2
+    ],
+    [
+      "card add",
+      2
+    ],
+    [
+      "search \"Refactor",
+      2
+    ],
+    [
+      "search \"Add",
+      2
+    ],
+    [
+      "card ls",
+      2
+    ],
+    [
+      "! activity",
+      1
+    ],
+    [
+      "labels",
+      1
+    ],
+    [
+      "(none)",
+      1
+    ],
+    [
+      "board add",
+      1
+    ],
+    [
+      "search \"Set",
+      1
+    ],
+    [
+      "help comment",
+      1
+    ],
+    [
+      "!",
+      1
+    ],
+    [
+      "list rename",
+      1
+    ],
+    [
+      "! board",
+      1
+    ],
+    [
+      "card show",
+      1
+    ],
+    [
+      "boards |",
+      1
+    ],
+    [
+      "label add",
+      1
+    ],
+    [
+      "! updates",
+      1
+    ]
+  ],
+  "error_classes": [
+    [
+      "unknown command",
+      6
+    ],
+    [
+      "bare usage dump",
+      4
+    ],
+    [
+      "unknown board command: list. valid verbs: show, add, rename,",
+      2
+    ],
+    [
+      "id list activity name labels due -------- ----- ---------- -",
+      2
+    ],
+    [
+      "missing argument",
+      2
+    ],
+    [
+      "2026-07-26 @coami updatecard drop legacy endpoint 2026-07-26",
+      1
+    ],
+    [
+      "not found",
+      1
+    ],
+    [
+      "no board specified",
+      1
+    ],
+    [
+      "id name ------------------------ ----- c2bddbcebe02e6f584fa2",
+      1
+    ],
+    [
+      "unknown flag",
+      1
+    ],
+    [
+      "unknown card command: create. valid verbs: show, ls, add, mo",
+      1
+    ],
+    [
+      "created list: blocked (9eba3b54)",
+      1
+    ],
+    [
+      "board: roadmap id: c062060ed3977d8a1910cb5c url: desc: produ",
+      1
+    ],
+    [
+      "the board is a global flag, not an argument: trello --board ",
+      1
+    ],
+    [
+      "unknown list command: d8f39051ec43292b796f7d72. valid verbs:",
+      1
+    ]
+  ]
+}

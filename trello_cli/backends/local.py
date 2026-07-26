@@ -23,7 +23,7 @@ import mimetypes
 import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -66,6 +66,279 @@ def _locked(method: _F) -> _F:
         with self._lock:
             return method(self, *args, **kwargs)
     return wrapper  # type: ignore[return-value]
+
+
+# --- Search (mirrors Trello's native /1/search; see LocalBackend.search_cards) ---
+
+# Word split for whole-word / prefix matching. Splitting on non-alphanumerics
+# (underscore included) is what makes Trello's observed behaviour fall out: it
+# matches `drop` inside `drag-drop`, and `trello` inside `trello_cli/__main__.py`.
+_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
+
+# A hit's context line is capped so one pathological description (or a pasted
+# log in a comment) can't dump a screenful per result.
+_MATCH_LINE_MAX = 160
+
+
+# Trello's documented search operators, split by how they act on a card.
+#
+# Implemented here because the local store holds the data they need. The
+# deliberate omissions, so nobody re-derives them:
+#   created:, sort:created — local ids are random (store.new_id is
+#     secrets.token_hex), so there is no creation timestamp. Cards imported from
+#     Trello keep Trello ids, which DO encode one, so this would work on some
+#     cards and silently not on others; absent beats inconsistent. (activity.log
+#     could back it later.)
+#   has:cover, has:stickers — no such concept in the local store.
+#   member:/@name — single-user store; every card is "mine" (see `card mine`).
+#   board: — search is --board-scoped; needs cross-board search first.
+#   is:starred — a board property, and web stars are localStorage-only.
+# Anything not listed stays a literal text term, so a query is never rejected
+# for using an operator we don't know.
+_FIELD_OPS = ("name", "description", "comment", "checklist")
+_FILTER_OPS = ("list", "label", "is", "has", "due", "edited")
+_SORT_KEYS = {"due": "due", "edited": "dateLastActivity"}
+
+# Match granularity as a per-term operator, symmetric with the whole-query
+# --word/--partial/--substring flags: `scrollbar substring:crollba` mixes a
+# strict term with a loose one. `substring:` (and per-term granularity generally)
+# is local-only — Trello's index has no per-term knob at all, and no substring
+# matching even query-wide — so TrelloBackend refuses these rather than
+# quietly returning results for a query that meant something else.
+_GRAN_OPS = ("word", "partial", "substring")
+
+# `description:` is the query spelling; `desc` is the card key / _card_fields tag.
+_FIELD_OP_TO_FIELD = {"name": "name", "description": "desc",
+                      "comment": "comment", "checklist": "checklist"}
+
+
+class _Term:
+    """One query term: the text, whether it's negated, which field it's scoped
+    to (None = all), and its match granularity (None = the query default)."""
+
+    __slots__ = ("text", "negated", "field", "gran")
+
+    def __init__(self, text: str, negated: bool = False,
+                 field: str | None = None, gran: str | None = None) -> None:
+        self.text = text
+        self.negated = negated
+        self.field = field
+        self.gran = gran
+
+
+class _Query:
+    """A parsed search query: text terms, filter operators, and a sort key."""
+
+    def __init__(self) -> None:
+        self.terms: list[_Term] = []
+        # (op, value, negated)
+        self.filters: list[tuple[str, str, bool]] = []
+        self.sort: str | None = None
+        # Operators seen but not supported locally — surfaced as a CLI hint
+        # rather than silently treated as text.
+        self.unsupported: list[str] = []
+
+    def __bool__(self) -> bool:
+        return bool(self.terms or self.filters)
+
+    def has_granularity_ops(self) -> bool:
+        """True if any term carries a per-term granularity operator (the thing
+        TrelloBackend can't honour)."""
+        return any(t.gran is not None for t in self.terms)
+
+
+def _parse_query_terms(query: str) -> _Query:
+    """Parse a query into terms, filters and a sort key.
+
+    Whitespace-separated and AND-ed (as probed). `-foo` negates — Trello's
+    documented `-` operator, and the one operator that behaved correctly when
+    probed against the live API. `key:value` is an operator when `key` is one we
+    implement; anything else stays literal text, so an unknown operator degrades
+    to a text search instead of an error."""
+    q = _Query()
+    for raw in query.split():
+        negated = raw.startswith("-") and len(raw) > 1
+        token = raw[1:] if negated else raw
+        if not token:
+            continue
+        key, sep, value = token.partition(":")
+        key = key.lower()
+        if sep and value:
+            if key in _FIELD_OPS:
+                q.terms.append(_Term(value.lower(), negated,
+                                     field=_FIELD_OP_TO_FIELD[key]))
+                continue
+            if key in _GRAN_OPS:
+                q.terms.append(_Term(value.lower(), negated, gran=key))
+                continue
+            if key in _FILTER_OPS:
+                q.filters.append((key, value.lower(), negated))
+                continue
+            if key == "sort":
+                if value.lower() in _SORT_KEYS:
+                    q.sort = value.lower()
+                else:
+                    q.unsupported.append(token)
+                continue
+            if key in ("created", "member", "board"):
+                q.unsupported.append(token)
+                continue
+        q.terms.append(_Term(token.lower(), negated))
+    return q
+
+
+def _card_due_state(card: dict, value: str) -> bool:
+    """`due:` — day/week/month (within that window from now), overdue, complete,
+    incomplete. An undated card matches none of them."""
+    due_raw = card.get("due")
+    if not due_raw:
+        return False
+    complete = bool(card.get("dueComplete"))
+    if value == "complete":
+        return complete
+    if value == "incomplete":
+        return not complete
+    try:
+        due = datetime.fromisoformat(str(due_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if value == "overdue":
+        return due < now and not complete
+    windows = {"day": 1, "week": 7, "month": 31}
+    days = windows.get(value)
+    if days is None:
+        return False
+    return now <= due <= now + timedelta(days=days)
+
+
+def _card_edited_within(card: dict, value: str) -> bool:
+    """`edited:` — day/week/month, against `dateLastActivity` (the only time the
+    local store actually records; see the omissions note above)."""
+    windows = {"day": 1, "week": 7, "month": 31}
+    days = windows.get(value)
+    if days is None:
+        return False
+    raw = card.get("dateLastActivity")
+    if not raw:
+        return False
+    try:
+        edited = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if edited.tzinfo is None:
+        edited = edited.replace(tzinfo=timezone.utc)
+    return edited >= datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _card_has(card: dict, value: str) -> bool:
+    """`has:` — description / attachments / members. `cover` and `stickers` have
+    no local equivalent and never match (they're listed as unsupported so the
+    CLI can hint rather than silently return nothing)."""
+    if value in ("description", "desc"):
+        return bool((card.get("desc") or "").strip())
+    if value in ("attachment", "attachments"):
+        return bool(card.get("attachments"))
+    if value in ("member", "members"):
+        return bool(card.get("idMembers"))
+    return False
+
+
+def _card_matches_filter(card: dict, op: str, value: str, *,
+                         list_names: dict, label_names: dict) -> bool:
+    """Evaluate one filter operator against a stored card (before negation)."""
+    if op == "list":
+        name = (list_names.get(card.get("idList")) or "").lower()
+        return name == value or name.startswith(value)
+    if op == "label":
+        names = [label_names.get(i, "").lower() for i in card.get("idLabels", [])]
+        return any(n == value or n.startswith(value) for n in names if n)
+    if op == "is":
+        if value in ("archived", "closed"):
+            return bool(card.get("closed"))
+        if value == "open":
+            return not card.get("closed")
+        return False
+    if op == "has":
+        return _card_has(card, value)
+    if op == "due":
+        return _card_due_state(card, value)
+    if op == "edited":
+        return _card_edited_within(card, value)
+    return False
+
+
+def _term_in(term: str, text: str, gran: str) -> bool:
+    """Does `term` match `text` at granularity `gran`?
+
+    word      — the whole word, as Trello's index behaves by default
+    partial   — a word *starting* with the term (Trello's `partial=true`)
+    substring — anywhere, mid-word included (local-only; a word index can't)"""
+    low = text.lower()
+    if gran == "substring":
+        return term in low
+    words = [w for w in _WORD_RE.split(low) if w]
+    if gran == "partial":
+        return any(w.startswith(term) for w in words)
+    return term in words
+
+
+def _card_fields(card: dict) -> list[tuple[str, str]]:
+    """The searchable (field, text) pairs of a stored card, in the order a hit
+    should be reported. Reads the RAW stored card, so inline comments and
+    checklists are still present (`_enrich_card` strips comments)."""
+    fields = [("name", card.get("name") or ""), ("desc", card.get("desc") or "")]
+    for comment in card.get("comments", []):
+        fields.append(("comment", (comment.get("data") or {}).get("text") or ""))
+    for checklist in card.get("checklists", []):
+        fields.append(("checklist", checklist.get("name") or ""))
+        for item in checklist.get("checkItems", []):
+            fields.append(("checklist", item.get("name") or ""))
+    return fields
+
+
+def _match_card(card: dict, terms: list[_Term], default_gran: str) -> dict | None:
+    """Match a stored card against parsed query terms (AND; `-term` negates).
+
+    Returns None if it doesn't match. Otherwise a `_match` dict describing the
+    first hit outside the name (`{"field": …, "line": …}`) for the CLI's context
+    block, or `{}` for a name-only hit — a name hit is already visible in the
+    table, so there is nothing extra to show."""
+    fields = _card_fields(card)
+    context: dict = {}
+    for term in terms:
+        gran = term.gran or default_gran
+        scope = ([(f, t) for f, t in fields if f == term.field]
+                 if term.field else fields)
+        hit: tuple[str, str] | None = None
+        for field, text in scope:
+            if text and _term_in(term.text, text, gran):
+                hit = (field, text)
+                break
+        if term.negated:
+            if hit is not None:
+                return None
+            continue
+        if hit is None:
+            return None
+        # Report the first non-name hit: that's the one the table doesn't show.
+        if not context and hit[0] != "name":
+            context = {"field": hit[0],
+                       "line": _match_line(term.text, hit[1], gran)}
+    return context
+
+
+def _match_line(term: str, text: str, gran: str) -> str:
+    """The single line of `text` containing `term`, trimmed and capped."""
+    for line in text.splitlines():
+        if _term_in(term, line, gran):
+            stripped = line.strip()
+            if len(stripped) > _MATCH_LINE_MAX:
+                return stripped[:_MATCH_LINE_MAX - 1] + "…"
+            return stripped
+    return ""
 
 
 def _as_bool(value: Any) -> bool:
@@ -596,6 +869,87 @@ class LocalBackend(Backend):
         cards.sort(key=lambda c: c.get("pos", 0))
         by_id = {lb["id"]: lb for lb in self._load_labels(board_id)}
         return [self._enrich_card(board_id, c, by_id) for c in cards]
+
+    def search_cards(self, board_id: str, query: str, *,
+                     list_id: str | None = None, include_closed: bool = False,
+                     partial: bool = False,
+                     substring: bool = False) -> list[dict]:
+        """Find cards on a board by text, mirroring Trello's native search.
+
+        Deliberately an *approximation* of `GET /1/search`, not a reimplementation
+        (see DESIGN.md). Duplicated because it has observable rules: the field
+        coverage (name, desc, comments, checklist item names) and the match
+        granularity (whole word by default, word prefix under `partial`). NOT
+        duplicated because it is undocumented and unknowable from outside: the
+        relevance ranking, stemming, and whatever fuzzy expansion makes Trello
+        return cards that don't visibly contain the term. Results therefore keep
+        board order (list, then pos), which beats a score a caller can't see.
+
+        `substring` is the local store's own extension — mid-word matching, which
+        a word index physically cannot do, so TrelloBackend refuses it.
+
+        Each whitespace-separated term must match (AND, as probed); a term
+        written `-foo` must NOT match. Trello's documented operators are honoured
+        where the store holds the data for them — `name:`/`description:`/
+        `comment:`/`checklist:` scope a term to one field, `list:`/`label:`/`is:`/
+        `has:`/`due:`/`edited:` filter, `sort:` orders — plus the local-only
+        per-term granularity operators (`word:`/`partial:`/`substring:`). See the
+        operator table above for what is deliberately NOT supported and why.
+
+        Matched cards carry a transient `_match` key describing the hit (field +
+        the matching line) for the CLI's context block. Set after the read, never
+        persisted — same pattern as `rebalanced` in store.py.
+        """
+        self._load_board(board_id)
+        q = _parse_query_terms(query)
+        if not q:
+            return []
+        default_gran = ("substring" if substring
+                        else "partial" if partial else "word")
+        lists = self._load_lists(board_id)
+        open_lists = {l["id"] for l in lists if not l.get("closed")}
+        list_names = {l["id"]: l.get("name", "") for l in lists}
+        order = {l["id"]: i for i, l in enumerate(lists)}
+        labels = self._load_labels(board_id)
+        by_id = {lb["id"]: lb for lb in labels}
+        label_names = {lb["id"]: lb.get("name", "") for lb in labels}
+
+        # An explicit `is:archived`/`is:open` in the query decides visibility on
+        # its own; otherwise --all (include_closed) does.
+        has_is_filter = any(op == "is" for op, _, _ in q.filters)
+
+        hits: list[tuple[dict, dict]] = []
+        for card in self.store.cards(board_id):
+            if not include_closed and not has_is_filter and (
+                    card.get("closed") or card.get("idList") not in open_lists):
+                continue
+            if list_id is not None and card.get("idList") != list_id:
+                continue
+            if not all(
+                _card_matches_filter(card, op, value,
+                                     list_names=list_names,
+                                     label_names=label_names) != negated
+                for op, value, negated in q.filters
+            ):
+                continue
+            match = _match_card(card, q.terms, default_gran)
+            if match is not None:
+                hits.append((card, match))
+
+        if q.sort:
+            key = _SORT_KEYS[q.sort]
+            # Cards missing the sort field go last rather than crashing the sort.
+            hits.sort(key=lambda h: (h[0].get(key) is None, h[0].get(key) or ""))
+        else:
+            hits.sort(key=lambda h: (order.get(h[0].get("idList"), len(order)),
+                                     h[0].get("pos", 0)))
+        out = []
+        for card, match in hits:
+            enriched = self._enrich_card(board_id, card, by_id)
+            if match:
+                enriched["_match"] = match
+            out.append(enriched)
+        return out
 
     def get_cards_in_list(self, list_id: str,
                           with_latest_comment: bool = False) -> list[dict]:

@@ -43,6 +43,22 @@ def test_reads_match_local_backend(http):
     assert hb.get_card(card["id"]) == be.get_card(card["id"])
 
 
+def test_search_round_trips(http):
+    """`search_cards` rides the generic /api/rpc seam (`_RPC_OPS` derives from
+    the ABC, so a new op is served the moment it exists) — and the SERVER's
+    backend decides the semantics, so a local-store server honours --substring.
+    """
+    hb, be, bid, lists = http
+    be.create_card(lists[0]["id"], "Login bug",
+                   desc="Session cookie is dropped on Safari 17.")
+    assert hb.search_cards(bid, "cookie") == be.search_cards(bid, "cookie")
+    assert [c["name"] for c in hb.search_cards(bid, "cookie")] == ["Login bug"]
+    # granularity kwargs survive the trip
+    assert hb.search_cards(bid, "ookie") == []
+    assert [c["name"] for c in hb.search_cards(bid, "ookie", substring=True)] \
+        == ["Login bug"]
+
+
 # ── card lifecycle via the remote backend ─────────────────────────────
 
 def test_card_crud(http):

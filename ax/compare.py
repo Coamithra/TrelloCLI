@@ -51,7 +51,7 @@ def _case_id(key: str) -> str:
 
 
 def load(run_dir: Path) -> dict[str, dict]:
-    rows = json.loads((run_dir / "results.json").read_text())
+    rows = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
     return {_key(r): _rescore(r) for r in rows}
 
 
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     text = compare(Path(args.before), Path(args.after))
     print(text)
     if args.out:
-        Path(args.out).write_text(text)
+        Path(args.out).write_text(text, encoding="utf-8")
     return 0
 
 

@@ -77,6 +77,14 @@ def get_cards_in_list(list_id: str, with_latest_comment: bool = False) -> list[d
     return get_backend().get_cards_in_list(list_id, with_latest_comment=with_latest_comment)
 
 
+def search_cards(board_id: str, query: str, *, list_id: str | None = None,
+                 include_closed: bool = False, partial: bool = False,
+                 substring: bool = False) -> list[dict]:
+    return get_backend().search_cards(
+        board_id, query, list_id=list_id, include_closed=include_closed,
+        partial=partial, substring=substring)
+
+
 def get_card(card_id: str) -> dict:
     return get_backend().get_card(card_id)
 
