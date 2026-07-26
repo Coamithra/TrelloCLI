@@ -7,10 +7,14 @@ dicts, so all formatting and command logic stay backend-agnostic. The method set
 is exactly the operations `main.py` invokes — nothing more. See DESIGN.md.
 
 A backend may add *transient* keys to a returned dict that aren't part of the
-stored shape, as long as consumers treat them as optional. The only one today:
+stored shape, as long as consumers treat them as optional. Two today:
 `local`'s `update_card` / `update_list` set `rebalanced: True` when a `pos`
 update respread the list, so the web client reloads the now-stale siblings;
-it is never persisted, the CLI ignores it, and `trello` never sets it.
+and `trello`'s `grab_top_card` sets `claimId` to the id of the claim comment it
+posted (see below). Neither is ever persisted. Each *originates* in one backend
+and is relayed unchanged by `http` (whose results come from whatever backend the
+server runs), so a consumer must treat every transient key as may-be-absent
+rather than as a tell for which backend it is talking to.
 """
 
 from __future__ import annotations
@@ -95,7 +99,14 @@ class Backend(ABC):
         lock; `TrelloBackend`, with no atomic primitive, fakes it with the
         claim-comment handshake (see CONTRIBUTING.md) and raises `SystemExit` if
         it exhausts its retry cap on a pathologically contended list — distinct
-        from the empty-list `None`."""
+        from the empty-list `None`.
+
+        `TrelloBackend` additionally tags the returned card with the transient
+        key `claimId`: the id of the claim comment it left on the card, which is
+        never retracted on a win. The caller needs it to recognize that comment
+        as its own later. The key is **absent** on backends that claim without
+        commenting (`local`) — there is no claim to identify, and an absent key
+        says that where a `None` would read as "a claim exists, id unknown"."""
         ...
 
     # --- Comments ---

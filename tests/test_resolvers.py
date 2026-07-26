@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from trello_cli import main
@@ -120,6 +122,64 @@ def test_safe_filename_leading_dots_and_fallback():
     assert main._safe_filename(".bashrc", "fb") == "bashrc"
     assert main._safe_filename("...", "fb") == "fb"
     assert main._safe_filename("", "fb") == "fb"
+
+
+# ── cmd_grab: the Claim line ──────────────────────────────────────────
+
+def _grab_board(cli):
+    be, bid = cli
+    be.create_list(bid, "To Do")
+    be.create_list(bid, "Doing")
+    lists = {l["name"]: l["id"] for l in be.get_lists(bid)}
+    be.create_card(lists["To Do"], "Fix login bug")
+    return be, bid
+
+
+def test_grab_prints_claim_id_when_the_backend_supplies_one(cli, capsys, monkeypatch):
+    """The Trello backend's claim comment is never retracted, so the caller has
+    to be told which id is its own — that only helps if `grab` prints it."""
+    _grab_board(cli)
+    real = main.api.grab_top_card
+
+    def _claimed(src, dst):
+        got = real(src, dst)
+        assert got is not None
+        return {**got, "claimId": "3f9a1c2d"}
+
+    monkeypatch.setattr(main.api, "grab_top_card", _claimed)
+
+    main.cmd_grab([])
+
+    out = capsys.readouterr().out
+    assert "Grabbed: Fix login bug" in out
+    assert "Claim: 3f9a1c2d" in out
+
+
+def test_grab_json_carries_the_claim_id(cli, capsys, monkeypatch):
+    """`--json` prints the card dict as-is, so the transient key rides along —
+    an agent parsing JSON must not have to fall back to the formatted output."""
+    _grab_board(cli)
+    real = main.api.grab_top_card
+
+    def _claimed(src, dst):
+        got = real(src, dst)
+        assert got is not None
+        return {**got, "claimId": "3f9a1c2d"}
+
+    monkeypatch.setattr(main.api, "grab_top_card", _claimed)
+    monkeypatch.setattr(main, "_JSON_MODE", True)
+
+    main.cmd_grab([])
+
+    assert json.loads(capsys.readouterr().out)["claimId"] == "3f9a1c2d"
+
+
+def test_grab_omits_claim_line_without_a_claim(cli, capsys):
+    """Local grabs claim under the store lock and post no comment: there is no
+    claim id, so no line about one."""
+    _grab_board(cli)
+    main.cmd_grab([])
+    assert "Claim:" not in capsys.readouterr().out
 
 
 # ── _dispatch ─────────────────────────────────────────────────────────
