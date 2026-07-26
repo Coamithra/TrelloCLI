@@ -30,7 +30,12 @@ python -m ax.report ax/runs/<run-id>                   # re-render without re-ru
 ```
 
 Needs the `claude` CLI on PATH and this package importable (`pip install -e .`).
-A full 33-case Haiku run is a couple of dollars and about ten minutes.
+A full 35-case Haiku run is a couple of dollars and about ten minutes.
+
+`ax.report` re-renders from what is on disk, and the per-case directories are
+gitignored (below) — so in a fresh clone it rebuilds `index.md` and `corpus.md`
+with every transcript dropped. Re-render only in the working tree that produced
+the run; the committed `corpus.md` is the archive.
 
 ## What a run actually is
 
@@ -93,11 +98,11 @@ ax/runs/<run-id>/
   corpus.md         every transcript, passes included
   summary.json      the numbers, for comparing runs
   results.json      per-run records
-  <case-id>/
-    transcript.md   the compact rendering (~50-100x smaller than the raw log)
-    result.json     verdict + commands + cost
-    trace.jsonl     raw stream-json (gitignored)
-    store/          the board as the agent left it (gitignored)
+  <case-id>/          (the whole per-case directory is gitignored —
+    transcript.md      corpus.md above already inlines every transcript)
+    result.json       verdict + commands + cost
+    trace.jsonl       raw stream-json
+    store/            the board as the agent left it
 ```
 
 `index.md` is built to be pasted into a model with "why did these fail?".

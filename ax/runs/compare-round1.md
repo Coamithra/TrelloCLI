@@ -1,6 +1,6 @@
 # AX comparison — baseline-haiku → patched-haiku
 
-35 shared cases.
+35 shared runs.
 
 | metric | before | after | delta |
 | --- | --- | --- | --- |

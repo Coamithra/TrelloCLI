@@ -136,6 +136,14 @@ def test_limit_rejects_nonsense(big_board):
     assert "number" in str(e.value)
 
 
+def test_limit_rejects_a_negative(big_board):
+    """A negative used to pass validation and then read as 'no limit', which is
+    what 0 is documented for."""
+    with pytest.raises(SystemExit) as e:
+        main.cmd_card(["ls", "--limit", "-5"])
+    assert "number" in str(e.value)
+
+
 def test_with_comment_and_archived_are_refused_together(board):
     with pytest.raises(SystemExit) as e:
         main.cmd_card(["ls", "--with-comment", "--archived"])
@@ -180,6 +188,36 @@ def test_card_help_points_at_grab(capsys):
 
 def test_help_flag_after_a_verb_also_helps(capsys):
     main.cmd_card(["ls", "--help"])
+    assert "card ls" in capsys.readouterr().out
+
+
+def test_trailing_help_flag_past_an_argument_still_helps(capsys):
+    main.cmd_card(["ls", "To Do", "--help"])
+    assert "card ls" in capsys.readouterr().out
+
+
+# ── ...but a help word used as a *value* is a value ──────────────────
+
+def test_a_card_can_be_called_help(board, capsys):
+    """`card add "To Do" help` used to print the usage and exit 0 — a write
+    silently doing nothing, which is the one failure an agent can't detect."""
+    main.cmd_card(["add", "To Do", "help"])
+    out = capsys.readouterr().out
+    assert "Usage" not in out
+    be, _bid, _lists = board
+    assert "help" in [c["name"] for c in be.get_board_cards(_bid)]
+
+
+def test_a_comment_can_be_the_word_help(board, capsys):
+    be, bid, lists = board
+    card = [c for c in be.get_board_cards(bid) if c["name"] == "Migrate database"][0]
+    main.cmd_comment(["add", card["id"], "help"])
+    assert "Usage" not in capsys.readouterr().out
+    assert [a["data"]["text"] for a in be.get_comments(card["id"])] == ["help"]
+
+
+def test_bare_help_still_helps_where_a_verb_belongs(capsys):
+    main.cmd_card(["help"])
     assert "card ls" in capsys.readouterr().out
 
 
@@ -268,4 +306,12 @@ def test_board_as_a_positional_says_where_it_goes(board):
     config.set_board_override(None)
     with pytest.raises(SystemExit) as e:
         main.cmd_board(["show", "Roadmap"])
+    assert "--board" in str(e.value)
+
+
+def test_board_positional_is_not_swallowed_by_an_override(board):
+    """With a board already selected, `board show <other>` used to drop the name
+    and report the selected board instead — a wrong answer, stated confidently."""
+    with pytest.raises(SystemExit) as e:
+        main.cmd_board(["show", "Scratch"])
     assert "--board" in str(e.value)

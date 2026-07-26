@@ -169,7 +169,12 @@ def run_case(
             break
         print(f"  retry {case.id}: API {trace.api_error}", flush=True)
         time.sleep(API_BACKOFF_S * (2 ** attempt))
+        # Both halves of the agent's world go back to how they started — the
+        # store *and* the working directory, which may hold scratch files the
+        # failed attempt wrote.
         shutil.rmtree(store, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
         fixture.build(store)
         before = _digest(store)
     wall = time.time() - started

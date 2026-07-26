@@ -187,6 +187,46 @@ Card not found with prefix: --card
 covered by unit test rather than a fresh fanout): every resolver now rejects a
 `--flag` where a value belongs and says values are positional here.
 
+## What the fixes themselves broke — found by code review, not by the corpus
+
+Three of the round-1 patches shipped a false success of their own. None of them
+is reachable by any case in the corpus, which is the point worth recording: the
+fanout finds what agents *do*, and a reviewer finds what the fix *now permits*.
+They need each other.
+
+- **A help word used as a value stopped being a value.** The group dispatcher
+  scanned every argument for `-h`/`--help`/`help`, so `card add "To Do" help`
+  printed the usage and exited **0** — a write silently doing nothing, which is
+  precisely the failure an agent caller cannot detect. Same for a comment whose
+  text is `help`. Now `help` is only a help request where a *verb* belongs, and
+  a help *flag* is one at the end of a real verb's arguments (`card ls --help`,
+  `card ls "To Do" --help` and `card help` all still work).
+- **`board show <name>` was only guarded when no board was selected.** With
+  `--board`/`TRELLO_BOARD` set, the positional was dropped and a *different*
+  board reported, exit 0. F6's message now fires whenever a name is given.
+- **`--limit -5` meant "no limit".** The validator was
+  `lstrip("-").isdigit()`, so a negative passed and then read downstream as the
+  unlimited case that `0` is documented for.
+
+### The rerun that says these fixes made it worse (they didn't)
+
+`runs/review-fixes` is the corpus against the fixed CLI, and
+`runs/compare-round2.md` is ugly: 35/35 still passes, but 121 → 149 calls and
+7 → 13 errors. **That is variance, and it is worth keeping as the worked example
+of why a single run per case cannot be read as a regression.** The new errors are
+all first guesses the model happened not to make last time — `board get`,
+`board labels`, `create-board`, `card update`, `attach`, `get board … --format
+json` — and every one of them recovers in one turn on the message it gets back.
+
+The way to settle it without paying for `--repeat 3` is to replay: run all 149
+commands from the new run against both CLI versions over the *same* seeded
+store, and diff exit code, stdout and stderr. All 149 are byte-identical apart
+from freshly minted random ids. No command in the run even reaches a line this
+patch changed, so the delta cannot be caused by it.
+
+That replay is cheaper and stronger than a repeat when the question is "did my
+diff do this?" — repeats measure the model, a replay measures the tool.
+
 ## Not fixed, deliberately
 
 - **The 8.5KB usage dump.** Seven runs hit an error whose response was the full

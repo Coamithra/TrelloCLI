@@ -37,14 +37,31 @@ def _bypassed(r: dict) -> bool:
     return bool(r.get("bypassed_cli") or ("bypassed_cli" not in r and r.get("peeked_at_source")))
 
 
+def _key(r: dict) -> str:
+    """One row per *run*, not per case — `--repeat 3` keeps all three.
+
+    Keying on the case id alone silently collapsed repeats to whichever one came
+    last, which is the opposite of what --repeat is for."""
+    rep = r.get("rep", 0)
+    return r["case"] if not rep else f"{r['case']}#{rep}"
+
+
+def _case_id(key: str) -> str:
+    return key.split("#", 1)[0]
+
+
 def load(run_dir: Path) -> dict[str, dict]:
     rows = json.loads((run_dir / "results.json").read_text())
-    return {r["case"]: _rescore(r) for r in rows}
+    return {_key(r): _rescore(r) for r in rows}
 
 
 def compare(before_dir: Path, after_dir: Path) -> str:
     before, after = load(before_dir), load(after_dir)
     shared = [c for c in before if c in after]
+    n_cases = len({_case_id(c) for c in shared})
+    scope = f"{len(shared)} shared runs"
+    if n_cases != len(shared):  # --repeat: say how many distinct cases that is
+        scope += f" across {n_cases} case{'' if n_cases == 1 else 's'}"
 
     def agg(runs: dict, key: str) -> int:
         return sum(runs[c][key] for c in shared)
@@ -52,7 +69,7 @@ def compare(before_dir: Path, after_dir: Path) -> str:
     lines = [
         f"# AX comparison — {before_dir.name} → {after_dir.name}",
         "",
-        f"{len(shared)} shared cases.",
+        f"{scope}.",
         "",
         "| metric | before | after | delta |",
         "| --- | --- | --- | --- |",
@@ -84,7 +101,8 @@ def compare(before_dir: Path, after_dir: Path) -> str:
     lines += ["", "## Per case", "",
               "| case | before | after | calls | errors |",
               "| --- | --- | --- | --- | --- |"]
-    for c in sorted(shared, key=lambda c: (BY_ID[c].tier if c in BY_ID else 9, c)):
+    for c in sorted(shared, key=lambda c: (
+            BY_ID[_case_id(c)].tier if _case_id(c) in BY_ID else 9, c)):
         b, a = before[c], after[c]
         flip = ""
         if b["passed"] != a["passed"]:

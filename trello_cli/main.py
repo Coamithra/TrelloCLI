@@ -486,7 +486,25 @@ def _resolve_attachment(card_id: str, name_or_id: str) -> dict:
     raise SystemExit(f"Attachment not found: {name_or_id}")
 
 
-_HELP_FLAGS = {"-h", "--help", "help"}
+_HELP_FLAGS = {"-h", "--help"}
+# The bare word `help` only reads as a help request where a *verb* belongs.
+# Scanning every position for it made `card add "To Do" help` (a card named
+# "help") print the usage and exit 0 — a write silently turned into a no-op that
+# still looked like a success, which is the one thing an agent caller can't see.
+_HELP_WORDS = _HELP_FLAGS | {"help"}
+
+
+def _wants_help(args: list[str], subcmds: dict) -> bool:
+    """True when `args` asks for help, rather than carrying one of these as text.
+
+    Either the first argument is a help word, or the last is a help *flag* and
+    the first is a real verb (`card ls --help`, `comment add <id> --help`)."""
+    if not args:
+        return False
+    if args[0] in _HELP_WORDS:
+        return True
+    return args[-1] in _HELP_FLAGS and args[0] in subcmds
+
 
 # Wrong-but-reasonable verbs, and where the thing they wanted actually lives.
 # Every entry here was an actual first guess made by a cold agent (see ax/):
@@ -602,7 +620,7 @@ def _dispatch(group: str, subcmds: dict, args: list[str],
     a typo'd verb like `list renmae ...` — so error instead of a false success.
     A first arg that is a verb *elsewhere* in the CLI never falls through either,
     however much `ls` would accept it."""
-    if args and set(args) & _HELP_FLAGS:
+    if _wants_help(args, subcmds):
         _print_group_help(group)
         return
     if args and args[0] in subcmds:
@@ -628,7 +646,8 @@ _FLAG_HINTS = {
     "--assigned-to": "This CLI is single-user: trello card mine",
     "--assignee": "This CLI is single-user: trello card mine",
     "--filter": "Filter by column instead: trello card ls <list>",
-    "--limit": "Counts are positional where supported, e.g. trello activity 20",
+    "--limit": "`card ls` takes --limit <n>; elsewhere counts are positional, "
+               "e.g. trello activity 20",
 }
 
 
@@ -714,7 +733,9 @@ def _board_show(_args: list[str]) -> None:
     # `trello board show Roadmap` is the obvious guess, and the board is *not* a
     # positional anywhere in this CLI — so say where it goes instead of letting
     # _require_board() answer a question the caller already tried to answer.
-    if _args and not config.get_board_override():
+    # This fires whenever a name was given, override or not: with one set, the
+    # positional used to be dropped silently and a *different* board reported.
+    if _args:
         raise SystemExit(
             f"The board is a global flag, not an argument: "
             f"trello --board {_args[0]!r} board show".replace("'", '"')
@@ -771,7 +792,7 @@ _BOARD_VERBS = {"show": None, "add": None, "rename": None,
 
 def cmd_board(args: list[str]) -> None:
     verb = args[0] if args else ""
-    if args and set(args) & _HELP_FLAGS:
+    if _wants_help(args, _BOARD_VERBS):
         _print_group_help("board")
         return
     if verb == "add":
@@ -941,8 +962,12 @@ def _card_ls(args: list[str]) -> None:
     if with_comment and archived:
         raise SystemExit("--with-comment cannot be combined with --archived.")
     raw_limit = flags.get("--limit")
-    if raw_limit is not None and not str(raw_limit).lstrip("-").isdigit():
-        raise SystemExit(f"--limit takes a number (0 for no limit), got {raw_limit!r}.")
+    # `.isdigit()` and not `lstrip("-").isdigit()`: a negative used to pass here
+    # and then read as "no limit" downstream, which is what 0 is documented for.
+    if raw_limit is not None and not str(raw_limit).isdigit():
+        raise SystemExit(
+            f"--limit takes a number of 0 or more (0 for no limit), got {raw_limit!r}."
+        )
     board_id = _require_board()
     if not positional:
         limit = _BOARD_LS_LIMIT if raw_limit is None else int(raw_limit)
