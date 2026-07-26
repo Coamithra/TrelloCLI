@@ -569,6 +569,8 @@ _VERB_HINTS = {
     ("card", "create"): "trello card add <list> <name>",
     ("card", "delete"): "trello card archive <card_id>",
     ("card", "assign"): "trello card mine (this CLI is single-user)",
+    ("card", "search"): 'trello search <query>  (top-level, not a card verb)',
+    ("card", "find"): 'trello search <query>  (top-level, not a card verb)',
     ("board", "list"): "trello boards",
     ("board", "ls"): "trello boards",
     ("board", "cards"): "trello card ls",
@@ -589,9 +591,9 @@ _VERB_WORDS = {
     "boards", "card", "cards", "check", "checklist", "checklists", "comment",
     "comments", "create", "del", "delete", "desc", "describe", "download",
     "due", "edit", "item", "items", "label", "labels", "list", "lists", "ls",
-    "mine", "move", "new", "open", "pos", "position", "remove", "rename",
-    "reorder", "restore", "rm", "set", "show", "uncheck", "unarchive", "unset",
-    "update",
+    "find", "mine", "move", "new", "open", "pos", "position", "remove",
+    "rename", "reorder", "restore", "rm", "search", "set", "show", "uncheck",
+    "unarchive", "unset", "update",
 }
 
 # What else a caller in this group probably needs to know about.
@@ -2591,19 +2593,26 @@ def _search_hints(query: str, backend: str, found: int, substring: bool) -> list
     only the local store can match mid-word), and the CLI surface is the only
     documentation an agent caller ever reads — so say so at the moment it
     matters, not only in --help."""
+    # `http` is deliberately absent from both gates: its semantics are the
+    # SERVER's backend's, which this side can't see — a server on a local store
+    # honours --substring, one fronting Trello doesn't. Guessing would mean
+    # telling half of those users something false.
     hints: list[str] = []
     if backend == "local" and _TRELLO_ONLY_OP_RE.search(query):
         hints.append(
             "Note: " + "/".join(f"{o}:" for o in _TRELLO_ONLY_OPS)
             + " are Trello-backend operators; on the local backend they're "
-              "matched as literal text."
+              "matched as literal text (so they narrow to nothing rather than "
+              "being ignored)."
         )
-    if backend != "local" and not substring and not found:
+    if found or substring:
+        return hints
+    if backend == "trello":
         hints.append(
             "Trello matches whole words (--partial for word-prefix). Mid-word "
             "matching needs the local backend."
         )
-    if backend == "local" and not found and not substring:
+    elif backend == "local":
         hints.append(
             "Whole-word match. Try --partial for word-prefixes, or --substring "
             "for mid-word matches (e.g. 'crollba' finding 'scrollbar')."
@@ -2614,8 +2623,10 @@ def _search_hints(query: str, backend: str, found: int, substring: bool) -> list
 def cmd_search(args: list[str]) -> None:
     # `search --help` is the first thing anyone tries on a command they just
     # discovered; letting _parse_flags answer it with "Unknown flag: --help"
-    # burns a turn and teaches nothing.
-    if any(a in ("--help", "-h", "help") for a in args):
+    # burns a turn and teaches nothing. Only the DASHED forms, and only alone:
+    # "help" is an ordinary word, so `trello search help` searches for it
+    # (`trello help search` is the undashed way to ask).
+    if len(args) == 1 and args[0] in ("--help", "-h"):
         # Not a noun group, so it takes a query rather than a verb —
         # _print_group_help's "<verb>" header would be a lie.
         print("Usage: trello [--board <name_or_id>] [--json] search <query> [flags]")

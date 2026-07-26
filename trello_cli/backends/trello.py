@@ -264,13 +264,21 @@ class TrelloBackend(Backend):
         cover open cards, so `include_closed` widens nothing here — it does not
         reach archived cards the way the local backend's does.
         """
-        if substring or _GRANULARITY_OP_RE.search(query):
+        if substring:
             raise SystemExit(
-                "Substring matching isn't supported on the trello backend: "
-                "Trello's search is a word index, so mid-word matches are "
-                "impossible server-side.\n"
+                "--substring isn't supported on the trello backend: Trello's "
+                "search is a word index, so mid-word matches are impossible "
+                "server-side.\n"
                 "Use --partial for word-prefix matching, or export the board "
                 "(trello export --to local) and search it with --backend local."
+            )
+        if _GRANULARITY_OP_RE.search(query):
+            raise SystemExit(
+                "Per-term granularity operators (word:/partial:/substring:) are "
+                "local-backend only: Trello's index has no per-term setting.\n"
+                "Use --partial for word-prefix matching across the whole query, "
+                "or export the board (trello export --to local) and search it "
+                "with --backend local."
             )
         params: dict[str, Any] = {
             "query": query,

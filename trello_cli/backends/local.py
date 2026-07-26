@@ -21,6 +21,7 @@ import getpass
 import hashlib
 import mimetypes
 import re
+import shlex
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
@@ -98,6 +99,9 @@ _MATCH_LINE_MAX = 160
 _FIELD_OPS = ("name", "description", "comment", "checklist")
 _FILTER_OPS = ("list", "label", "is", "has", "due", "edited")
 _SORT_KEYS = {"due": "due", "edited": "dateLastActivity"}
+# Direction is per-key, matching Trello: `sort:edited` is most-recently-edited
+# first, while `sort:due` is soonest-due first.
+_SORT_DESCENDING = frozenset({"edited"})
 
 # Match granularity as a per-term operator, symmetric with the whole-query
 # --word/--partial/--substring flags: `scrollbar substring:crollba` mixes a
@@ -106,6 +110,14 @@ _SORT_KEYS = {"due": "due", "edited": "dateLastActivity"}
 # matching even query-wide — so TrelloBackend refuses these rather than
 # quietly returning results for a query that meant something else.
 _GRAN_OPS = ("word", "partial", "substring")
+
+# Documented Trello operators with no local equivalent. They are kept as literal
+# text (so the query narrows to nothing rather than silently widening) and the
+# CLI hints about them; main._TRELLO_ONLY_OPS mirrors this list for that hint.
+_TRELLO_ONLY_OPS = ("created", "member", "board")
+
+# Relative windows shared by `due:` and `edited:`.
+_TIME_WINDOWS = {"day": 1, "week": 7, "month": 31}
 
 # `description:` is the query spelling; `desc` is the card key / _card_fields tag.
 _FIELD_OP_TO_FIELD = {"name": "name", "description": "desc",
@@ -134,17 +146,28 @@ class _Query:
         # (op, value, negated)
         self.filters: list[tuple[str, str, bool]] = []
         self.sort: str | None = None
-        # Operators seen but not supported locally — surfaced as a CLI hint
-        # rather than silently treated as text.
+        # Trello-only operators the query used. They are ALSO kept as literal
+        # terms (see _parse_query_terms), so this is purely a record of what was
+        # seen; main.py detects the same set itself for its hint, since commands
+        # don't reach into a backend.
         self.unsupported: list[str] = []
 
     def __bool__(self) -> bool:
         return bool(self.terms or self.filters)
 
-    def has_granularity_ops(self) -> bool:
-        """True if any term carries a per-term granularity operator (the thing
-        TrelloBackend can't honour)."""
-        return any(t.gran is not None for t in self.terms)
+
+def _split_query(query: str) -> list[str]:
+    """Split a query into tokens, honouring quotes like Trello does.
+
+    `list:"To Do"` has to survive as one token — this board's default columns are
+    literally "To Do"/"Doing"/"Done", so a plain `.split()` turned the commonest
+    possible scoped search into a silent empty result. Unbalanced quotes fall
+    back to whitespace splitting rather than raising: a query is user text, and
+    a stray quote should search, not crash."""
+    try:
+        return shlex.split(query)
+    except ValueError:
+        return query.split()
 
 
 def _parse_query_terms(query: str) -> _Query:
@@ -156,7 +179,7 @@ def _parse_query_terms(query: str) -> _Query:
     implement; anything else stays literal text, so an unknown operator degrades
     to a text search instead of an error."""
     q = _Query()
-    for raw in query.split():
+    for raw in _split_query(query):
         negated = raw.startswith("-") and len(raw) > 1
         token = raw[1:] if negated else raw
         if not token:
@@ -175,40 +198,55 @@ def _parse_query_terms(query: str) -> _Query:
                 q.filters.append((key, value.lower(), negated))
                 continue
             if key == "sort":
-                if value.lower() in _SORT_KEYS:
+                # `-sort:` is meaningless; drop the operator rather than
+                # silently applying it as though it weren't negated.
+                if value.lower() in _SORT_KEYS and not negated:
                     q.sort = value.lower()
                 else:
                     q.unsupported.append(token)
                 continue
-            if key in ("created", "member", "board"):
+            if key in _TRELLO_ONLY_OPS:
+                # Recorded for the record AND kept as a literal term (falling
+                # through below). Dropping it would silently WIDEN the result
+                # set — the caller asked to narrow and would get more, which is
+                # the one failure mode worse than returning nothing.
                 q.unsupported.append(token)
-                continue
         q.terms.append(_Term(token.lower(), negated))
     return q
 
 
+def _parse_iso(raw: object) -> datetime | None:
+    """A stored ISO timestamp as an aware UTC datetime, or None if absent or
+    malformed (a hand-edited store shouldn't crash a search)."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _card_due_state(card: dict, value: str) -> bool:
-    """`due:` — day/week/month (within that window from now), overdue, complete,
-    incomplete. An undated card matches none of them."""
-    due_raw = card.get("due")
-    if not due_raw:
+    """`due:` — day/week/month, overdue, complete, incomplete.
+
+    The window values are FORWARD-looking (now .. now+window), so they exclude
+    already-overdue cards; `due:overdue` is the separate value for those. An
+    undated card matches none of them."""
+    if not card.get("due"):
         return False
     complete = bool(card.get("dueComplete"))
     if value == "complete":
         return complete
     if value == "incomplete":
         return not complete
-    try:
-        due = datetime.fromisoformat(str(due_raw).replace("Z", "+00:00"))
-    except ValueError:
+    due = _parse_iso(card.get("due"))
+    if due is None:
         return False
-    if due.tzinfo is None:
-        due = due.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     if value == "overdue":
         return due < now and not complete
-    windows = {"day": 1, "week": 7, "month": 31}
-    days = windows.get(value)
+    days = _TIME_WINDOWS.get(value)
     if days is None:
         return False
     return now <= due <= now + timedelta(days=days)
@@ -217,26 +255,22 @@ def _card_due_state(card: dict, value: str) -> bool:
 def _card_edited_within(card: dict, value: str) -> bool:
     """`edited:` — day/week/month, against `dateLastActivity` (the only time the
     local store actually records; see the omissions note above)."""
-    windows = {"day": 1, "week": 7, "month": 31}
-    days = windows.get(value)
+    days = _TIME_WINDOWS.get(value)
     if days is None:
         return False
-    raw = card.get("dateLastActivity")
-    if not raw:
+    edited = _parse_iso(card.get("dateLastActivity"))
+    if edited is None:
         return False
-    try:
-        edited = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if edited.tzinfo is None:
-        edited = edited.replace(tzinfo=timezone.utc)
     return edited >= datetime.now(timezone.utc) - timedelta(days=days)
 
 
 def _card_has(card: dict, value: str) -> bool:
-    """`has:` — description / attachments / members. `cover` and `stickers` have
-    no local equivalent and never match (they're listed as unsupported so the
-    CLI can hint rather than silently return nothing)."""
+    """`has:` — description / attachments / members.
+
+    `cover` and `stickers` are valid Trello values with no local equivalent, so
+    they match nothing here (the store has no such concept). They are NOT in
+    _TRELLO_ONLY_OPS, which keys on the operator name, so no hint fires for
+    them — see the operator table at the top of the module."""
     if value in ("description", "desc"):
         return bool((card.get("desc") or "").strip())
     if value in ("attachment", "attachments"):
@@ -275,14 +309,30 @@ def _term_in(term: str, text: str, gran: str) -> bool:
 
     word      — the whole word, as Trello's index behaves by default
     partial   — a word *starting* with the term (Trello's `partial=true`)
-    substring — anywhere, mid-word included (local-only; a word index can't)"""
+    substring — anywhere, mid-word included (local-only; a word index can't)
+
+    The TERM is tokenised too, not just the text: Trello splits both sides, so
+    searching `drag-drop` finds a card containing "drag-drop". Comparing a raw
+    term against split words would fail on every punctuated term — `file.py`,
+    `foo_bar`, `trello_cli/__main__.py` — which look like exactly the strings
+    someone pastes into a search."""
     low = text.lower()
     if gran == "substring":
         return term in low
     words = [w for w in _WORD_RE.split(low) if w]
+    parts = [p for p in _WORD_RE.split(term) if p]
+    if not parts:
+        return False
     if gran == "partial":
-        return any(w.startswith(term) for w in words)
-    return term in words
+        # Every part but the last must match whole; only the trailing fragment
+        # is a prefix, so `drag-dro` matches "drag-drop" but `dr-drop` doesn't.
+        *head, last = parts
+        return any(
+            words[i:i + len(head)] == head and words[i + len(head)].startswith(last)
+            for i in range(len(words) - len(parts) + 1)
+        )
+    return any(words[i:i + len(parts)] == parts
+               for i in range(len(words) - len(parts) + 1))
 
 
 def _card_fields(card: dict) -> list[tuple[str, str]]:
@@ -914,15 +964,20 @@ class LocalBackend(Backend):
         by_id = {lb["id"]: lb for lb in labels}
         label_names = {lb["id"]: lb.get("name", "") for lb in labels}
 
-        # An explicit `is:archived`/`is:open` in the query decides visibility on
-        # its own; otherwise --all (include_closed) does.
+        # An explicit `is:archived`/`is:open` decides the CARD's closed state on
+        # its own; otherwise --all (include_closed) does. A card in an ARCHIVED
+        # COLUMN stays hidden either way unless --all — the whole column is gone
+        # on Trello, so `is:open` must not resurrect it (get_board_cards excludes
+        # those for the same reason).
         has_is_filter = any(op == "is" for op, _, _ in q.filters)
 
         hits: list[tuple[dict, dict]] = []
         for card in self.store.cards(board_id):
-            if not include_closed and not has_is_filter and (
-                    card.get("closed") or card.get("idList") not in open_lists):
-                continue
+            if not include_closed:
+                if card.get("idList") not in open_lists:
+                    continue
+                if card.get("closed") and not has_is_filter:
+                    continue
             if list_id is not None and card.get("idList") != list_id:
                 continue
             if not all(
@@ -938,8 +993,13 @@ class LocalBackend(Backend):
 
         if q.sort:
             key = _SORT_KEYS[q.sort]
-            # Cards missing the sort field go last rather than crashing the sort.
-            hits.sort(key=lambda h: (h[0].get(key) is None, h[0].get(key) or ""))
+            reverse = q.sort in _SORT_DESCENDING
+            # Cards missing the sort field go last EITHER WAY, so `reverse`
+            # can't float them to the top; sort the present ones separately.
+            missing = [h for h in hits if not h[0].get(key)]
+            present = [h for h in hits if h[0].get(key)]
+            present.sort(key=lambda h: h[0][key], reverse=reverse)
+            hits = present + missing
         else:
             hits.sort(key=lambda h: (order.get(h[0].get("idList"), len(order)),
                                      h[0].get("pos", 0)))

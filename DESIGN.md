@@ -468,8 +468,11 @@ scoping), `list:` `label:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
 - **`has:cover` / `has:stickers`** — no such concept locally. **`member:`/`@name`** —
   single-user store. **`board:`** — search is `--board`-scoped.
 
-Unknown operators degrade to literal text rather than erroring, so a query is never
-rejected for using one; the CLI *hints* when a query uses a Trello-only operator on local.
+Unknown operators — and the Trello-only ones above — degrade to **literal text** rather than
+erroring, so a query is never rejected for using one. Literal text, specifically, and not
+"dropped": dropping `created:week` would silently *widen* the result set, handing back cards
+the caller asked to exclude, which is worse than returning nothing. The CLI *hints* when a
+query uses a Trello-only operator on the local backend.
 
 ### The one deliberate divergence: `--substring`
 
@@ -477,8 +480,9 @@ Mid-word matching is the thing a word index physically cannot do, so it is **loc
 opt-in, and the Trello backend **refuses** it (flag or `substring:` operator) with a message
 naming `--partial` and `export --to local`. Silently degrading to a word match would return
 plausible results for a query that meant something else — the worst outcome for an agent
-caller. Granularity is available per-query (`--word`/`--partial`/`--substring` defaults) and
-per-term (`word:` / `partial:` / `substring:`), so one query can mix strict and loose terms.
+caller. Granularity is available per-query (`--partial` / `--substring`; whole-word is the
+default, so it needs no flag) and per-term (`word:` / `partial:` / `substring:`), so one
+query can mix strict and loose terms — `scrollbar substring:crollba`.
 
 `boards <query>` is plain substring on name (or id prefix) on every backend: board listing
 is client-side everywhere, so there is no remote index to mirror and no divergence to create.

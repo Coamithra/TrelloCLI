@@ -7,7 +7,7 @@ Two layers:
     to pretend it can do substring matching.
 
 The matching semantics asserted here are the ones probed against the live Trello
-API on 2026-07-26 (see plans/search.md): whole word by default, word-prefix under
+API on 2026-07-26 (the probe table lives in DESIGN.md): whole word by default, word-prefix under
 `partial`, AND across terms, `-term` negates. `substring` is the local store's
 own extension — Trello's index cannot do it, which is why the refusal test below
 matters as much as the positive ones.
@@ -209,12 +209,188 @@ def test_unknown_operator_degrades_to_text(searchable):
     assert be.search_cards(bid, "bogus:thing") == []
 
 
-def test_sort_operator_orders_results(searchable):
-    """`sort:edited` reorders; the default keeps board order (list, then pos)."""
+def test_sort_edited_is_most_recent_first(searchable):
+    """Trello's `sort:edited` is most-recently-edited FIRST. `-zzzz` is a
+    match-everything trick: nothing contains "zzzz", so negating it keeps every
+    card and leaves sorting as the only thing under test."""
     be, bid = searchable["backend"], searchable["bid"]
     be.update_card(searchable["checklist"], name="Release chores now")
     got = [c["id"] for c in be.search_cards(bid, "-zzzz sort:edited")]
-    assert got[-1] == searchable["checklist"]
+    assert got[0] == searchable["checklist"]
+
+
+def test_sort_due_is_soonest_first(searchable):
+    """`sort:due` runs the other way — soonest deadline first — so direction is
+    per-key, not global. Cards with no due date sort last either way."""
+    be, bid = searchable["backend"], searchable["bid"]
+    be.update_card(searchable["name"], due="2030-01-01T00:00:00.000Z")
+    be.update_card(searchable["desc"], due="2026-01-01T00:00:00.000Z")
+    got = [c["id"] for c in be.search_cards(bid, "-zzzz sort:due")]
+    assert got[:2] == [searchable["desc"], searchable["name"]]
+    assert searchable["comment"] in got[2:]  # undated, pushed to the end
+
+
+def test_negated_sort_is_ignored(searchable):
+    """`-sort:due` is meaningless; it must not apply as though un-negated."""
+    be, bid = searchable["backend"], searchable["bid"]
+    be.update_card(searchable["name"], due="2030-01-01T00:00:00.000Z")
+    default = [c["id"] for c in be.search_cards(bid, "-zzzz")]
+    assert [c["id"] for c in be.search_cards(bid, "-zzzz -sort:due")] == default
+
+
+# ── operators that only Trello can answer ─────────────────────────────
+
+@pytest.mark.parametrize("query", ["created:week", "member:bob", "board:other"])
+def test_trello_only_operators_are_literal_text_not_dropped(searchable, query):
+    """The failure mode this guards: DROPPING the operator would silently WIDEN
+    the result set, handing back cards the caller asked to exclude. As literal
+    text the query narrows to nothing instead — and the CLI hints why."""
+    be, bid = searchable["backend"], searchable["bid"]
+    assert be.search_cards(bid, f"{query} scrollbar") == []
+
+
+def test_unsupported_operators_are_recorded(searchable):
+    from trello_cli.backends import local as local_mod
+    q = local_mod._parse_query_terms("created:week scrollbar")
+    assert q.unsupported == ["created:week"]
+    assert [t.text for t in q.terms] == ["created:week", "scrollbar"]
+
+
+# ── quoting ───────────────────────────────────────────────────────────
+
+def test_quoted_operator_value(searchable):
+    """`list:"To Do"` has to survive as one token — the default columns have a
+    space in them, so this is the commonest possible scoped search."""
+    be, bid = searchable["backend"], searchable["bid"]
+    got = _ids(be.search_cards(bid, 'list:"To Do"'))
+    assert got == {searchable["name"], searchable["desc"]}
+
+
+def test_quoted_phrase_term(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    assert _ids(be.search_cards(bid, '"session cookie"')) == {searchable["desc"]}
+    assert be.search_cards(bid, '"cookie session"') == []
+
+
+def test_unbalanced_quote_does_not_raise(searchable):
+    """A stray quote is user text, not a crash."""
+    be, bid = searchable["backend"], searchable["bid"]
+    assert _ids(be.search_cards(bid, 'scrollbar"')) == {searchable["name"]}
+
+
+# ── punctuated terms ──────────────────────────────────────────────────
+
+def test_punctuated_term_matches(backend):
+    """The term is tokenised too, not just the haystack — otherwise no term
+    containing punctuation could ever match under word/partial."""
+    b = backend.create_board("B")
+    lists = backend.get_lists(b["id"])
+    card = backend.create_card(lists[0]["id"], "Web app (FastAPI + drag-drop)",
+                               desc="see trello_cli/__main__.py")
+    bid = b["id"]
+    assert _ids(backend.search_cards(bid, "drag-drop")) == {card["id"]}
+    assert _ids(backend.search_cards(bid, "trello_cli/__main__.py")) == {card["id"]}
+    # adjacency still matters: the sub-words must appear in order
+    assert backend.search_cards(bid, "drop-drag") == []
+
+
+def test_punctuated_term_under_partial(backend):
+    b = backend.create_board("B")
+    lists = backend.get_lists(b["id"])
+    card = backend.create_card(lists[0]["id"], "Web app (FastAPI + drag-drop)")
+    assert _ids(backend.search_cards(b["id"], "drag-dro", partial=True)) == {card["id"]}
+
+
+# ── date operators ────────────────────────────────────────────────────
+
+def _iso(days_from_now):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(days=days_from_now)).isoformat()
+
+
+def test_due_windows_look_forward(searchable):
+    """`due:week` is now..now+7d, so it excludes an already-overdue card —
+    `due:overdue` is the separate value for those."""
+    be, bid = searchable["backend"], searchable["bid"]
+    be.update_card(searchable["name"], due=_iso(3))
+    be.update_card(searchable["desc"], due=_iso(-3))
+    assert _ids(be.search_cards(bid, "due:week")) == {searchable["name"]}
+    assert _ids(be.search_cards(bid, "due:overdue")) == {searchable["desc"]}
+    assert _ids(be.search_cards(bid, "due:day")) == set()
+
+
+def test_due_complete_and_incomplete(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    be.update_card(searchable["name"], due=_iso(3))
+    be.update_card(searchable["desc"], due=_iso(3), dueComplete=True)
+    assert _ids(be.search_cards(bid, "due:complete")) == {searchable["desc"]}
+    assert _ids(be.search_cards(bid, "due:incomplete")) == {searchable["name"]}
+    # an overdue-but-completed card is not overdue
+    be.update_card(searchable["desc"], due=_iso(-3))
+    assert searchable["desc"] not in _ids(be.search_cards(bid, "due:overdue"))
+
+
+def test_undated_card_matches_no_due_filter(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    for value in ("day", "week", "month", "overdue", "complete", "incomplete"):
+        assert searchable["comment"] not in _ids(be.search_cards(bid, f"due:{value}"))
+
+
+def test_malformed_dates_do_not_raise(searchable):
+    """A hand-edited store shouldn't crash a search."""
+    be, bid = searchable["backend"], searchable["bid"]
+    board_id, card = be._load_card(searchable["name"])
+    card["due"] = "not-a-date"
+    card["dateLastActivity"] = "also-not-a-date"
+    be._save_card(board_id, card)
+    assert be.search_cards(bid, "due:week") == []
+    assert searchable["name"] not in _ids(be.search_cards(bid, "edited:day"))
+
+
+def test_edited_window(searchable):
+    """Everything was just created, so it's all within a day."""
+    be, bid = searchable["backend"], searchable["bid"]
+    assert len(be.search_cards(bid, "edited:day")) == 4
+    assert be.search_cards(bid, "edited:bogus") == []
+
+
+def test_unknown_filter_value_matches_nothing(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    assert be.search_cards(bid, "is:sideways") == []
+    assert be.search_cards(bid, "has:cover") == []
+
+
+# ── negated filters ───────────────────────────────────────────────────
+
+def test_negated_filters(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    got = _ids(be.search_cards(bid, "-list:doing"))
+    assert searchable["comment"] not in got and searchable["name"] in got
+    label = be.create_label(bid, "urgent", "red")
+    be.add_label_to_card(searchable["name"], label["id"])
+    assert searchable["name"] not in _ids(be.search_cards(bid, "-label:urgent"))
+
+
+def test_is_open_does_not_resurrect_cards_in_archived_columns(searchable):
+    """A card in an archived column is invisible on Trello (the whole column is
+    gone), so `is:open` must not surface it — only --all reaches it."""
+    be, bid, lists = searchable["backend"], searchable["bid"], searchable["lists"]
+    be.update_list(lists["Doing"], closed=True)
+    assert be.search_cards(bid, "respread") == []
+    assert be.search_cards(bid, "respread is:open") == []
+    assert _ids(be.search_cards(bid, "respread", include_closed=True)) == \
+        {searchable["comment"]}
+
+
+def test_match_line_is_capped(backend):
+    """One pathological description can't dump a screenful per result."""
+    from trello_cli.backends.local import _MATCH_LINE_MAX
+    b = backend.create_board("B")
+    lists = backend.get_lists(b["id"])
+    backend.create_card(lists[0]["id"], "Long",
+                        desc="padding " * 200 + "needle")
+    (card,) = backend.search_cards(b["id"], "needle")
+    assert len(card["_match"]["line"]) <= _MATCH_LINE_MAX
 
 
 # ── archived / scoping ────────────────────────────────────────────────
@@ -297,8 +473,7 @@ def test_trello_post_filters_closed_and_list():
 # ── CLI ───────────────────────────────────────────────────────────────
 
 def test_cli_search_renders_table_and_context(searchable, store_root, capsys):
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     main.cmd_search(["cookie"])
     out = capsys.readouterr().out
@@ -309,8 +484,7 @@ def test_cli_search_renders_table_and_context(searchable, store_root, capsys):
 def test_cli_no_match_hints_at_substring_on_local(searchable, store_root, capsys):
     """The discoverability affordance: a local no-match advertises --substring,
     which is the one thing this backend can do and Trello can't."""
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     main.cmd_search(["crollba"])
     out = capsys.readouterr().out
@@ -319,8 +493,7 @@ def test_cli_no_match_hints_at_substring_on_local(searchable, store_root, capsys
 
 def test_cli_hints_trello_only_operators_on_local(searchable, store_root, capsys):
     """Gated on the query actually using one, per the CLI's hint convention."""
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     main.cmd_search(["created:week", "scrollbar"])
     out = capsys.readouterr().out
@@ -330,9 +503,72 @@ def test_cli_hints_trello_only_operators_on_local(searchable, store_root, capsys
     assert "Trello-backend operators" not in capsys.readouterr().out
 
 
+def test_cli_flags_reach_the_backend(searchable, store_root, capsys):
+    """--partial / --substring / --list / --all are plumbed, not just accepted."""
+    use_local_cli(store_root)
+    config.set_board_override(searchable["bid"])
+
+    main.cmd_search(["scroll"])
+    assert "No cards matching" in capsys.readouterr().out
+    main.cmd_search(["scroll", "--partial"])
+    assert "scrollbar flicker" in capsys.readouterr().out
+    main.cmd_search(["crollba", "--substring"])
+    assert "scrollbar flicker" in capsys.readouterr().out
+
+    main.cmd_search(["respread", "--list", "Doing"])
+    assert "Rebalance work" in capsys.readouterr().out
+    main.cmd_search(["respread", "--list", "To Do"])
+    assert "No cards matching" in capsys.readouterr().out
+
+    searchable["backend"].archive_card(searchable["desc"])
+    main.cmd_search(["cookie"])
+    assert "No cards matching" in capsys.readouterr().out
+    main.cmd_search(["cookie", "--all"])
+    assert "Login bug" in capsys.readouterr().out
+
+
+def test_cli_search_help_only_when_alone(searchable, store_root, capsys):
+    """`search help` is a search for the word "help", not a help request."""
+    use_local_cli(store_root)
+    config.set_board_override(searchable["bid"])
+    main.cmd_search(["--help"])
+    assert "MATCHING" in capsys.readouterr().out
+    main.cmd_search(["help"])
+    out = capsys.readouterr().out
+    assert "No cards matching" in out and "MATCHING" not in out
+
+
+def test_cli_json_emits_cards_and_sends_hints_to_stderr(
+        searchable, store_root, capsys, monkeypatch):
+    """stdout stays a clean JSON array so `| jq` works; notes go to stderr."""
+    import json
+    use_local_cli(store_root)
+    config.set_board_override(searchable["bid"])
+    monkeypatch.setattr(main, "_JSON_MODE", True)
+    main.cmd_search(["created:week", "crollba"])
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == []
+    assert "Trello-backend operators" in captured.err
+    assert captured.err.count("--substring") >= 1
+
+    main.cmd_search(["cookie"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert [c["name"] for c in data] == ["Login bug"]
+    assert data[0]["_match"]["field"] == "desc"
+
+
+def test_cli_card_search_points_at_the_top_level_command(searchable, store_root):
+    """`trello card search cookie` used to die with "List not found: search"."""
+    use_local_cli(store_root)
+    config.set_board_override(searchable["bid"])
+    with pytest.raises(SystemExit) as e:
+        main.cmd_card(["search", "cookie"])
+    assert "trello search <query>" in str(e.value)
+
+
 def test_cli_requires_a_query(searchable, store_root):
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     with pytest.raises(SystemExit) as e:
         main.cmd_search([])
@@ -341,8 +577,7 @@ def test_cli_requires_a_query(searchable, store_root):
 
 def test_cli_rejects_invented_flags(searchable, store_root):
     """The invented-flag guard: `--card X` must not become a search term."""
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     with pytest.raises(SystemExit) as e:
         main.cmd_search(["--card", "scrollbar"])
@@ -351,8 +586,7 @@ def test_cli_rejects_invented_flags(searchable, store_root):
 
 def test_cli_double_dash_escapes_a_dashed_query(searchable, store_root, capsys):
     """A query that really starts with dashes stays reachable."""
-    be = use_local_cli(store_root)
-    del be
+    use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     main.cmd_search(["--", "-scrollbar"])
     out = capsys.readouterr().out
@@ -364,10 +598,13 @@ def test_hint_operator_list_matches_the_backend():
     the hint claims these are unsupported locally, so the backend had better
     agree."""
     from trello_cli.backends import local as local_mod
+    assert set(main._TRELLO_ONLY_OPS) == set(local_mod._TRELLO_ONLY_OPS)
     q = local_mod._parse_query_terms(
         " ".join(f"{op}:x" for op in main._TRELLO_ONLY_OPS))
     assert len(q.unsupported) == len(main._TRELLO_ONLY_OPS)
-    assert q.terms == []
+    # ...and each is ALSO kept as a literal term, so the query narrows rather
+    # than silently widening.
+    assert len(q.terms) == len(main._TRELLO_ONLY_OPS)
 
 
 # ── boards <query> ────────────────────────────────────────────────────
