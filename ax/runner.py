@@ -69,7 +69,8 @@ def _make_shim(dirpath: Path) -> Path:
     """
     dirpath.mkdir(parents=True, exist_ok=True)
     shim = dirpath / "trello"
-    shim.write_text(f'#!/bin/sh\nexec "{_python()}" -m trello_cli "$@"\n')
+    shim.write_text(f'#!/bin/sh\nexec "{_python()}" -m trello_cli "$@"\n',
+                    encoding="utf-8")
     shim.chmod(0o755)
     return dirpath
 
@@ -149,7 +150,7 @@ def run_case(
     # Scoring that as a tool failure would poison the comparison, so re-run it —
     # a fanout of dozens of concurrent agents will hit these.
     for attempt in range(API_RETRIES + 1):
-        with open(trace_path, "w") as out:
+        with open(trace_path, "w", encoding="utf-8") as out:
             try:
                 proc = subprocess.run(
                     cmd, cwd=work, env=env, stdout=out,
@@ -157,7 +158,7 @@ def run_case(
                 )
                 status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
                 if proc.returncode != 0:
-                    (case_dir / "stderr.txt").write_text(proc.stderr or "")
+                    (case_dir / "stderr.txt").write_text(proc.stderr or "", encoding="utf-8")
             except subprocess.TimeoutExpired:
                 status = "timeout"
         trace = render.parse(trace_path)
@@ -220,8 +221,8 @@ def run_case(
         "bypassed_cli": bypassed,
         "peeked_at_source": peeked,
     }
-    (case_dir / "result.json").write_text(json.dumps(result, indent=2))
-    (case_dir / "transcript.md").write_text(render.to_markdown(trace, result))
+    (case_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (case_dir / "transcript.md").write_text(render.to_markdown(trace, result), encoding="utf-8")
     mark = "PASS" if passed else "FAIL"
     print(
         f"  {mark:4} {case.id:24} calls {trace.calls:>2}/{case.budget:<2} "
@@ -265,19 +266,19 @@ def main(argv: list[str] | None = None) -> int:
     merged: dict[tuple[str, int], dict] = {}
     old = run_dir / "results.json"
     if old.exists():
-        for r in json.loads(old.read_text()):
+        for r in json.loads(old.read_text(encoding="utf-8")):
             merged[(r["case"], r.get("rep", 0))] = r
     else:
         # No index yet — a previous invocation was killed before it wrote one.
         # Each case wrote its own result as it finished, so nothing is lost.
         for path in sorted(run_dir.glob("*/result.json")):
-            r = json.loads(path.read_text())
+            r = json.loads(path.read_text(encoding="utf-8"))
             merged.setdefault((r["case"], r.get("rep", 0)), r)
     for r in results:
         merged[(r["case"], r.get("rep", 0))] = r
     results = list(merged.values())
 
-    old.write_text(json.dumps(results, indent=2))
+    old.write_text(json.dumps(results, indent=2), encoding="utf-8")
     report.write(run_dir, results)
     passed = sum(1 for r in results if r["passed"])
     print(f"\nax: {passed}/{len(results)} passed — {run_dir}/index.md")

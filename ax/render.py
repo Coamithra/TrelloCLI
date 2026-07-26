@@ -97,7 +97,7 @@ def parse(path: str | Path) -> Trace:
     """Read a stream-json trace file into a Trace."""
     trace = Trace()
     pending: dict[str, Step] = {}
-    for line in Path(path).read_text(errors="replace").splitlines():
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue

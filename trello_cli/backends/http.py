@@ -130,6 +130,17 @@ class HttpBackend(Backend):
         return self._rpc("get_cards_in_list", list_id,
                          with_latest_comment=with_latest_comment)
 
+    def search_cards(self, board_id: str, query: str, *,
+                     list_id: str | None = None, include_closed: bool = False,
+                     partial: bool = False,
+                     substring: bool = False) -> list[dict]:
+        # Semantics (including whether --substring is accepted) are the SERVER's
+        # backend's, not ours: a server on the local store honours substring, one
+        # fronting Trello refuses it — and its SystemExit comes back as ours.
+        return self._rpc("search_cards", board_id, query, list_id=list_id,
+                         include_closed=include_closed, partial=partial,
+                         substring=substring)
+
     def get_card(self, card_id: str) -> dict:
         return self._rpc("get_card", card_id)
 

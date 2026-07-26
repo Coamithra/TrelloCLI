@@ -67,6 +67,12 @@ class Backend(ABC):
                           with_latest_comment: bool = False) -> list[dict]: ...
 
     @abstractmethod
+    def search_cards(self, board_id: str, query: str, *,
+                     list_id: str | None = None, include_closed: bool = False,
+                     partial: bool = False,
+                     substring: bool = False) -> list[dict]: ...
+
+    @abstractmethod
     def get_card(self, card_id: str) -> dict: ...
 
     @abstractmethod

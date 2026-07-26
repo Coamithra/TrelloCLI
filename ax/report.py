@@ -154,22 +154,22 @@ def write(run_dir: Path, results: list[dict]) -> dict:
         t = _transcript(run_dir, r)
         if t:
             lines += [t, ""]
-    (run_dir / "index.md").write_text("\n".join(lines) + "\n")
+    (run_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     corpus = [f"# AX corpus — {run_dir.name}", ""]
     for r in sorted(results, key=lambda r: (r["tier"], r["case"])):
         t = _transcript(run_dir, r)
         if t:
             corpus += [t, ""]
-    (run_dir / "corpus.md").write_text("\n".join(corpus) + "\n")
-    (run_dir / "summary.json").write_text(json.dumps(s, indent=2))
+    (run_dir / "corpus.md").write_text("\n".join(corpus) + "\n", encoding="utf-8")
+    (run_dir / "summary.json").write_text(json.dumps(s, indent=2), encoding="utf-8")
     return s
 
 
 def _transcript(run_dir: Path, r: dict) -> str:
     name = r["case"] if not r.get("rep") else f"{r['case']}#{r['rep']}"
     p = run_dir / name / "transcript.md"
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("run_dir")
     args = ap.parse_args(argv)
     run_dir = Path(args.run_dir)
-    results = json.loads((run_dir / "results.json").read_text())
+    results = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
     write(run_dir, results)
     print(f"wrote {run_dir}/index.md")
     return 0

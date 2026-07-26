@@ -64,8 +64,10 @@ Global:
   configure-http <url> [<tok>]  Save a hosted trellno server (its `serve --token`
                                 value) for --backend http; omit the token to
                                 keep a previously saved one
-  boards [--archived|--all]     List boards (open by default; --archived shows
-                                only archived, --all shows both with state)
+  boards [<query>]              List boards (open by default; --archived shows
+        [--archived|--all]      only archived, --all shows both with state).
+                                A query filters by name substring or ID prefix:
+                                `trello boards roadmap`
   local init [path]             Set up the local file backend root
                                 (default ~/Dropbox/trello-cli)
   local gc [--apply]            Clean stale local data: orphaned attachment
@@ -86,6 +88,22 @@ Global:
                                 (ISO 2026-06-01, relative 6h/3d/2w/1m/1y,
                                 'today', 'yesterday'; optional action-type
                                 filter, e.g. commentCard updateCard)
+
+Find:
+  search <query>                Find cards by text on the --board board (`find`
+        [--list <list>]         works too). Searches names, descriptions,
+        [--all] [--partial]     comments and checklists. Terms are AND-ed;
+        [--substring]           `-word` excludes. --list scopes to one column,
+                                --all includes archived cards.
+                                MATCHING: whole words by default; --partial also
+                                matches word prefixes (scroll -> scrollbar);
+                                --substring matches mid-word (crollba ->
+                                scrollbar) and is LOCAL-BACKEND ONLY, because
+                                Trello's search is a word index.
+                                Trello's operators (due:, label:, is:, has:,
+                                sort:, name:, description:, comment:, checklist:)
+                                work on both backends; created:/member:/board:
+                                are Trello-only and are literal text locally.
 
 Workflow:
   grab [--from "To Do"]         Atomically claim the top card of a list and move
@@ -109,7 +127,9 @@ Card:
                                        which column to ask for; --limit 0 shows
                                        all). --archived shows archived cards
                                        instead of open ones (that's how you
-                                       find a card to unarchive)
+                                       find a card to unarchive).
+                                       Looking for a card by keyword rather than
+                                       listing a column? Use `search <query>`.
   card add <list> <name> [desc] Create a card at the top (--bottom to append)
   card move <card_id> <list>    Move a card to a list (to claim the *top* card of
                                 a list when other agents are racing you, use
@@ -552,6 +572,8 @@ _VERB_HINTS = {
     ("card", "create"): "trello card add <list> <name>",
     ("card", "delete"): "trello card archive <card_id>",
     ("card", "assign"): "trello card mine (this CLI is single-user)",
+    ("card", "search"): 'trello search <query>  (top-level, not a card verb)',
+    ("card", "find"): 'trello search <query>  (top-level, not a card verb)',
     ("board", "list"): "trello boards",
     ("board", "ls"): "trello boards",
     ("board", "cards"): "trello card ls",
@@ -572,9 +594,9 @@ _VERB_WORDS = {
     "boards", "card", "cards", "check", "checklist", "checklists", "comment",
     "comments", "create", "del", "delete", "desc", "describe", "download",
     "due", "edit", "item", "items", "label", "labels", "list", "lists", "ls",
-    "mine", "move", "new", "open", "pos", "position", "remove", "rename",
-    "reorder", "restore", "rm", "set", "show", "uncheck", "unarchive", "unset",
-    "update",
+    "find", "mine", "move", "new", "open", "pos", "position", "remove",
+    "rename", "reorder", "restore", "rm", "search", "set", "show", "uncheck",
+    "unarchive", "unset", "update",
 }
 
 # What else a caller in this group probably needs to know about.
@@ -671,7 +693,8 @@ def _dispatch(group: str, subcmds: dict, args: list[str],
 # Flags agents invent because every other CLI has them. Naming the positional
 # form costs one line and saves a turn.
 _FLAG_HINTS = {
-    "--list": 'The list is positional: trello card ls "To Do"',
+    "--list": ('The list is positional: trello card ls "To Do"   '
+               "(`search` does take --list <list>)"),
     "--card": "The card is positional: trello card show <card_id>",
     "--name": "The name is positional, e.g. trello card add <list> <name>",
     "--all": "For archived cards use --archived; for archived boards, boards --all",
@@ -747,14 +770,33 @@ def cmd_configure_http(args: list[str]) -> None:
 
 
 def cmd_boards(args: list[str]) -> None:
-    _positional, flags = _parse_flags(args, bool_flags=("--archived", "--all"))
+    positional, flags = _parse_flags(args, bool_flags=("--archived", "--all"))
     archived_only = bool(flags.get("--archived"))
     include_closed = archived_only or bool(flags.get("--all"))
     boards = api.get_boards(include_closed=include_closed)
     if archived_only:
         boards = [b for b in boards if b.get("closed")]
+    # Optional positional filter: `boards trellocli`. Substring on the name (not
+    # the prefix-only matching `--board` does — when you're *looking* for a board
+    # you rarely know how its name starts) or a prefix of the id. Filtering is
+    # client-side on every backend, so unlike card search there's no remote index
+    # to mirror and no cross-backend divergence to create.
+    query = " ".join(positional).strip().lower()
+    if query:
+        boards = [
+            b for b in boards
+            if query in (b.get("name") or "").lower()
+            or (b.get("id") or "").lower().startswith(query)
+        ]
     if _is_json():
         print_json(boards)
+        return
+    if not boards and query:
+        scope = ("archived boards" if archived_only
+                 else "boards" if include_closed else "open boards")
+        print(f'No {scope} matching "{query}".')
+        if not include_closed:
+            print("  Archived boards are hidden by default: boards --all")
         return
     if include_closed:
         rows = [[short_id(b["id"]), b["name"],
@@ -2543,12 +2585,140 @@ def cmd_grab(args: list[str]) -> None:
         print(f"  Claim: {claim} (the claim comment with this id on the card is yours)")
 
 
+# ── Find ────────────────────────────────────────────────────────────
+
+# Operators Trello's index implements but the local store can't (see the operator
+# table in backends/local.py, which is the authority — tests assert these agree).
+# Detected only to HINT: the query still runs, they're just literal text locally.
+_TRELLO_ONLY_OPS = ("created", "member", "board")
+_TRELLO_ONLY_OP_RE = re.compile(
+    r"(?:^|\s)-?(?:" + "|".join(_TRELLO_ONLY_OPS) + r"):", re.IGNORECASE)
+
+
+def _search_hints(query: str, backend: str, found: int, substring: bool) -> list[str]:
+    """Backend-specific hints for a search, gated on what the query actually used.
+
+    The two backends genuinely differ (Trello has operators and fuzzy matching;
+    only the local store can match mid-word), and the CLI surface is the only
+    documentation an agent caller ever reads — so say so at the moment it
+    matters, not only in --help."""
+    # `http` is deliberately absent from both gates: its semantics are the
+    # SERVER's backend's, which this side can't see — a server on a local store
+    # honours --substring, one fronting Trello doesn't. Guessing would mean
+    # telling half of those users something false.
+    hints: list[str] = []
+    if backend == "local" and _TRELLO_ONLY_OP_RE.search(query):
+        hints.append(
+            "Note: " + "/".join(f"{o}:" for o in _TRELLO_ONLY_OPS)
+            + " are Trello-backend operators; on the local backend they're "
+              "matched as literal text (so they narrow to nothing rather than "
+              "being ignored)."
+        )
+    if found or substring:
+        return hints
+    if backend == "trello":
+        hints.append(
+            "Trello matches whole words (--partial for word-prefix). Mid-word "
+            "matching needs the local backend."
+        )
+    elif backend == "local":
+        hints.append(
+            "Whole-word match. Try --partial for word-prefixes, or --substring "
+            "for mid-word matches (e.g. 'crollba' finding 'scrollbar')."
+        )
+    return hints
+
+
+def cmd_search(args: list[str]) -> None:
+    # `search --help` is the first thing anyone tries on a command they just
+    # discovered; letting _parse_flags answer it with "Unknown flag: --help"
+    # burns a turn and teaches nothing. Only the DASHED forms, and only alone:
+    # "help" is an ordinary word, so `trello search help` searches for it
+    # (`trello help search` is the undashed way to ask).
+    if len(args) == 1 and args[0] in ("--help", "-h"):
+        # Not a noun group, so it takes a query rather than a verb —
+        # _print_group_help's "<verb>" header would be a lie.
+        print("Usage: trello [--board <name_or_id>] [--json] search <query> [flags]")
+        print()
+        print(_usage_section("search"))
+        return
+    positional, flags = _parse_flags(
+        args,
+        bool_flags=("--all", "--partial", "--substring"),
+        value_flags=("--list",),
+    )
+    if not positional:
+        raise SystemExit(
+            "Usage: trello --board <board> search <query> [--list <list>] "
+            "[--all] [--partial] [--substring]\n"
+            "Searches card names, descriptions, comments and checklists.\n"
+            'Example: trello --board Roadmap search "safari cookie"'
+        )
+    query = " ".join(positional)
+    board_id = _require_board()
+    list_ref = flags.get("--list")
+    list_id = _resolve_list(board_id, str(list_ref)) if list_ref else None
+    substring = bool(flags.get("--substring"))
+    cards = api.search_cards(
+        board_id, query,
+        list_id=list_id,
+        include_closed=bool(flags.get("--all")),
+        partial=bool(flags.get("--partial")),
+        substring=substring,
+    )
+    backend = config.get_backend_name()
+    hints = _search_hints(query, backend, len(cards), substring)
+
+    if _is_json():
+        print_json(cards)
+        # stdout stays a clean JSON array — notes go to stderr, same split
+        # `card ls` uses for its truncation notice.
+        for hint in hints:
+            print(hint, file=sys.stderr)
+        return
+
+    if not cards:
+        print(f'No cards matching "{query}".')
+        for hint in hints:
+            print(f"  {hint}")
+        return
+
+    names = {l["id"]: l["name"] for l in api.get_lists(board_id)}
+    rows = [
+        [
+            short_id(c["id"]),
+            truncate(names.get(c.get("idList"), "?"), 18),
+            (c.get("dateLastActivity") or "")[:10],
+            truncate(c["name"], 50),
+            label_str(c.get("labels", [])),
+            due_str(c.get("due"), c.get("dueComplete", False)),
+        ]
+        for c in cards
+    ]
+    print_table(["ID", "List", "Activity", "Name", "Labels", "Due"], rows)
+
+    # A hit in a description/comment/checklist is an unexplained row without the
+    # line that matched — the table only shows the name.
+    context = [c for c in cards if (c.get("_match") or {}).get("line")]
+    if context:
+        print()
+        print("  Matches:")
+        for c in context:
+            m = c["_match"]
+            print(f"    {short_id(c['id'])}  ({m['field']}) "
+                  f"{truncate(m['line'], 70)}")
+    for hint in hints:
+        print(f"\n  {hint}")
+
+
 # ── Command dispatch ────────────────────────────────────────────────
 
 COMMANDS = {
     "configure": cmd_configure,
     "configure-http": cmd_configure_http,
     "boards": cmd_boards,
+    "search": cmd_search,
+    "find": cmd_search,  # the other obvious guess; both reach the same command
     "local": cmd_local,
     "export": cmd_export,
     "serve": cmd_serve,

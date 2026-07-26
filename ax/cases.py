@@ -80,6 +80,35 @@ CASES: list[Case] = [
         tags=["read"],
     ),
     Case(
+        id="t1-find-card",
+        tier=1,
+        prompt=(
+            "Use the `trello` command. Somewhere on the Roadmap board there's a card "
+            "about a problem with cookies in Safari. Which card is it?"
+        ),
+        # The give-away words live ONLY in the description ("Session cookie is
+        # dropped on Safari 17."), never in the title — so listing columns and
+        # reading names can't answer it. Filing this card is what the search
+        # feature exists for; before it, an agent had to open cards one by one.
+        budget=3,
+        expect=["Fix login bug"],
+        forbid=["Add dark mode", "Migrate database"],
+        readonly=True,
+        tags=["read", "search", "discovery"],
+    ),
+    Case(
+        id="t1-find-board",
+        tier=1,
+        prompt=(
+            "Use the `trello` command. Is there a board whose name mentions 'scratch'? "
+            "Give me its name and id."
+        ),
+        budget=2,
+        expect=["Scratch"],
+        readonly=True,
+        tags=["read", "search", "discovery"],
+    ),
+    Case(
         id="t1-card-detail",
         tier=1,
         prompt=(
