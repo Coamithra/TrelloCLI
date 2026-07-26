@@ -81,6 +81,18 @@ def test_grab_empty_list_returns_none(board):
     assert backend.grab_top_card(lists[0]["id"], lists[1]["id"]) is None
 
 
+def test_grab_has_no_claim_id(board):
+    """`claimId` identifies the claim COMMENT the Trello handshake leaves behind.
+    The local backend claims under the store lock and posts no comment, so the
+    key is absent — not a null, which would read as 'a claim exists, id unknown'
+    (see base.py's transient-key contract)."""
+    backend, bid, lists = board
+    src, dst = lists[0]["id"], lists[1]["id"]
+    backend.create_card(src, "A")
+    got = backend.grab_top_card(src, dst)
+    assert got is not None and "claimId" not in got
+
+
 # ── Transient Windows sharing violations (Dropbox / antivirus) ────────
 #
 # A store on a synced folder gets its files momentarily opened by Dropbox, the

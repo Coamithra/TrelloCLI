@@ -94,7 +94,10 @@ Workflow:
                                 agents grab the top ticket at once: no two get
                                 the same card. Exit 1 if there's nothing to grab.
                                 Local: truly atomic (store lock). Trello: faked
-                                with the claim-comment handshake (a ~10-30s wait).
+                                with the claim-comment handshake (a ~10-30s wait),
+                                and prints a `Claim:` id — the claim comment it
+                                leaves on the card, so you can tell it from a
+                                rival's.
 
 Card:
   card show <card_id> [--no-comments]  Show card details (comments included by default)
@@ -2532,6 +2535,12 @@ def cmd_grab(args: list[str]) -> None:
     print(f"Grabbed: {card['name']}")
     print(f"  ID:    {short_id(card['id'])} ({card['id']})")
     print(f"  Moved: {names.get(src_id, src_name)} -> {names.get(dst_id, dst_name)}")
+    # Only the Trello backend claims by commenting, and that comment is never
+    # retracted on a win — print the id so the caller can later tell the claim
+    # on the card is its own rather than a rival's (see base.py's `claimId`).
+    claim = card.get("claimId")
+    if claim:
+        print(f"  Claim: {claim} (the claim comment with this id on the card is yours)")
 
 
 # ── Command dispatch ────────────────────────────────────────────────
