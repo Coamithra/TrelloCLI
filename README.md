@@ -204,6 +204,9 @@ trello activity [n]                Show recent activity
 trello export [--to local] [--no-attachments]  Pull --board into the local file
                                    store (source backend = --backend, default
                                    trello; uploaded blobs downloaded by default)
+trello export --fork [--name <name>]  Same pull, but under a NEW board id, so the
+                                   copy is a separate board instead of the
+                                   source's mirror (permanent; --to local only)
 trello export --to trello [--name <name>] [--no-attachments]  Push a local --board
                                    up to Trello as a new board (source = --backend
                                    local; create-new-each-time)
@@ -383,6 +386,36 @@ and the stored URL is rewritten root-relative, so the snapshot is usable offline
 Already-downloaded blobs are reused on re-export, and a per-blob download failure is non-fatal —
 it warns and keeps the remote URL. URL attachments are already portable and exported as-is. Only
 open lists are pulled (the API exposes open lists only).
+
+#### Forking instead of mirroring — `--fork`
+
+Preserving the id is what makes a re-export a refresh, but it also means the Trello board and
+its local copy are **the same board id** — handy while the local copy is just a snapshot,
+confusing once you start editing both. `--fork` writes the copy under a **new board id**, so
+you get two boards that happen to share a history: one on Trello, one local.
+
+```bash
+trello --board "My Board" export --fork                        # -> a NEW local board
+trello --board "My Board" export --fork --name "My Board (local)"  # ...under its own name
+```
+
+This is **permanent and create-new-each-time** — the same contract as `export --to trello`:
+
+- Nothing tracks a forked board. No later `export` will find or refresh it; to pull fresh
+  changes from Trello you re-export the *mirror*, not the fork.
+- Running `--fork` twice gives you two forks, not one updated one.
+- `--name` is available here (and only here for `--to local`) — without it both boards carry
+  the same name, which is most of the confusion you were trying to escape. A plain mirror
+  refuses `--name`, since the next re-export would overwrite it with the source's name.
+- Combining `--fork` with `--no-attachments` is one-way: a mirror can fill its blobs in on a
+  later re-export, a fork never gets another chance, so its attachments keep pointing at the
+  source. The command warns when you do it.
+
+**Only the board id is reminted** — list, card, label, comment and checklist ids are still
+preserved, so the fork's internal references all keep resolving. The one visible consequence is
+if you keep a fork *and* a mirror of the same source in one store: they hold cards with
+identical ids, so a cross-board listing (`card mine`) shows each twice, and the fork's card URLs
+still deep-link to the Trello cards it no longer tracks.
 
 ### Pushing a local board up to Trello
 

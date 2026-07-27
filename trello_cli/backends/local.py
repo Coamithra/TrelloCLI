@@ -719,7 +719,7 @@ class LocalBackend(Backend):
         }
 
     def import_board(self, board: dict, lists: list[dict], labels: list[dict],
-                     cards: list[dict]) -> dict:
+                     cards: list[dict], *, board_id: str | None = None) -> dict:
         """Write a board pulled from another backend into the local store.
 
         Local-only — not part of the `Backend` ABC; the `export` command targets
@@ -730,8 +730,19 @@ class LocalBackend(Backend):
         dropped upstream — are pruned, so the result is a clean snapshot. Cards are
         written as-is: the `export` command downloads uploaded attachment blobs and
         rewrites their urls root-relative *before* calling this, so those local urls
-        get persisted here. Returns counts for the caller to print."""
-        bid = board["id"]
+        get persisted here. Returns counts for the caller to print.
+
+        `board_id` overrides where the snapshot lands — `export --to local --fork`
+        passes a fresh `new_id()` so the copy becomes a board in its own right
+        instead of the source's mirror. Only the BOARD id changes; list / card /
+        label / comment / checklist ids are still preserved, so the snapshot's
+        internal cross-references keep resolving. Because the id is fresh there is
+        nothing to overwrite or prune, and no future export will ever find this
+        board again — the fork is permanently orphaned from its source. The caller
+        must mint the id *before* downloading attachment blobs: the board id is a
+        path component (`<root>/<bid>/attachments/<cardId>/`), so minting it here
+        would strand every blob under the source id."""
+        bid = board_id or board["id"]
         # Preserve any local-only per-list `sort` set on a prior import of this
         # board — a Trello re-pull has no `sort` field and would otherwise reset
         # every column back to manual, silently losing local state.

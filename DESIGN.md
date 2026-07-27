@@ -228,6 +228,36 @@ last-write-wins caveat disappears for boards that move there.
 The **export/import** bonus (Phase 4) falls out almost for free since both
 backends share the entity shape.
 
+### `export --to local --fork` — mirror vs fork
+
+Id-preservation gives `--to local` its idempotent-refresh property, but it also
+hard-couples the copy to its source: both live boards carry one id and only
+`--backend` tells them apart. `--fork` mints a fresh board id instead, for the
+other real use — **splitting** a cloud board into two boards that diverge from
+here on. Same **create-new-each-time** contract as `--to trello`: a fork is
+permanently orphaned (no later export finds it, forking twice makes two boards),
+which is why it is an opt-in flag and not the default.
+
+**Only the board id is reminted.** A full remap (cards, lists, labels, comments,
+checklists, and every `idList` / `idLabels` / item cross-reference) was considered
+and rejected: it is a large diff whose only payoff is a collision that exists
+solely when a fork *and* a mirror of the same source share one store — where the
+practical effect is cosmetic (`get_my_cards` spans boards, so it lists the shared
+card id twice) rather than a data hazard, since every other path is board-scoped.
+The fork's card `shortUrl`/`shortLink` likewise still point at Trello cards it no
+longer tracks. Both are documented, not fixed.
+
+**The board id is a path component** (`<root>/<bid>/attachments/<cardId>/`), which
+makes the ordering load-critical rather than incidental: the destination id is
+minted in `_export_to_local` *before* the attachment step, not inside
+`import_board`. Minting it later would write every blob under the source id and
+leave the fork pointing at nothing; handing the source id to
+`_preserve_local_attachment_urls` would seed the fork's cards with urls into the
+source board's blob dir. For the same reason a fork **re-fetches** attachments
+whose url is already store-relative (an http source serves them from its own
+store) — the skip that is correct for a mirror, whose source id *is* its
+destination id, is a cross-link for a fork.
+
 ### `export --to trello` (reverse import) — create-new-each-time
 
 The reverse pushes the local store *up* to Trello. The asymmetry vs `--to local`:
