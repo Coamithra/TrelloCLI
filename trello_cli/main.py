@@ -2129,8 +2129,8 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict], *,
             url = att.get("url")
             if not att.get("isUpload") or not url:
                 continue
-            if (not str(url).lower().startswith(("http://", "https://"))
-                    and not fetch_relative):
+            remote = str(url).lower().startswith(("http://", "https://"))
+            if not remote and not fetch_relative:
                 continue  # already a local path (e.g. re-export of a local source)
             dest_dir = backend.store.attachments_dir(board_id, card["id"])
             # Reuse any complete blob already downloaded for this id (the filename
@@ -2155,8 +2155,13 @@ def _export_attachment_blobs(backend, board_id: str, cards: list[dict], *,
                 att["url"] = dest.relative_to(root).as_posix()
                 counts["downloaded"] += 1
             except Exception as e:
+                # A store-relative url that failed to copy is NOT "kept remote":
+                # it still names the source board's store, which is the very
+                # cross-link fetch_relative exists to break. Say which it is.
+                kept = ("keeping remote url" if remote else
+                        "url still points into the source board's store")
                 print(f"  warning: could not download attachment {short_id(att['id'])} "
-                      f"({name}): {e} — keeping remote url", file=sys.stderr)
+                      f"({name}): {e} — {kept}", file=sys.stderr)
                 try:
                     if tmp.is_file():
                         tmp.unlink()
@@ -2392,24 +2397,35 @@ def _push_board_to_trello(dest, source_root: str, board: dict, lists: list[dict]
             "shortUrl": new_board.get("shortUrl", ""), **counts}
 
 
+_EXPORT_USAGE = (
+    "Usage: trello --board <board> export [--to local|trello] "
+    "[--fork] [--name <name>] [--no-attachments]\n"
+    "  --to local  (default): pull the board into the local file store "
+    "(source = --backend, default trello). Ids are preserved, so re-running it "
+    "refreshes the same board in place.\n"
+    "  --to trello: push a local board up to Trello as a new board "
+    "(source must be --backend local).\n"
+    "  --fork (--to local only): give the copy NEW ids, so it becomes a separate "
+    "board instead of the source's mirror. Permanent: no later export tracks a "
+    "forked board, and forking twice makes two boards. Pair with --name."
+)
+
+
 def cmd_export(args: list[str]) -> None:
+    # Every flag here is irreversible in one direction or another, and this usage
+    # text is the only place they are written down — answering the first thing
+    # anyone types with "Unknown flag: --help" hides exactly that. (`search` is
+    # special-cased for the same reason; here there is no query to confuse it
+    # with, so `help` is taken too.)
+    if len(args) == 1 and args[0] in ("--help", "-h", "help"):
+        print(_EXPORT_USAGE)
+        return
     positional, flags = _parse_flags(
         args, bool_flags=("--no-attachments", "--fork"),
         value_flags=("--to", "--name"),
     )
     if positional:
-        raise SystemExit(
-            "Usage: trello --board <board> export [--to local|trello] "
-            "[--fork] [--name <name>] [--no-attachments]\n"
-            "  --to local  (default): pull the board into the local file store "
-            "(source = --backend, default trello).\n"
-            "  --to trello: push a local board up to Trello as a new board "
-            "(source must be --backend local).\n"
-            "  --fork (--to local only): write the copy under a NEW board id "
-            "instead of the source's, so it becomes a separate board rather than "
-            "the source's mirror. Permanent: no later export tracks a forked "
-            "board, and forking twice makes two boards. Pair with --name."
-        )
+        raise SystemExit(_EXPORT_USAGE)
     target = str(flags.get("--to") or "local").lower()
     if target == "local":
         _export_to_local(flags)
@@ -2422,15 +2438,76 @@ def cmd_export(args: list[str]) -> None:
         )
 
 
+def _fork_snapshot(lists: list[dict], labels: list[dict], cards: list[dict],
+                   new_id) -> tuple[list[dict], list[dict], list[dict]]:
+    """Re-id a gathered snapshot so a fork shares no entity id with its source.
+
+    The board id is not the only one that has to change. `LocalBackend` finds an
+    entity by scanning EVERY board and taking the first hit (`_locate_card`,
+    `_locate_list`, `_locate_comment`, `_locate_checklist`), which is sound only
+    because ids are unique store-wide — Trello's are, and `new_id()` is random. A
+    fork that kept its source's ids would break that invariant, and a store
+    holding both a fork and a mirror of one source would then route every
+    id-addressed write (`card rename`, `comment add`, `checklist item check`, …)
+    to whichever board id sorts first, silently ignoring `--board`.
+
+    So everything is reminted and the cross-references are rewritten to match:
+    `idList` and `idLabels` through the list/label maps, `idCard`/`idChecklist`
+    down the checklist tree. Ids that do not name store entities (members,
+    Trello's `shortLink`/`shortUrl`) are left alone. Returns new dicts — the
+    caller's snapshot is not mutated."""
+    list_map = {l["id"]: new_id() for l in lists}
+    label_map = {lb["id"]: new_id() for lb in labels}
+    out_lists = [{**l, "id": list_map[l["id"]]} for l in lists]
+    out_labels = [{**lb, "id": label_map[lb["id"]]} for lb in labels]
+
+    out_cards = []
+    for card in cards:
+        cid = new_id()
+        # A card in a list that wasn't exported keeps its old idList and is
+        # dropped by import_board's list-scoped reads, exactly as for a mirror.
+        new_card = {**card, "id": cid,
+                    "idList": list_map.get(card.get("idList", ""), card.get("idList", "")),
+                    # Drop the resolved `labels` dicts: they carry the source's
+                    # label ids, and `_to_store_card` prefers `idLabels` anyway.
+                    "idLabels": [label_map[i] for i in _card_label_ids(card)
+                                 if i in label_map]}
+        new_card.pop("labels", None)
+        new_card["comments"] = [{**cm, "id": new_id()}
+                                for cm in card.get("comments") or []]
+        new_card["attachments"] = [{**a, "id": new_id()}
+                                   for a in card.get("attachments") or []]
+        checklists = []
+        for cl in card.get("checklists") or []:
+            clid = new_id()
+            checklists.append({
+                **cl, "id": clid, "idCard": cid,
+                "checkItems": [{**it, "id": new_id(), "idChecklist": clid}
+                               for it in cl.get("checkItems") or []],
+            })
+        new_card["checklists"] = checklists
+        out_cards.append(new_card)
+    return out_lists, out_labels, out_cards
+
+
 def _export_name(flags: dict) -> str:
     """The `--name` override for either export direction, guarded.
 
     `_parse_flags` takes the token after `--name` verbatim, so `--name --fork`
-    would name a board `--fork`. Board names are free text with no resolver behind
-    them, which is exactly the sink `_free_text` exists for (a `--` separator still
-    reaches a name that really does start with dashes). Empty when unset."""
-    raw = flags.get("--name")
-    return _free_text([str(raw)], "board name") if raw else ""
+    would name a board `--fork` — the same "invented flags never become data" hole
+    `_free_text` closes for positional text. It can't be `_free_text` itself here:
+    that guard's escape hatch is a bare `--` *earlier in argv*, which `--name`
+    (exactly one token, consumed by `_parse_flags`) can never reach, so it would
+    advise a fix that does not work. Empty when unset."""
+    raw = str(flags.get("--name") or "")
+    if raw.startswith("--"):
+        raise SystemExit(
+            f"Expected a board name after --name, got the flag {raw}. This CLI "
+            "takes values positionally — quote the text as one argument.\n"
+            "A name that really does start with dashes can't be passed here; "
+            "export it, then `trello --backend local --board <id> board rename`."
+        )
+    return raw
 
 
 def _export_to_local(flags: dict) -> None:
@@ -2438,7 +2515,7 @@ def _export_to_local(flags: dict) -> None:
     # Validate the flags before touching the network: a bad --name should say so,
     # not surface as whatever the first real step happens to complain about.
     name = _export_name(flags)
-    if flags.get("--name") and not fork:
+    if "--name" in flags and not fork:  # presence, so --name "" is refused too
         # A rename on a mirror would just be overwritten by the next re-export
         # (which re-imports the source's name); on a fork it sticks, and it is the
         # obvious pairing — two boards with one name is the confusion fork fixes.
@@ -2470,11 +2547,16 @@ def _export_to_local(flags: dict) -> None:
     # source id to _preserve_local_attachment_urls would seed a fork's cards with
     # urls pointing into the source board's blob dir.
     dest_id = new_id() if fork else board["id"]
+    if fork:
+        # Before the attachment step: blob dirs are keyed by CARD id and blob
+        # filenames by ATTACHMENT id, both of which change here.
+        lists, labels, cards = _fork_snapshot(lists, labels, cards, new_id)
     if name:
         board = {**board, "name": name}
     if flags.get("--no-attachments"):
         blobs = None
-        if fork:
+        if fork and any(a.get("isUpload")
+                        for c in cards for a in c.get("attachments") or []):
             # A fresh id means there is no prior copy to preserve urls from — and
             # crucially nothing to preserve them from the *source* board either.
             print("  note: --fork with --no-attachments is permanent — no later "

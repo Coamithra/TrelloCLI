@@ -238,14 +238,22 @@ here on. Same **create-new-each-time** contract as `--to trello`: a fork is
 permanently orphaned (no later export finds it, forking twice makes two boards),
 which is why it is an opt-in flag and not the default.
 
-**Only the board id is reminted.** A full remap (cards, lists, labels, comments,
-checklists, and every `idList` / `idLabels` / item cross-reference) was considered
-and rejected: it is a large diff whose only payoff is a collision that exists
-solely when a fork *and* a mirror of the same source share one store — where the
-practical effect is cosmetic (`get_my_cards` spans boards, so it lists the shared
-card id twice) rather than a data hazard, since every other path is board-scoped.
-The fork's card `shortUrl`/`shortLink` likewise still point at Trello cards it no
-longer tracks. Both are documented, not fixed.
+**Everything is reminted, not just the board id** (`_fork_snapshot`), and this is
+not optional. Reminting only the board was tried first, on the assumption that
+every other path is board-scoped. It isn't: `LocalBackend` resolves an entity by
+scanning **every** board and taking the first hit (`_locate_card`, `_locate_list`,
+`_locate_comment`, `_locate_checklist`), which is sound only because ids are
+unique store-wide — Trello's are, and `new_id()` is random. A fork that kept its
+source's ids breaks that invariant, and the moment a fork and a mirror of one
+source share a store, every id-addressed write (`card rename`, `comment add`,
+`checklist item check`, …) lands on whichever board id sorts first, silently
+ignoring `--board`. Worse, it defeats `_resolve_card`'s explicit cross-board
+guard: the id *does* belong to the selected board, so the check passes and the
+backend still writes to the other one. That is the documented steady state
+(README tells you to keep the mirror for re-pulling), so it had to be fixed
+rather than noted. Cards do keep the source's Trello `shortUrl`/`shortLink`,
+which stay pointed at cards the fork no longer tracks — that one *is* just
+documented.
 
 **The board id is a path component** (`<root>/<bid>/attachments/<cardId>/`), which
 makes the ordering load-critical rather than incidental: the destination id is

@@ -411,11 +411,12 @@ This is **permanent and create-new-each-time** — the same contract as `export 
   later re-export, a fork never gets another chance, so its attachments keep pointing at the
   source. The command warns when you do it.
 
-**Only the board id is reminted** — list, card, label, comment and checklist ids are still
-preserved, so the fork's internal references all keep resolving. The one visible consequence is
-if you keep a fork *and* a mirror of the same source in one store: they hold cards with
-identical ids, so a cross-board listing (`card mine`) shows each twice, and the fork's card URLs
-still deep-link to the Trello cards it no longer tracks.
+**Every id is reminted**, not just the board's — lists, cards, labels, comments, checklists and
+attachments all get fresh ones, with the internal references rewritten to match. That is what
+lets a fork and a mirror of the same source coexist in one store: the file store looks entities
+up by id across *all* boards, so two boards sharing a card id would send `card rename`,
+`comment add` and friends to whichever board sorted first, ignoring `--board`. The fork's cards
+do keep the source's Trello `shortUrl`, so those links still point at cards it no longer tracks.
 
 ### Pushing a local board up to Trello
 
