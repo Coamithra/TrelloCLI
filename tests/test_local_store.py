@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -405,3 +406,276 @@ def test_unarchive_lands_at_bottom(board):
     open_positions = [c["pos"] for c in backend.get_cards_in_list(lst)]
     assert restored["pos"] == max(open_positions)
     assert restored["pos"] > b["pos"]
+
+
+# ── export --to local --fork ──────────────────────────────────────────
+#
+# A fork re-ids the snapshot so the copy is a board in its own right rather than
+# the source's mirror. Two hazards drive these tests:
+#   - the board id is a *path component* (<root>/<bid>/attachments/<cardId>/), so
+#     every attachment step has to run against the destination id or the fork
+#     points at the source's blobs;
+#   - `_locate_card` & friends scan every board and take the first hit, so ids
+#     must stay unique store-wide or id-addressed writes land on the wrong board.
+
+SRC_BID = "aaaaaaaaaaaaaaaaaaaaaaaa"
+SRC_LIST = "bbbbbbbbbbbbbbbbbbbbbbbb"
+SRC_CARD = "cccccccccccccccccccccccc"
+SRC_ATT = "dddddddddddddddddddddddd"
+SRC_LABEL = "eeeeeeeeeeeeeeeeeeeeeeee"
+SRC_COMMENT = "ffffffffffffffffffffffff"
+SRC_CHECKLIST = "111111111111111111111111"
+SRC_ITEM = "222222222222222222222222"
+# Every id the snapshot below carries — a fork must reuse none of them.
+SRC_IDS = {SRC_BID, SRC_LIST, SRC_CARD, SRC_ATT, SRC_LABEL, SRC_COMMENT,
+           SRC_CHECKLIST, SRC_ITEM}
+
+
+def _snapshot(att_url: str | None = None) -> tuple[dict, list, list, list]:
+    """A Trello-shaped board snapshot, as `_gather_board` would return it: one
+    card carrying one of everything that holds a store id. With `att_url`, its
+    attachment is an upload at that url."""
+    board = {"id": SRC_BID, "name": "Source Board", "desc": "", "closed": False,
+             "shortUrl": "https://trello.com/b/src"}
+    lists = [{"id": SRC_LIST, "name": "To Do", "pos": 65536, "closed": False}]
+    labels = [{"id": SRC_LABEL, "name": "bug", "color": "red"}]
+    card = {
+        "id": SRC_CARD, "idList": SRC_LIST, "name": "A card", "desc": "",
+        "pos": 65536, "closed": False, "idLabels": [SRC_LABEL],
+        "comments": [{"id": SRC_COMMENT, "text": "hi", "date": "2026-01-01"}],
+        "checklists": [{"id": SRC_CHECKLIST, "idCard": SRC_CARD, "name": "Steps",
+                        "checkItems": [{"id": SRC_ITEM, "idChecklist": SRC_CHECKLIST,
+                                        "name": "step one", "state": "incomplete"}]}],
+        "attachments": [],
+    }
+    if att_url:
+        card["attachments"] = [{"id": SRC_ATT, "name": "note.txt",
+                                "url": att_url, "isUpload": True, "bytes": 5}]
+    return board, lists, labels, [card]
+
+
+def _all_ids(backend, bid: str) -> set[str]:
+    """Every store id the board holds, from the raw card files (the enriched read
+    resolves labels and drops comments)."""
+    ids = {bid} | {l["id"] for l in backend.get_lists(bid)}
+    ids |= {lb["id"] for lb in backend.get_labels(bid)}
+    for card in backend.store.cards(bid):
+        ids |= {card["id"], *card.get("idLabels", [])}
+        ids |= {c["id"] for c in card.get("comments", [])}
+        ids |= {a["id"] for a in card.get("attachments", [])}
+        for cl in card.get("checklists", []):
+            ids |= {cl["id"], *(it["id"] for it in cl.get("checkItems", []))}
+    return ids
+
+
+@pytest.fixture
+def export_cli(monkeypatch, store_root):
+    """Drive `main.cmd_export` with a fake remote source.
+
+    Export refuses a local *source* (it is a pull into the store), so the source
+    backend is 'trello' with `_gather_board` / `download_attachment` stubbed —
+    no network, and the destination is a real LocalBackend on the tmp store."""
+    from trello_cli import api, config, main
+    from trello_cli.backends.local import LocalBackend
+
+    config.set_backend_override("trello")
+    config.set_local_root_override(store_root)
+    monkeypatch.setattr(main, "_require_board", lambda: SRC_BID)
+
+    def run(args: list[str], snapshot=None):
+        snap = snapshot if snapshot is not None else _snapshot()
+        monkeypatch.setattr(main, "_gather_board", lambda _bid: snap)
+        main.cmd_export(args)
+        return LocalBackend(store_root)
+
+    def fake_download(url, path, authed=False):
+        Path(path).write_bytes(b"blob!")
+
+    monkeypatch.setattr(api, "download_attachment", fake_download)
+    return run
+
+
+def test_import_board_board_id_override(board):
+    """The backend override lands the snapshot elsewhere and leaves the source
+    board alone. It re-ids only the BOARD — re-iding the contents is the export
+    command's job (`_fork_snapshot`), since blob paths depend on it."""
+    backend, bid, lists = board
+    card = backend.create_card(lists[0]["id"], "somewhere-else")
+    snap_board = {"id": bid, "name": "Test Board", "desc": "", "closed": False}
+    snap_lists = [{"id": l["id"], "name": l["name"], "pos": l["pos"],
+                   "closed": False} for l in lists]
+
+    fork_id = store.new_id()
+    out = backend.import_board(snap_board, snap_lists, [], [card],
+                               board_id=fork_id)
+
+    assert out["id"] == fork_id
+    ids = {b["id"] for b in backend.get_boards()}
+    assert fork_id in ids and bid in ids  # the source survives untouched
+    assert [c["id"] for c in backend.get_board_cards(bid)] == [card["id"]]
+    raw = json.loads(backend.store.card_file(fork_id, card["id"]).read_text())
+    assert raw["idBoard"] == fork_id  # re-parented onto the new board
+
+
+def test_fork_shares_no_id_with_its_source(export_cli):
+    """The invariant that matters: `_locate_card` / `_locate_list` /
+    `_locate_comment` / `_locate_checklist` scan EVERY board and take the first
+    hit, so a duplicated id silently routes writes to the wrong board. A fork
+    must therefore re-id everything, not just the board."""
+    url = "https://trello.com/1/cards/x/att/note.txt"   # so SRC_ATT is in play
+    export_cli(["--fork"], _snapshot(url))       # fork first...
+    backend = export_cli([], _snapshot(url))     # ...then a mirror alongside it
+    fork_id = next(b["id"] for b in backend.get_boards() if b["id"] != SRC_BID)
+
+    fork_ids, mirror_ids = _all_ids(backend, fork_id), _all_ids(backend, SRC_BID)
+    assert not fork_ids & mirror_ids
+    assert not fork_ids & SRC_IDS                # nothing reused from the source
+    assert mirror_ids >= SRC_IDS                 # ...while the mirror preserves
+
+    # The cross-reference rewrite has to be complete, or the fork's own cards
+    # dangle: each must sit in one of ITS lists and carry one of ITS labels.
+    card = backend.get_board_cards(fork_id)[0]
+    assert card["idList"] in {l["id"] for l in backend.get_lists(fork_id)}
+    assert [lb["id"] for lb in card["labels"]] == \
+        [lb["id"] for lb in backend.get_labels(fork_id)]
+    raw = backend.store.cards(fork_id)[0]
+    checklist = raw["checklists"][0]
+    assert checklist["idCard"] == raw["id"]
+    assert checklist["checkItems"][0]["idChecklist"] == checklist["id"]
+
+
+def test_fork_and_mirror_writes_stay_on_their_own_board(export_cli):
+    """The failure the id remint prevents, end to end: renaming the fork's card
+    must not land on the mirror's copy."""
+    export_cli(["--fork"])
+    backend = export_cli([])
+    fork_id = next(b["id"] for b in backend.get_boards() if b["id"] != SRC_BID)
+    fork_card = backend.get_board_cards(fork_id)[0]
+
+    backend.update_card(fork_card["id"], name="RENAMED VIA FORK")
+
+    assert backend.get_board_cards(fork_id)[0]["name"] == "RENAMED VIA FORK"
+    assert backend.get_board_cards(SRC_BID)[0]["name"] == "A card"
+
+
+def test_fork_downloads_blobs_under_the_new_ids(export_cli):
+    """The wrinkle: blobs are fetched BEFORE import_board, into a dir keyed by
+    board id and named by attachment id. Re-id too late and they land under the
+    source's ids, leaving the forked board pointing at nothing."""
+    backend = export_cli(["--fork"],
+                         _snapshot("https://trello.com/1/cards/x/att/note.txt"))
+
+    boards = backend.get_boards()
+    assert len(boards) == 1
+    fork_id = boards[0]["id"]
+
+    card = backend.get_board_cards(fork_id)[0]
+    att = card["attachments"][0]
+    assert att["url"] == (f"{fork_id}/attachments/{card['id']}/"
+                          f"{att['id']}-note.txt")
+    blob = Path(backend.store.root) / att["url"]
+    assert blob.is_file() and blob.read_bytes() == b"blob!"
+    # Nothing was written under the source board's id.
+    assert not (Path(backend.store.root) / SRC_BID).exists()
+
+
+def test_fork_refetches_store_relative_blobs(export_cli):
+    """An http source serves attachments out of its own store, so their urls are
+    already store-relative — rooted at the SOURCE board's id. A mirror can leave
+    those alone (same id, same path); a fork must re-fetch them, or its cards
+    point into a board that isn't theirs."""
+    backend = export_cli(
+        ["--fork"], _snapshot(f"{SRC_BID}/attachments/{SRC_CARD}/{SRC_ATT}-note.txt"))
+
+    fork_id = backend.get_boards()[0]["id"]
+    card = backend.get_board_cards(fork_id)[0]
+    att = card["attachments"][0]
+    assert att["url"].startswith(f"{fork_id}/attachments/{card['id']}/")
+    assert (Path(backend.store.root) / att["url"]).is_file()
+
+
+def test_fork_no_attachments_does_not_cross_link(export_cli, capsys):
+    """--no-attachments skips the download, so the url still points at the
+    source — it must NOT be rewritten to a path under the fork that holds no
+    blob. Permanent, since no later export tracks a fork: say so on stderr."""
+    src_url = f"{SRC_BID}/attachments/{SRC_CARD}/{SRC_ATT}-note.txt"
+    backend = export_cli(["--fork", "--no-attachments"], _snapshot(src_url))
+
+    fork_id = backend.get_boards()[0]["id"]
+    att = backend.get_board_cards(fork_id)[0]["attachments"][0]
+    assert att["url"] == src_url  # untouched, not re-rooted under the fork
+    assert not backend.store.attachments_root(fork_id).exists()
+    assert "no later export tracks a forked board" in capsys.readouterr().err
+
+
+def test_fork_note_stays_quiet_without_uploads(export_cli, capsys):
+    """Nothing is being skipped when the board has no uploads — don't warn."""
+    export_cli(["--fork", "--no-attachments"])
+    assert "no later export tracks a forked board" not in capsys.readouterr().err
+
+
+def test_fork_twice_makes_two_boards(export_cli):
+    """Create-new-each-time, like `export --to trello`: a fork is orphaned from
+    its source, so there is nothing to refresh in place."""
+    first = export_cli(["--fork"]).get_boards()[0]["id"]
+    backend = export_cli(["--fork"])
+    ids = {b["id"] for b in backend.get_boards()}
+    assert ids == {first, next(i for i in ids if i != first)} and len(ids) == 2
+    assert SRC_BID not in ids
+
+
+def test_fork_renames_and_reports_its_source(export_cli, capsys):
+    backend = export_cli(["--fork", "--name", "My Fork"])
+    assert backend.get_boards()[0]["name"] == "My Fork"
+    out = capsys.readouterr().out
+    assert "Forked 'My Fork'" in out
+    assert "not a mirror of" in out
+
+
+def test_fork_json_reports_fork_and_source(export_cli, capsys, monkeypatch):
+    """`forked` / `sourceId` are always present — the same stable-shape rule the
+    zeroed `attachments` block follows — so a caller can branch on them."""
+    from trello_cli import main
+
+    monkeypatch.setattr(main, "_JSON_MODE", True)
+    backend = export_cli(["--fork"])
+    forked = json.loads(capsys.readouterr().out)
+    export_cli([])
+    mirrored = json.loads(capsys.readouterr().out)
+
+    assert forked["forked"] is True
+    assert forked["sourceId"] == SRC_BID
+    assert forked["id"] not in (SRC_BID, "")
+    assert mirrored["forked"] is False
+    assert mirrored["sourceId"] == mirrored["id"] == SRC_BID
+    assert len(backend.get_boards()) == 2
+
+
+def test_plain_export_still_mirrors_the_source_id(export_cli):
+    backend = export_cli([])
+    assert [b["id"] for b in backend.get_boards()] == [SRC_BID]
+
+
+def test_export_help_documents_fork():
+    """`--fork` is irreversible and this usage text is where it's written down;
+    answering --help with "Unknown flag" hides it."""
+    from trello_cli import main
+
+    main.cmd_export(["--help"])  # must not raise
+
+
+@pytest.mark.parametrize("args, expected", [
+    # --name on a mirror would be undone by the next re-export.
+    (["--name", "Nope"], "--fork"),
+    # ...including an empty one, which is a misuse rather than a no-op.
+    (["--name", ""], "--fork"),
+    # --to trello is already create-new-each-time; --fork would imply otherwise.
+    (["--to", "trello", "--fork"], "already"),
+    # An invented flag must never become the board's name.
+    (["--fork", "--name", "--oops"], "got the flag --oops"),
+])
+def test_fork_flag_misuse_is_refused(args, expected):
+    from trello_cli import main
+    with pytest.raises(SystemExit) as e:
+        main.cmd_export(args)
+    assert expected in str(e.value)

@@ -228,6 +228,44 @@ last-write-wins caveat disappears for boards that move there.
 The **export/import** bonus (Phase 4) falls out almost for free since both
 backends share the entity shape.
 
+### `export --to local --fork` — mirror vs fork
+
+Id-preservation gives `--to local` its idempotent-refresh property, but it also
+hard-couples the copy to its source: both live boards carry one id and only
+`--backend` tells them apart. `--fork` mints a fresh board id instead, for the
+other real use — **splitting** a cloud board into two boards that diverge from
+here on. Same **create-new-each-time** contract as `--to trello`: a fork is
+permanently orphaned (no later export finds it, forking twice makes two boards),
+which is why it is an opt-in flag and not the default.
+
+**Everything is reminted, not just the board id** (`_fork_snapshot`), and this is
+not optional. Reminting only the board was tried first, on the assumption that
+every other path is board-scoped. It isn't: `LocalBackend` resolves an entity by
+scanning **every** board and taking the first hit (`_locate_card`, `_locate_list`,
+`_locate_comment`, `_locate_checklist`), which is sound only because ids are
+unique store-wide — Trello's are, and `new_id()` is random. A fork that kept its
+source's ids breaks that invariant, and the moment a fork and a mirror of one
+source share a store, every id-addressed write (`card rename`, `comment add`,
+`checklist item check`, …) lands on whichever board id sorts first, silently
+ignoring `--board`. Worse, it defeats `_resolve_card`'s explicit cross-board
+guard: the id *does* belong to the selected board, so the check passes and the
+backend still writes to the other one. That is the documented steady state
+(README tells you to keep the mirror for re-pulling), so it had to be fixed
+rather than noted. Cards do keep the source's Trello `shortUrl`/`shortLink`,
+which stay pointed at cards the fork no longer tracks — that one *is* just
+documented.
+
+**The board id is a path component** (`<root>/<bid>/attachments/<cardId>/`), which
+makes the ordering load-critical rather than incidental: the destination id is
+minted in `_export_to_local` *before* the attachment step, not inside
+`import_board`. Minting it later would write every blob under the source id and
+leave the fork pointing at nothing; handing the source id to
+`_preserve_local_attachment_urls` would seed the fork's cards with urls into the
+source board's blob dir. For the same reason a fork **re-fetches** attachments
+whose url is already store-relative (an http source serves them from its own
+store) — the skip that is correct for a mirror, whose source id *is* its
+destination id, is a cross-link for a fork.
+
 ### `export --to trello` (reverse import) — create-new-each-time
 
 The reverse pushes the local store *up* to Trello. The asymmetry vs `--to local`:
