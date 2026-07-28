@@ -393,6 +393,14 @@ body.dragging .cards { overflow-y: hidden; }
 .comment-body { white-space: pre-wrap; word-break: break-word; }
 .loading { color: var(--text-dim); }
 
+/* Bare URLs turned into links by linkify() in the detail panel's user text.
+   `overflow-wrap: anywhere` so a long URL breaks instead of widening the drawer
+   (word-break above only helps the surrounding prose). */
+.detail-desc a, .comment-body a, .checklist a {
+  color: var(--accent); text-decoration: underline; overflow-wrap: anywhere;
+}
+.detail-desc a:hover, .comment-body a:hover, .checklist a:hover { filter: brightness(1.15); }
+
 /* ── Detail panel: buttons ── */
 .btn, .btn-primary, .btn-danger {
   font: inherit;

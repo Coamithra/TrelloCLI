@@ -677,6 +677,68 @@ function heading(text) {
   return h;
 }
 
+// ── linkify ────────────────────────────────────────────────────────
+// Render user text with bare http(s) URLs turned into real links.
+//
+// Returns a DocumentFragment of alternating text nodes and <a> elements, so the
+// non-URL parts never pass through an HTML parser and stay escaped BY
+// CONSTRUCTION — the same safety property `textContent` gives, which is why
+// this is not an innerHTML + escape() pass. Card text is user-authored and (on
+// the local backend) syncs between machines, so a stored-XSS hole here would be
+// a real one.
+//
+// http/https only: an href built from this regex is always an absolute http(s)
+// URL, so `javascript:` / `data:` can't be smuggled in. Bare `www.` and
+// `mailto:` are deliberately not matched.
+const URL_RE = /\bhttps?:\/\/[^\s<>"']+/gi;
+
+const CLOSERS = { ')': '(', ']': '[', '}': '{' };
+
+// `[^\s]+` eats sentence punctuation, so "see https://x.com/a)." would link the
+// `).` too. Walk back over trailing punctuation, but keep a closing bracket the
+// URL itself opened — https://en.wikipedia.org/wiki/Foo_(bar) must stay whole.
+function trimUrlTail(url) {
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1];
+    if ('.,;:!?\'"'.includes(ch)) { end -= 1; continue; }
+    const open = CLOSERS[ch];
+    if (open) {
+      const slice = url.slice(0, end);
+      const opens = slice.split(open).length - 1;
+      const closes = slice.split(ch).length - 1;
+      if (closes > opens) { end -= 1; continue; }
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+function linkify(text) {
+  const frag = document.createDocumentFragment();
+  const src = text || '';
+  let last = 0;
+  URL_RE.lastIndex = 0;  // the regex is module-level + /g — reset per call
+  let m;
+  while ((m = URL_RE.exec(src)) !== null) {
+    const href = trimUrlTail(m[0]);
+    // A match that is punctuation all the way back (can't happen with this
+    // regex, but cheap to be safe) would loop forever on a zero-width match.
+    if (!href) { URL_RE.lastIndex = m.index + m[0].length; continue; }
+    if (m.index > last) frag.appendChild(document.createTextNode(src.slice(last, m.index)));
+    const a = document.createElement('a');
+    a.href = href;
+    a.textContent = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    frag.appendChild(a);
+    last = m.index + href.length;
+    URL_RE.lastIndex = last;  // re-scan the trimmed tail as ordinary text
+  }
+  if (last < src.length) frag.appendChild(document.createTextNode(src.slice(last)));
+  return frag;
+}
+
 // Clamp a popover under its anchor within the viewport. Measured against the
 // popover's *current* size, so callers re-run it after async content lands.
 function positionPopover(pop, anchor) {
@@ -742,7 +804,13 @@ function inlineEditable(container, { value, multiline, render, save }) {
     const view = render();
     view.classList.add('editable');
     view.title = 'Click to edit';
-    view.addEventListener('click', showEditor);
+    // A linkified description holds real <a>s (see linkify) — clicking one must
+    // follow the link, not drop the box into edit mode. No-op for the title,
+    // which is never linkified.
+    view.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('a')) return;
+      showEditor();
+    });
     swap(view);
   }
 
@@ -1163,7 +1231,7 @@ function commentEl(c) {
   meta.textContent = `@${who} · ${date}`;
   const body = document.createElement('div');
   body.className = 'comment-body';
-  body.textContent = (c.data && c.data.text) || '';
+  body.appendChild(linkify((c.data && c.data.text) || ''));
   div.append(meta, body);
   return div;
 }
@@ -1262,10 +1330,12 @@ async function openDetail(cardId) {
       render: () => {
         const pre = document.createElement('pre');
         pre.className = 'detail-desc';
-        pre.textContent = (openCard.desc || '').trim()
-          ? openCard.desc
-          : 'Add a more detailed description…';
-        if (!(openCard.desc || '').trim()) pre.classList.add('placeholder');
+        if ((openCard.desc || '').trim()) {
+          pre.appendChild(linkify(openCard.desc));
+        } else {
+          pre.textContent = 'Add a more detailed description…';
+          pre.classList.add('placeholder');
+        }
         return pre;
       },
       save: async (desc) => {
@@ -1289,7 +1359,7 @@ async function openDetail(cardId) {
         box.checked = it.state === 'complete';
         box.disabled = true;
         const span = document.createElement('span');
-        span.textContent = it.name;
+        span.appendChild(linkify(it.name));
         if (it.state === 'complete') span.className = 'done';
         li.append(box, span);
         ul.appendChild(li);
