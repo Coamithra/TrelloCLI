@@ -722,15 +722,26 @@ function linkify(text) {
   let m;
   while ((m = URL_RE.exec(src)) !== null) {
     const href = trimUrlTail(m[0]);
-    // A match that is punctuation all the way back (can't happen with this
-    // regex, but cheap to be safe) would loop forever on a zero-width match.
-    if (!href) { URL_RE.lastIndex = m.index + m[0].length; continue; }
+    // Trimming can eat the entire host: prose like "URLs must start with
+    // https://." leaves a bare scheme, which would render as an underlined
+    // link to nowhere. Require at least one host character; otherwise leave the
+    // whole match as plain text (skipping the append leaves it to the next
+    // slice). This also guarantees lastIndex advances, so the loop terminates.
+    if (!/^https?:\/\/[^\s/?#]/i.test(href)) {
+      URL_RE.lastIndex = m.index + m[0].length;
+      continue;
+    }
     if (m.index > last) frag.appendChild(document.createTextNode(src.slice(last, m.index)));
     const a = document.createElement('a');
     a.href = href;
     a.textContent = href;
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
+    // The description's read view carries title="Click to edit", which a
+    // tooltip lookup would inherit onto these anchors — advertising exactly the
+    // action the inlineEditable guard suppresses. An explicit empty title stops
+    // the walk up the ancestors.
+    a.title = '';
     frag.appendChild(a);
     last = m.index + href.length;
     URL_RE.lastIndex = last;  // re-scan the trimmed tail as ordinary text
@@ -808,7 +819,7 @@ function inlineEditable(container, { value, multiline, render, save }) {
     // follow the link, not drop the box into edit mode. No-op for the title,
     // which is never linkified.
     view.addEventListener('click', (e) => {
-      if (e.target.closest && e.target.closest('a')) return;
+      if (e.target.closest('a')) return;
       showEditor();
     });
     swap(view);

@@ -394,12 +394,17 @@ body.dragging .cards { overflow-y: hidden; }
 .loading { color: var(--text-dim); }
 
 /* Bare URLs turned into links by linkify() in the detail panel's user text.
-   `overflow-wrap: anywhere` so a long URL breaks instead of widening the drawer
-   (word-break above only helps the surrounding prose). */
+   `overflow-wrap: anywhere` is here for `.checklist`, which sets no wrapping of
+   its own and lays items out with `display: flex` — an unbreakable URL would
+   push the drawer wide. (`.detail-desc`/`.comment-body` already inherit
+   `word-break: break-word` down to the anchor.) */
 .detail-desc a, .comment-body a, .checklist a {
   color: var(--accent); text-decoration: underline; overflow-wrap: anywhere;
 }
 .detail-desc a:hover, .comment-body a:hover, .checklist a:hover { filter: brightness(1.15); }
+/* A completed item's line-through propagates to its links, where it would stack
+   with the underline above; state both so the anchor keeps looking struck out. */
+.checklist .done a { color: var(--text-dim); text-decoration: line-through; }
 
 /* ── Detail panel: buttons ── */
 .btn, .btn-primary, .btn-danger {
