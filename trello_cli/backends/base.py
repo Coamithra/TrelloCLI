@@ -67,10 +67,17 @@ class Backend(ABC):
                           with_latest_comment: bool = False) -> list[dict]: ...
 
     @abstractmethod
-    def search_cards(self, board_id: str, query: str, *,
+    def search_cards(self, board_id: str | None, query: str, *,
                      list_id: str | None = None, include_closed: bool = False,
                      partial: bool = False,
-                     substring: bool = False) -> list[dict]: ...
+                     substring: bool = False) -> list[dict]:
+        """`board_id=None` searches EVERY board the backend can see.
+
+        Both backends answer cross-board natively — Trello's index is
+        cross-board by default and only narrows when we pass `idBoards`; local
+        loops its store. Cards always carry `idBoard`, which is how a
+        cross-board caller attributes a hit. `list_id` is meaningless without a
+        board, so callers must not pass it with `board_id=None`."""
 
     @abstractmethod
     def get_card(self, card_id: str) -> dict: ...

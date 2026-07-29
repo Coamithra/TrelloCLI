@@ -130,13 +130,17 @@ class HttpBackend(Backend):
         return self._rpc("get_cards_in_list", list_id,
                          with_latest_comment=with_latest_comment)
 
-    def search_cards(self, board_id: str, query: str, *,
+    def search_cards(self, board_id: str | None, query: str, *,
                      list_id: str | None = None, include_closed: bool = False,
                      partial: bool = False,
                      substring: bool = False) -> list[dict]:
         # Semantics (including whether --substring is accepted) are the SERVER's
         # backend's, not ours: a server on the local store honours substring, one
         # fronting Trello refuses it — and its SystemExit comes back as ours.
+        # A cross-board search is `board_id=None`, which crosses the wire as JSON
+        # null; the /api/rpc whitelist is by op NAME, so no server change was
+        # needed for it (a server too old to know about it answers with its own
+        # error, which surfaces here as a normal CLI error).
         return self._rpc("search_cards", board_id, query, list_id=list_id,
                          include_closed=include_closed, partial=partial,
                          substring=substring)

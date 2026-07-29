@@ -202,6 +202,104 @@ def test_label_operator(searchable):
     assert _ids(be.search_cards(bid, "label:urgent")) == {searchable["name"]}
 
 
+# ── cross-board search ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def two_boards(searchable):
+    """`searchable`'s "Roadmap" plus a second board that shares a word with it,
+    so a hit can only be attributed by which board it came from."""
+    be = searchable["backend"]
+    other = be.create_board("Infra")
+    lists = {l["name"]: l["id"] for l in be.get_lists(other["id"])}
+    card = be.create_card(lists["To Do"], "Rotate the scrollbar certificate")
+    return {**searchable, "other_bid": other["id"], "other_card": card["id"]}
+
+
+def test_no_board_searches_every_board(two_boards):
+    """`board_id=None` is the whole feature: one query, every board."""
+    be = two_boards["backend"]
+    assert _ids(be.search_cards(None, "scrollbar")) == {
+        two_boards["name"], two_boards["other_card"]}
+    # ...and scoping still excludes the other board.
+    assert _ids(be.search_cards(two_boards["bid"], "scrollbar")) == {
+        two_boards["name"]}
+
+
+def test_cross_board_hits_carry_their_board(two_boards):
+    """`idBoard` is how a caller attributes a cross-board hit, so every result
+    must have one — it is the only thing distinguishing the two boards' cards."""
+    be = two_boards["backend"]
+    got = {c["id"]: c["idBoard"] for c in be.search_cards(None, "scrollbar")}
+    assert got[two_boards["name"]] == two_boards["bid"]
+    assert got[two_boards["other_card"]] == two_boards["other_bid"]
+
+
+def test_cross_board_order_is_stable(two_boards):
+    """Board order is `store.board_ids()` (sorted ids), then board order within
+    each — deterministic, so two identical runs agree."""
+    be = two_boards["backend"]
+    first = [c["id"] for c in be.search_cards(None, "scrollbar")]
+    assert first == [c["id"] for c in be.search_cards(None, "scrollbar")]
+    by_board = sorted([two_boards["bid"], two_boards["other_bid"]])
+    assert [c["idBoard"] for c in be.search_cards(None, "scrollbar")] == by_board
+
+
+def test_cross_board_sort_orders_the_whole_result(two_boards):
+    """A `sort:` key orders every board's hits together, not each board's
+    separately — otherwise the boards, not the key, would decide the order."""
+    be = two_boards["backend"]
+    be.update_card(two_boards["name"], due="2027-01-01T00:00:00.000Z")
+    be.update_card(two_boards["other_card"], due="2026-01-01T00:00:00.000Z")
+    got = [c["id"] for c in be.search_cards(None, "scrollbar sort:due")]
+    assert got == [two_boards["other_card"], two_boards["name"]]
+
+
+def test_cross_board_skips_archived_boards_unless_all(two_boards):
+    """--all means "include the hidden things" uniformly: archived cards, and
+    searching every board, archived boards too."""
+    be = two_boards["backend"]
+    be.update_board(two_boards["other_bid"], closed=True)
+    assert _ids(be.search_cards(None, "scrollbar")) == {two_boards["name"]}
+    assert _ids(be.search_cards(None, "scrollbar", include_closed=True)) == {
+        two_boards["name"], two_boards["other_card"]}
+
+
+def test_board_operator_filters_by_board_name(two_boards):
+    """`board:` is only interesting cross-board, which is why it could not be
+    implemented until now."""
+    be = two_boards["backend"]
+    assert _ids(be.search_cards(None, "scrollbar board:infra")) == {
+        two_boards["other_card"]}
+    # prefix, like `list:` — and negation drops that board instead
+    assert _ids(be.search_cards(None, "scrollbar board:road")) == {
+        two_boards["name"]}
+    assert _ids(be.search_cards(None, "scrollbar -board:infra")) == {
+        two_boards["name"]}
+
+
+def test_board_operator_also_takes_an_id(two_boards):
+    """Every table prints ids, so `board:<id>` is what a caller who copied one
+    reaches for. Matching only the name would answer that with a confident
+    empty result — the plausible-looking wrong answer this module refuses."""
+    be = two_boards["backend"]
+    bid = two_boards["other_bid"]
+    assert _ids(be.search_cards(None, f"scrollbar board:{bid}")) == {
+        two_boards["other_card"]}
+    assert _ids(be.search_cards(None, f"scrollbar board:{bid[:8]}")) == {
+        two_boards["other_card"]}
+
+
+def test_board_operator_is_no_longer_trello_only(two_boards):
+    """It used to be literal text (matching nothing); now it filters. The
+    _TRELLO_ONLY_OPS agreement test covers the other half of this move."""
+    from trello_cli.backends import local as local_mod
+    assert "board" not in local_mod._TRELLO_ONLY_OPS
+    assert "board" not in main._TRELLO_ONLY_OPS
+    q = local_mod._parse_query_terms("board:infra")
+    assert q.filters == [("board", "infra", False)] and q.terms == []
+
+
 def test_unknown_operator_degrades_to_text(searchable):
     """An operator we don't implement must not raise — it becomes a literal
     term, so a query is never rejected for using one."""
@@ -240,7 +338,7 @@ def test_negated_sort_is_ignored(searchable):
 
 # ── operators that only Trello can answer ─────────────────────────────
 
-@pytest.mark.parametrize("query", ["created:week", "member:bob", "board:other"])
+@pytest.mark.parametrize("query", ["created:week", "member:bob"])
 def test_trello_only_operators_are_literal_text_not_dropped(searchable, query):
     """The failure mode this guards: DROPPING the operator would silently WIDEN
     the result set, handing back cards the caller asked to exclude. As literal
@@ -455,6 +553,27 @@ def test_trello_passes_query_through_verbatim():
     assert "partial=true" in seen["url"]
 
 
+def test_trello_cross_board_omits_idboards():
+    """The narrowing was always ours: `GET /1/search` is cross-board by default,
+    so cross-board is the absence of `idBoards` rather than a new call. And
+    `idBoard` must be in card_fields either way, since it is the only thing
+    attributing a cross-board hit."""
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"cards": []})
+
+    be = _trello_backend(handler)
+    be.search_cards(None, "cookie")
+    assert "idBoards" not in seen["params"]
+    assert "idBoard" in seen["params"]["card_fields"].split(",")
+
+    be.search_cards("b" * 24, "cookie")
+    assert seen["params"]["idBoards"] == "b" * 24
+    assert "idBoard" in seen["params"]["card_fields"].split(",")
+
+
 def test_trello_post_filters_closed_and_list():
     """`is:archived` misbehaved when probed, so visibility/list scoping are
     applied client-side rather than trusted to the operators."""
@@ -573,6 +692,98 @@ def test_cli_requires_a_query(searchable, store_root):
     with pytest.raises(SystemExit) as e:
         main.cmd_search([])
     assert "Usage:" in str(e.value)
+
+
+def test_cli_no_board_searches_every_board(two_boards, store_root, capsys):
+    """With no --board this used to be `_require_board`'s error. Nothing that
+    worked before changes — an error became a feature."""
+    use_local_cli(store_root)
+    main.cmd_search(["scrollbar"])
+    out = capsys.readouterr().out
+    assert "scrollbar flicker" in out and "scrollbar certificate" in out
+
+
+def test_cli_all_boards_beats_an_ambient_board(two_boards, store_root, capsys,
+                                               monkeypatch):
+    """TRELLO_BOARD is an ambient default a session exports once, so
+    --all-boards has to be able to reach cross-board from inside one."""
+    use_local_cli(store_root)
+    monkeypatch.setenv("TRELLO_BOARD", two_boards["bid"])
+    main.cmd_search(["scrollbar"])
+    assert "scrollbar certificate" not in capsys.readouterr().out
+    main.cmd_search(["scrollbar", "--all-boards"])
+    assert "scrollbar certificate" in capsys.readouterr().out
+
+
+def test_cli_all_boards_refuses_an_explicit_board(two_boards, store_root):
+    """An explicit --board is a decision about THIS command, not an ambient
+    default — so a flag that contradicts it is an error naming both, never a
+    silent win. (Same split `_apply_magnet` draws between env and flag.)"""
+    use_local_cli(store_root)
+    config.set_board_override(two_boards["bid"])
+    with pytest.raises(SystemExit) as e:
+        main.cmd_search(["scrollbar", "--all-boards"])
+    msg = str(e.value)
+    assert "--all-boards" in msg and "--board" in msg
+    assert two_boards["bid"] in msg
+
+
+def test_cli_board_column_only_appears_cross_board(two_boards, store_root, capsys):
+    """A bare list name is ambiguous across boards, so cross-board output names
+    the board — and a scoped search renders exactly as it always did."""
+    use_local_cli(store_root)
+    main.cmd_search(["scrollbar"])
+    out = capsys.readouterr().out
+    assert "Board" in out.splitlines()[0]
+    assert "Infra" in out and "Roadmap" in out
+
+    config.set_board_override(two_boards["bid"])
+    main.cmd_search(["scrollbar"])
+    header = capsys.readouterr().out.splitlines()[0]
+    assert "Board" not in header and header.split() == [
+        "ID", "List", "Activity", "Name", "Labels", "Due"]
+
+
+def test_cli_json_is_unchanged_cross_board(two_boards, store_root, capsys,
+                                           monkeypatch):
+    """No synthetic key for attribution — `idBoard` was always on the card."""
+    import json
+    use_local_cli(store_root)
+    monkeypatch.setattr(main, "_JSON_MODE", True)
+    main.cmd_search(["scrollbar"])
+    data = json.loads(capsys.readouterr().out)
+    assert {c["idBoard"] for c in data} == {two_boards["bid"],
+                                            two_boards["other_bid"]}
+
+
+def test_cli_list_flag_needs_a_board(two_boards, store_root):
+    """--list means nothing without one board to resolve the column against;
+    guessing a board would be worse than the error."""
+    use_local_cli(store_root)
+    with pytest.raises(SystemExit) as e:
+        main.cmd_search(["scrollbar", "--list", "To Do"])
+    msg = str(e.value)
+    assert "--board" in msg and "list:" in msg
+
+
+def test_cli_hints_the_board_it_searched_on_a_miss(two_boards, store_root,
+                                                   capsys, monkeypatch):
+    """A miss on one board can't be told from "it isn't anywhere" in the output,
+    so say which board was looked at — and don't say it when nothing was
+    scoped away."""
+    use_local_cli(store_root)
+    monkeypatch.setenv("TRELLO_BOARD", two_boards["bid"])
+    main.cmd_search(["bananas"])
+    out = capsys.readouterr().out
+    assert 'Searched only the board "Roadmap"' in out and "--all-boards" in out
+
+    # The absence of the hint is only meaningful if the search really went
+    # cross-board — otherwise this half would pass with the hint deleted.
+    main.cmd_search(["bananas", "--all-boards"])
+    out = capsys.readouterr().out
+    assert "No cards matching" in out and "Searched only the board" not in out
+    main.cmd_search(["scrollbar", "--all-boards"])
+    assert "scrollbar certificate" in capsys.readouterr().out
 
 
 def test_cli_rejects_invented_flags(searchable, store_root):

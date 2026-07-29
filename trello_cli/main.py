@@ -103,20 +103,25 @@ Global:
                                 filter, e.g. commentCard updateCard)
 
 Find:
-  search <query>                Find cards by text on the --board board (`find`
-        [--list <list>]         works too). Searches names, descriptions,
-        [--all] [--partial]     comments and checklists. Terms are AND-ed;
-        [--substring]           `-word` excludes. --list scopes to one column,
-                                --all includes archived cards.
+  search <query>                Find cards by text (`find` works too). Searches
+        [--list <list>]         names, descriptions, comments and checklists.
+        [--all] [--all-boards]  Terms are AND-ed; `-word` excludes.
+        [--partial]             SCOPE: with --board, that board only; with NO
+        [--substring]           --board, every board. --all-boards searches every
+                                board even when TRELLO_BOARD is set. --list
+                                scopes to one column and needs a --board.
+                                --all includes archived CARDS (and, searching
+                                every board, archived BOARDS too).
                                 MATCHING: whole words by default; --partial also
                                 matches word prefixes (scroll -> scrollbar);
                                 --substring matches mid-word (crollba ->
                                 scrollbar) and is LOCAL-BACKEND ONLY, because
                                 Trello's search is a word index.
-                                Trello's operators (due:, label:, is:, has:,
-                                sort:, name:, description:, comment:, checklist:)
-                                work on both backends; created:/member:/board:
-                                are Trello-only and are literal text locally.
+                                Trello's operators (due:, label:, board:, is:,
+                                has:, sort:, name:, description:, comment:,
+                                checklist:) work on both backends;
+                                created:/member: are Trello-only and are literal
+                                text locally.
 
 Workflow:
   grab [--from "To Do"]         Atomically claim the top card of a list and move
@@ -3094,18 +3099,24 @@ def cmd_grab(args: list[str]) -> None:
 # Operators Trello's index implements but the local store can't (see the operator
 # table in backends/local.py, which is the authority — tests assert these agree).
 # Detected only to HINT: the query still runs, they're just literal text locally.
-_TRELLO_ONLY_OPS = ("created", "member", "board")
+_TRELLO_ONLY_OPS = ("created", "member")
 _TRELLO_ONLY_OP_RE = re.compile(
     r"(?:^|\s)-?(?:" + "|".join(_TRELLO_ONLY_OPS) + r"):", re.IGNORECASE)
 
 
-def _search_hints(query: str, backend: str, found: int, substring: bool) -> list[str]:
+def _search_hints(query: str, backend: str, found: int, substring: bool,
+                  board_name: str | None = None) -> list[str]:
     """Backend-specific hints for a search, gated on what the query actually used.
 
     The two backends genuinely differ (Trello has operators and fuzzy matching;
     only the local store can match mid-word), and the CLI surface is the only
     documentation an agent caller ever reads — so say so at the moment it
-    matters, not only in --help."""
+    matters, not only in --help.
+
+    `board_name` is the board a scoped search looked at, or None when the search
+    was already cross-board. A miss on one board is the case where "it isn't
+    anywhere" and "you looked in one place" are indistinguishable from the
+    output, so that one gets said out loud."""
     # `http` is deliberately absent from both gates: its semantics are the
     # SERVER's backend's, which this side can't see — a server on a local store
     # honours --substring, one fronting Trello doesn't. Guessing would mean
@@ -3117,6 +3128,12 @@ def _search_hints(query: str, backend: str, found: int, substring: bool) -> list
             + " are Trello-backend operators; on the local backend they're "
               "matched as literal text (so they narrow to nothing rather than "
               "being ignored)."
+        )
+    if not found and board_name is not None:
+        # Backend-agnostic: the scoping is this command's, not the backend's.
+        hints.append(
+            f'Searched only the board "{board_name}". Drop --board (or add '
+            "--all-boards) to search every board."
         )
     if found or substring:
         return hints
@@ -3143,24 +3160,49 @@ def cmd_search(args: list[str]) -> None:
         # Not a noun group, so it takes a query rather than a verb —
         # _print_group_help's "<verb>" header would be a lie.
         print("Usage: trello [--board <name_or_id>] [--json] search <query> [flags]")
+        print("       (no --board searches EVERY board; --all-boards forces "
+              "that even with TRELLO_BOARD set)")
         print()
         print(_usage_section("search"))
         return
     positional, flags = _parse_flags(
         args,
-        bool_flags=("--all", "--partial", "--substring"),
+        bool_flags=("--all", "--all-boards", "--partial", "--substring"),
         value_flags=("--list",),
     )
     if not positional:
         raise SystemExit(
-            "Usage: trello --board <board> search <query> [--list <list>] "
-            "[--all] [--partial] [--substring]\n"
+            "Usage: trello [--board <board>] search <query> [--list <list>] "
+            "[--all] [--all-boards] [--partial] [--substring]\n"
             "Searches card names, descriptions, comments and checklists.\n"
+            "Without --board (or with --all-boards) it searches every board.\n"
             'Example: trello --board Roadmap search "safari cookie"'
         )
     query = " ".join(positional)
-    board_id = _require_board()
+    # No board at all is cross-board rather than the error `_require_board`
+    # gives everywhere else, and `--all-boards` reaches that even from a session
+    # that exports TRELLO_BOARD (most of them) — the env is an ambient default,
+    # not a decision to search one board. An explicit --board (or a magnet) is
+    # such a decision, so disagreeing with it is a hard error naming both, the
+    # same split `_apply_magnet` draws between the env and a flag.
+    if flags.get("--all-boards") and config.get_board_flag():
+        raise SystemExit(
+            f"--all-boards contradicts --board {config.get_board_flag()}: one "
+            "searches every board, the other exactly one.\n"
+            "Drop whichever you didn't mean (--all-boards is only needed to "
+            "override an ambient TRELLO_BOARD)."
+        )
+    override = None if flags.get("--all-boards") else config.get_board_override()
+    board_id = _resolve_board_ref(override) if override else None
     list_ref = flags.get("--list")
+    if list_ref and board_id is None:
+        raise SystemExit(
+            "--list scopes to one column, which only means something on one "
+            "board.\n"
+            "Add --board <name_or_id> (and drop --all-boards), or match the "
+            'column by name across boards with the list: operator, e.g. '
+            'search \'list:"To Do" <query>\'.'
+        )
     list_id = _resolve_list(board_id, str(list_ref)) if list_ref else None
     substring = bool(flags.get("--substring"))
     cards = api.search_cards(
@@ -3171,7 +3213,11 @@ def cmd_search(args: list[str]) -> None:
         substring=substring,
     )
     backend = config.get_backend_name()
-    hints = _search_hints(query, backend, len(cards), substring)
+    # Only the empty-result hint names the board, so the extra fetch (a real
+    # round-trip on the trello/http backends) happens only when it's used.
+    board_name = (api.get_board(board_id)["name"]
+                  if board_id and not cards else None)
+    hints = _search_hints(query, backend, len(cards), substring, board_name)
 
     if _is_json():
         print_json(cards)
@@ -3187,9 +3233,22 @@ def cmd_search(args: list[str]) -> None:
             print(f"  {hint}")
         return
 
-    names = {l["id"]: l["name"] for l in api.get_lists(board_id)}
-    rows = [
-        [
+    # Cross-board results come from several boards, so column names have to be
+    # gathered per board that actually appears — and a bare list name is
+    # ambiguous across boards, hence the extra Board column. A board-scoped
+    # search renders exactly as it always did.
+    #
+    # Cost, on the remote backends: one get_lists per board WITH HITS, plus one
+    # get_boards. Bounded by the boards actually in the result (usually one or
+    # two), not by the store — but a query matching everywhere does pay it, and
+    # this path is now reachable by omitting --board rather than only on
+    # purpose. The List column is worth it: it is how a caller sees whether a
+    # hit is backlog or done.
+    hit_boards = ([board_id] if board_id
+                  else sorted({c["idBoard"] for c in cards if c.get("idBoard")}))
+    names = {l["id"]: l["name"] for b in hit_boards for l in api.get_lists(b)}
+    def row_of(c: dict) -> list[str]:
+        return [
             short_id(c["id"]),
             truncate(names.get(c.get("idList"), "?"), 18),
             (c.get("dateLastActivity") or "")[:10],
@@ -3197,9 +3256,19 @@ def cmd_search(args: list[str]) -> None:
             label_str(c.get("labels", [])),
             due_str(c.get("due"), c.get("dueComplete", False)),
         ]
-        for c in cards
-    ]
-    print_table(["ID", "List", "Activity", "Name", "Labels", "Due"], rows)
+    if board_id:
+        print_table(["ID", "List", "Activity", "Name", "Labels", "Due"],
+                    [row_of(c) for c in cards])
+    else:
+        board_names = {b["id"]: b["name"]
+                       for b in api.get_boards(include_closed=True)}
+        rows = []
+        for c in cards:
+            row = row_of(c)
+            row.insert(1, truncate(board_names.get(c.get("idBoard"), "?"), 16))
+            rows.append(row)
+        print_table(["ID", "Board", "List", "Activity", "Name", "Labels", "Due"],
+                    rows)
 
     # A hit in a description/comment/checklist is an unexplained row without the
     # line that matched — the table only shows the name.

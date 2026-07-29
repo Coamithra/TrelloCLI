@@ -271,11 +271,11 @@ class TrelloBackend(Backend):
             filter=card_filter,
         )
 
-    def search_cards(self, board_id: str, query: str, *,
+    def search_cards(self, board_id: str | None, query: str, *,
                      list_id: str | None = None, include_closed: bool = False,
                      partial: bool = False,
                      substring: bool = False) -> list[dict]:
-        """Board-scoped card search via Trello's native `GET /1/search`.
+        """Card search via Trello's native `GET /1/search`.
 
         The query goes up VERBATIM, so Trello's own operators (`due:`, `label:`,
         `has:`, `member:`, `sort:`, negation, …) work exactly as documented — this
@@ -289,6 +289,11 @@ class TrelloBackend(Backend):
         flow even though they're documented. Note that Trello's index appears to
         cover open cards, so `include_closed` widens nothing here — it does not
         reach archived cards the way the local backend's does.
+
+        `board_id=None` (cross-board) simply omits `idBoards`, which is the
+        endpoint's own default — the narrowing was ours all along. `board:`
+        therefore needs nothing here either; it rides up verbatim with the rest
+        of the query.
         """
         if substring:
             raise SystemExit(
@@ -308,14 +313,17 @@ class TrelloBackend(Backend):
             )
         params: dict[str, Any] = {
             "query": query,
-            "idBoards": board_id,
             "modelTypes": "cards",
-            "card_fields": ("id,name,shortUrl,labels,due,dueComplete,idList,"
-                            "idMembers,dateLastActivity,pos,desc,closed"),
+            # `idBoard` is what a cross-board caller attributes a hit with, so
+            # it is requested unconditionally rather than only when unscoped.
+            "card_fields": ("id,name,shortUrl,labels,due,dueComplete,idBoard,"
+                            "idList,idMembers,dateLastActivity,pos,desc,closed"),
             # The API's own default is 10 — far too few for "find my card", and
             # a silent truncation reads as "no such card".
             "cards_limit": _SEARCH_LIMIT,
         }
+        if board_id is not None:
+            params["idBoards"] = board_id
         if partial:
             params["partial"] = "true"
         result = self._get("/search", **params)
