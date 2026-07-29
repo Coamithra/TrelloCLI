@@ -3180,16 +3180,38 @@ def _apply_magnet(mag: dict, explicit: dict[str, str]) -> None:
         config.set_server_override(mag["server"])
 
 
+_GLOBAL_VALUE_FLAGS = ("--board", "--backend", "--server", "--local-root")
+
+
 def _find_magnet(args: list[str]) -> dict | None:
-    """The first magnet token anywhere in argv, parsed.
+    """The magnet in *reference position*, parsed — or None if there isn't one.
 
     Scans the raw arguments *before* the flags are stripped, so a magnet used
-    as a flag *value* (`--board trello://board/…`) is seen too. Parsing here
-    also means a malformed magnet fails immediately, with the grammar, rather
-    than surfacing as a mystery "Card not found" further down."""
-    for a in args:
+    as a flag value (`--board trello://board/…`) is seen too. Parsing here also
+    means a malformed magnet fails immediately, with the grammar, rather than
+    surfacing as a mystery "Card not found" further down.
+
+    It stops at the first token that is neither a flag, a flag's value, nor a
+    command/verb word — i.e. the first *argument*, which is where a ref goes.
+    Scanning the whole of argv instead would let a magnet quoted in free text
+    hijack the invocation: `comment add <id> "done, see trello://card/http/…"`
+    would have been posted against the backend and board named in the comment
+    body. Free text is always a later positional than the ref, so stopping at
+    the first argument is what separates the two."""
+    i = 0
+    while i < len(args):
+        a = args[i]
         if magnet.is_magnet(a):
             return magnet.parse(a)
+        if a in _GLOBAL_VALUE_FLAGS:
+            if i + 1 < len(args) and magnet.is_magnet(args[i + 1]):
+                return magnet.parse(args[i + 1])
+            i += 2  # skip the flag's value: it is not a ref position
+            continue
+        if a.startswith("-") or a in COMMANDS or a.lower() in _VERB_WORDS:
+            i += 1
+            continue
+        return None  # the first argument, and it is not a magnet
     return None
 
 

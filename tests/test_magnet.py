@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from trello_cli import config, magnet
-from trello_cli.main import _apply_magnet
+from trello_cli.main import _apply_magnet, _find_magnet
 
 BOARD = "a9a56930df5f690a050c713a"
 CARD = "94ab1031363168cc2d66b463"
@@ -324,3 +324,47 @@ def test_disagreeing_server_flag_is_an_error():
 def test_a_trailing_slash_is_not_a_server_disagreement():
     _apply_magnet(_card_magnet("http", SERVER), {"--server": SERVER + "/"})
     assert config.get_server_url() == SERVER
+
+
+# ── which magnet is the ref (main._find_magnet) ───────────────────────
+
+CARD_LINK = f"trello://card/local/{BOARD}/{CARD}"
+BOARD_LINK = f"trello://board/local/{BOARD}"
+
+
+@pytest.mark.parametrize("argv", [
+    ["open", CARD_LINK],
+    ["card", "show", CARD_LINK],
+    ["card", "move", CARD_LINK, "Doing"],
+    ["comment", "add", CARD_LINK, "done"],
+    ["label", "set", CARD_LINK, "feature"],
+    ["--json", "card", "show", CARD_LINK],
+    ["--local-root", "C:/store", "card", "show", CARD_LINK],
+    ["--board", BOARD_LINK, "card", "ls"],
+])
+def test_a_magnet_in_ref_position_is_found(argv):
+    assert _find_magnet(argv) is not None
+
+
+@pytest.mark.parametrize("argv", [
+    # The hazard this guards: a magnet quoted in a comment body, a card name or
+    # a description must not re-point the invocation at the board it names.
+    ["comment", "add", CARD[:8], f"done, see {CARD_LINK}"],
+    ["card", "add", "To Do", f"Follow up on {CARD_LINK}"],
+    ["card", "desc", CARD[:8], f"blocked by {CARD_LINK}"],
+    ["card", "rename", CARD[:8], CARD_LINK],
+    ["checklist", "item", "add", CARD[:8], f"read {CARD_LINK}"],
+    ["search", "--list", "To Do", CARD_LINK],
+])
+def test_a_magnet_in_free_text_is_not_a_ref(argv):
+    assert _find_magnet(argv) is None
+
+
+def test_no_magnet_at_all():
+    assert _find_magnet(["card", "ls", "To Do"]) is None
+    assert _find_magnet([]) is None
+
+
+def test_a_malformed_magnet_in_ref_position_still_fails_loudly():
+    with pytest.raises(SystemExit):
+        _find_magnet(["card", "show", "trello://card/local/zzz/zzz"])
