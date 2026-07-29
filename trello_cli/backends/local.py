@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -48,10 +49,76 @@ DEFAULT_LISTS = ("To Do", "Doing", "Done")
 
 # Per-list persisted sort (the web "auto-sort" feature). "manual" keeps explicit
 # positions (the default / classic behavior); the others re-sort existing cards
-# and auto-place every NEW card into its sorted slot on create. Local-backend
-# only — Trello has no native per-list sort field (see CLAUDE.md / DESIGN.md).
-LIST_SORTS = ("manual", "newest", "oldest", "name")
+# and auto-place every card that lands in the list — on create, and on a move or
+# unarchive that didn't name an explicit `pos`. Local-backend only — Trello has
+# no native per-list sort field (see CLAUDE.md / DESIGN.md).
+#
+# "created" and "activity" are two different clocks and users mean both by
+# "newest": `created-*` orders by when the card was made, `activity-*` by when it
+# was last touched. The store only ever recorded the latter, so `newest`/`oldest`
+# were really `activity-*`; they stay accepted forever as aliases (see
+# _SORT_ALIASES) so stores and clients written before the split keep working.
+LIST_SORTS = ("manual", "created-newest", "created-oldest",
+              "activity-newest", "activity-oldest", "name")
 DEFAULT_SORT = "manual"
+
+# Pre-split spellings → their canonical equivalent. Accepted on write (persisted
+# canonically) and normalized on read, so an old `lists.json` never has to be
+# migrated.
+_SORT_ALIASES = {"newest": "activity-newest", "oldest": "activity-oldest"}
+
+# A Trello card id encodes its creation time in the first 8 hex chars (unix
+# seconds); a local `store.new_id()` is random, so decoding one is meaningless.
+# `_card_created` only decodes when the card carries Trello provenance, and only
+# accepts a result inside this window — belt and braces against a random id that
+# happens to look Trello-shaped.
+_TRELLO_EPOCH_FLOOR = 1293840000  # 2011-01-01, before Trello existed
+
+
+def normalize_sort(sort: Any) -> str:
+    """A stored/requested sort value in its canonical spelling, or `manual` for
+    anything unrecognized (a store written by a newer build, say) — an unknown
+    sort must degrade to "leave the positions alone", never crash a read."""
+    s = _SORT_ALIASES.get(str(sort or "").strip().lower(), str(sort or "").strip().lower())
+    return s if s in LIST_SORTS else DEFAULT_SORT
+
+
+def card_created(card: dict) -> str:
+    """A card's creation time, ISO-8601, best-effort.
+
+    `dateCreated` is stamped by `_new_card` and persisted by an import, so
+    anything written since the field existed answers straight away. Older cards
+    are backfilled at READ time (no migration write, so no Dropbox churn): a card
+    with Trello provenance — `shortLink`/`shortUrl`, which a locally-created card
+    never has — decodes its own creation time from the first 8 hex chars of its
+    Trello id; anything else falls back to `dateLastActivity`, the closest thing
+    the store knows.
+
+    The provenance check is what makes the id decode safe: `store.new_id()` is
+    `secrets.token_hex(12)`, so a local id's leading hex is random and would
+    decode to a plausible-looking but meaningless date."""
+    created = card.get("dateCreated")
+    if created:
+        return str(created)
+    if card.get("shortLink") or card.get("shortUrl"):
+        try:
+            stamp = int(str(card.get("id", ""))[:8], 16)
+        except ValueError:
+            stamp = 0
+        # Bounded: a random id that sneaks past the provenance check (a fork
+        # remints ids but keeps the source's stale shortLink) can't file a card
+        # under 1974 or 2093.
+        if _TRELLO_EPOCH_FLOOR <= stamp <= int(time.time()) + 86400:
+            return datetime.fromtimestamp(
+                stamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return card.get("dateLastActivity", "") or ""
+
+
+def _is_auto_sort(sort: Any) -> bool:
+    """True for a sort that actually orders cards — i.e. anything but `manual`
+    (and anything unrecognized, which normalizes to it)."""
+    return normalize_sort(sort) != DEFAULT_SORT
+
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -493,43 +560,49 @@ class LocalBackend(Backend):
         return True
 
     @staticmethod
-    def _sort_key(sort: str) -> Callable[[dict], Any]:
-        """Sort key for a non-manual list sort. `name` is case-insensitive
-        alphabetical; `oldest`/`newest` order by `dateLastActivity` (a new card's
-        is `now`, so it is the most recent — landing at the bottom for `oldest`,
-        the top for `newest`)."""
+    def _sort_key(sort: str) -> tuple[Callable[[dict], Any], bool]:
+        """`(key, reverse)` for a non-manual list sort.
+
+        `name` is case-insensitive alphabetical; `created-*` orders by
+        `card_created`, `activity-*` by `dateLastActivity` (a just-touched card's
+        is `now`, so it is the most recent — top for `*-newest`, bottom for
+        `*-oldest`)."""
+        sort = normalize_sort(sort)
         if sort == "name":
-            return lambda c: (c.get("name", "") or "").lower()
-        # newest/oldest both sort ascending by activity; newest just reverses.
-        return lambda c: c.get("dateLastActivity", "") or ""
+            return lambda c: (c.get("name", "") or "").lower(), False
+        if sort.startswith("created-"):
+            key: Callable[[dict], Any] = card_created
+        else:
+            key = lambda c: c.get("dateLastActivity", "") or ""  # noqa: E731
+        return key, sort.endswith("-newest")
 
     def _list_is_sorted(self, board_id: str, list_id: str, sort: str) -> bool:
         """True if the list's open cards are already in `sort` order when read in
         `pos` order — i.e. `_auto_place_pos` can midpoint safely without a
         resort first. Always True for `manual`/unknown."""
-        if sort == DEFAULT_SORT or sort not in LIST_SORTS:
+        if not _is_auto_sort(sort):
             return True
         by_pos = sorted(
             (c for c in self.store.cards(board_id)
              if c.get("idList") == list_id and not c.get("closed")),
             key=lambda c: c.get("pos", 0),
         )
-        key = self._sort_key(sort)
+        key, reverse = self._sort_key(sort)
         keys = [key(c) for c in by_pos]
-        return keys == sorted(keys, reverse=(sort == "newest"))
+        return keys == sorted(keys, reverse=reverse)
 
     def _resort_list_cards(self, board_id: str, list_id: str, sort: str) -> None:
         """Respread a list's open cards into the order its `sort` dictates,
         rewriting only the cards whose `pos` actually changes (minimal Dropbox
         churn). No-op for `manual`. Runs under the store lock via its caller."""
-        if sort == DEFAULT_SORT or sort not in LIST_SORTS:
+        if not _is_auto_sort(sort):
             return
         open_cards = [
             c for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed")
         ]
-        ordered = sorted(open_cards, key=self._sort_key(sort),
-                         reverse=(sort == "newest"))
+        key, reverse = self._sort_key(sort)
+        ordered = sorted(open_cards, key=key, reverse=reverse)
         for card, pos in zip(ordered, even_positions(len(ordered))):
             if card.get("pos") != pos:
                 card["pos"] = pos
@@ -537,17 +610,21 @@ class LocalBackend(Backend):
 
     def _auto_place_pos(self, board_id: str, list_id: str, sort: str,
                         new_card: dict) -> float:
-        """The `pos` a new card should take to land in its sorted slot among the
-        list's existing open cards: the float midpoint between the `pos` of the
-        two cards it sorts between. Neighbours are found in *sort* order, not
-        `pos` order, so it places correctly even if the list's `pos` order has
-        drifted from its sort order (e.g. a CLI `card pos`/`move` reordered a
-        sorted column without clearing its sort)."""
-        key = self._sort_key(sort)
-        reverse = sort == "newest"
+        """The `pos` an arriving card should take to land in its sorted slot among
+        the list's existing open cards: the float midpoint between the `pos` of
+        the two cards it sorts between. Arriving = created here, moved in, or
+        unarchived. Neighbours are found in *sort* order, not `pos` order, so it
+        places correctly even if the list's `pos` order has drifted from its sort
+        order (e.g. a CLI `card pos` reordered a sorted column without clearing
+        its sort).
+
+        The arriving card is excluded by id, since a re-move into the list it is
+        already in would otherwise midpoint against its own stale position."""
+        key, reverse = self._sort_key(sort)
         existing = [
             c for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed")
+            and c.get("id") != new_card.get("id")
         ]
         if not existing:
             return POS_STEP
@@ -567,6 +644,18 @@ class LocalBackend(Backend):
                 return (ordered[i - 1].get("pos", 0) + cp) / 2
         # Sorts at/after every existing card — land below the current maximum.
         return max(c.get("pos", 0) for c in existing) + POS_STEP
+
+    def _place_in_sorted_list(self, board_id: str, list_id: str, sort: str,
+                              card: dict) -> float:
+        """The `pos` for a card arriving in an auto-sorted list — created there,
+        moved in, or unarchived. Respreads the list first if its `pos` order has
+        drifted out of sort order, because `_auto_place_pos` midpoints against
+        the existing `pos` values and only places correctly when the two agree.
+        The normal path never drifts (every arrival is auto-placed), so the
+        common case stays a single write — minimal Dropbox churn."""
+        if not self._list_is_sorted(board_id, list_id, sort):
+            self._resort_list_cards(board_id, list_id, sort)
+        return self._auto_place_pos(board_id, list_id, sort, card)
 
     def _log(self, board_id: str, action_type: str, data: dict) -> None:
         user = self._local_user()
@@ -715,6 +804,10 @@ class LocalBackend(Backend):
             "closed": _as_bool(card.get("closed", False)),
             "shortUrl": card.get("shortUrl", ""),
             "shortLink": card.get("shortLink", ""),
+            # Resolved once, here, rather than left to every read: an import is
+            # the last moment a Trello-sourced card is guaranteed to still carry
+            # the id its creation time is encoded in (a fork remints ids).
+            "dateCreated": card_created(card),
             "dateLastActivity": card.get("dateLastActivity") or now_iso(),
         }
 
@@ -808,7 +901,11 @@ class LocalBackend(Backend):
         lists = [l for l in self._load_lists(board_id) if not l.get("closed")]
         lists.sort(key=lambda l: l.get("pos", 0))
         for l in lists:
-            l.setdefault("sort", DEFAULT_SORT)  # pre-`sort` stores default to manual
+            # Pre-`sort` stores default to manual; a pre-split store's
+            # `newest`/`oldest` is reported in its canonical `activity-*`
+            # spelling, so the web's Sort-by menu can mark the right entry
+            # without knowing the alias table.
+            l["sort"] = normalize_sort(l.get("sort", DEFAULT_SORT))
         return lists
 
     def _rebalance_lists_inplace(self, lists: list[dict]) -> bool:
@@ -862,6 +959,7 @@ class LocalBackend(Backend):
         resort_to = None
         if "sort" in fields:
             sort = str(fields["sort"]).strip().lower()
+            sort = _SORT_ALIASES.get(sort, sort)  # accept the pre-split spellings
             if sort not in LIST_SORTS:
                 raise SystemExit(
                     f"Invalid list sort: {fields['sort']!r}. "
@@ -911,6 +1009,7 @@ class LocalBackend(Backend):
             "closed": False,
             "shortUrl": "",
             "shortLink": "",
+            "dateCreated": now_iso(),
             "dateLastActivity": now_iso(),
         }
 
@@ -1069,17 +1168,10 @@ class LocalBackend(Backend):
         # Auto-place per the list's persisted sort, overriding the requested pos
         # so a sorted column stays sorted on every add (the feature that beats
         # Trello). Manual lists keep the requested pos.
-        list_sort = lst.get("sort", DEFAULT_SORT)
-        if list_sort != DEFAULT_SORT and list_sort in LIST_SORTS:
-            # `_auto_place_pos` midpoints against the existing cards' `pos`, which
-            # only places correctly if `pos` order already equals sort order.
-            # That holds for the normal path (every add is auto-placed), but a CLI
-            # `card pos`/`move` can drift a sorted list without clearing its sort.
-            # Only when that drift is actually present do we respread first — so
-            # the common add stays a single write (minimal Dropbox churn).
-            if not self._list_is_sorted(board_id, list_id, list_sort):
-                self._resort_list_cards(board_id, list_id, list_sort)
-            card["pos"] = self._auto_place_pos(board_id, list_id, list_sort, card)
+        list_sort = normalize_sort(lst.get("sort", DEFAULT_SORT))
+        if _is_auto_sort(list_sort):
+            card["pos"] = self._place_in_sorted_list(board_id, list_id,
+                                                     list_sort, card)
         self._save_card(board_id, card)
         if self._rebalance_cards(board_id, list_id):
             _, card = self._load_card(card["id"])
@@ -1108,7 +1200,14 @@ class LocalBackend(Backend):
     def unarchive_card(self, card_id: str) -> dict:
         # Re-derive a fresh bottom pos: the stored pos is stale (the list may have
         # rebalanced while the card was archived) and could now exactly equal a
-        # sibling's, making order ambiguous. Land it at the bottom of its list.
+        # sibling's, making order ambiguous. Land it at the bottom of its list —
+        # unless the list auto-sorts, in which case update_card places it in its
+        # sorted slot and an explicit `pos` here would override that.
+        board_id, card = self._load_card(card_id)
+        lst = next((l for l in self._load_lists(board_id)
+                    if l["id"] == card.get("idList")), None)
+        if _is_auto_sort((lst or {}).get("sort")):
+            return self.update_card(card_id, closed=False)
         return self.update_card(card_id, closed=False, pos="bottom")
 
     def update_card(self, card_id: str, **fields: Any) -> dict:
@@ -1121,6 +1220,9 @@ class LocalBackend(Backend):
             card["due"] = fields["due"] or None  # "" clears the due date
         if "dueComplete" in fields:
             card["dueComplete"] = _as_bool(fields["dueComplete"])
+        # Stamped before placement, not after: an `activity-*` sort orders by this
+        # value, so the card has to carry the fresh one to land in the right slot.
+        card["dateLastActivity"] = now_iso()
         pos_touched = False
         if "idList" in fields:
             # The destination must be a real, open list on THIS card's board —
@@ -1136,6 +1238,7 @@ class LocalBackend(Backend):
                 )
             card["idList"] = fields["idList"]
             # Land at the bottom of the destination list; reorder with `card pos`.
+            # (An auto-sorted destination overrides this below.)
             existing = self._list_positions(board_id, card["idList"], exclude=card_id)
             card["pos"] = resolve_pos(existing, "bottom")
             pos_touched = True
@@ -1145,7 +1248,24 @@ class LocalBackend(Backend):
             pos_touched = True
         if "closed" in fields:
             card["closed"] = _as_bool(fields["closed"])
-        card["dateLastActivity"] = now_iso()
+        # Honour the destination list's persisted sort for a card ARRIVING in it —
+        # moved in, or unarchived back into it. Without this a "newest first" Done
+        # column still took every moved card at the bottom, since only create_card
+        # consulted the sort.
+        #
+        # An explicit `pos` wins: the web drag sends {idList, pos} and the card
+        # must land where the user dropped it (that drop clears the column's sort
+        # straight after). A bare `pos` change is likewise left alone — a hand
+        # reorder inside a sorted list drifts it, and the next arrival respreads.
+        arriving = "idList" in fields or ("closed" in fields and not card["closed"])
+        if arriving and "pos" not in fields and not card["closed"]:
+            dest = next((l for l in self._load_lists(board_id)
+                         if l["id"] == card["idList"]), None)
+            dest_sort = normalize_sort((dest or {}).get("sort"))
+            if _is_auto_sort(dest_sort):
+                card["pos"] = self._place_in_sorted_list(
+                    board_id, card["idList"], dest_sort, card)
+                pos_touched = True
         self._save_card(board_id, card)
         # A reorder can squeeze the gap below the float-collapse floor; respread
         # the destination list and reload so the returned `pos` is the new one.

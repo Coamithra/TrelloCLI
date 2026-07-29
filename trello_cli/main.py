@@ -2456,6 +2456,8 @@ def _fork_snapshot(lists: list[dict], labels: list[dict], cards: list[dict],
     down the checklist tree. Ids that do not name store entities (members,
     Trello's `shortLink`/`shortUrl`) are left alone. Returns new dicts — the
     caller's snapshot is not mutated."""
+    from .backends.local import card_created
+
     list_map = {l["id"]: new_id() for l in lists}
     label_map = {lb["id"]: new_id() for lb in labels}
     out_lists = [{**l, "id": list_map[l["id"]]} for l in lists]
@@ -2467,6 +2469,11 @@ def _fork_snapshot(lists: list[dict], labels: list[dict], cards: list[dict],
         # A card in a list that wasn't exported keeps its old idList and is
         # dropped by import_board's list-scoped reads, exactly as for a mirror.
         new_card = {**card, "id": cid,
+                    # Resolve the creation time BEFORE the id is replaced: a
+                    # Trello card encodes it in its id, and the fresh id is
+                    # random. The stale `shortLink` survives the fork, so
+                    # `card_created` would otherwise decode the new random id.
+                    "dateCreated": card_created(card),
                     "idList": list_map.get(card.get("idList", ""), card.get("idList", "")),
                     # Drop the resolved `labels` dicts: they carry the source's
                     # label ids, and `_to_store_card` prefers `idLabels` anyway.

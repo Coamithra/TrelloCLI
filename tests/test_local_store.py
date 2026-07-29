@@ -679,3 +679,130 @@ def test_fork_flag_misuse_is_refused(args, expected):
     with pytest.raises(SystemExit) as e:
         main.cmd_export(args)
     assert expected in str(e.value)
+
+
+# ── per-list auto-sort: creation clock, aliases, arrivals ─────────────
+
+def test_new_card_stamps_date_created(board):
+    backend, bid, lists = board
+    card = backend.create_card(lists[0]["id"], "stamped")
+    raw = json.loads(backend.store.card_file(bid, card["id"]).read_text())
+    assert raw["dateCreated"]
+
+
+def test_card_created_backfills_from_a_trello_id(board):
+    """A pre-`dateCreated` card imported from Trello knows its own creation time:
+    a Trello id encodes it, and `shortLink` is what says the id is Trello's."""
+    from trello_cli.backends.local import card_created
+
+    trello_card = {"id": "4d5ea62fd76aa1136000000c", "shortLink": "abc12345",
+                   "dateLastActivity": "2026-01-01T00:00:00.000Z"}
+    assert card_created(trello_card).startswith("2011-02-")
+
+    # No provenance → the id is a random local one, so it must NOT be decoded.
+    local_card = {"id": "4d5ea62fd76aa1136000000c",
+                  "dateLastActivity": "2026-01-01T00:00:00.000Z"}
+    assert card_created(local_card) == "2026-01-01T00:00:00.000Z"
+
+
+def test_import_resolves_created_before_a_fork_remints_the_id(export_cli):
+    """A fork keeps the source's stale `shortLink` but mints a fresh random id;
+    decoding THAT would file the card under a garbage date."""
+    snap = _snapshot()
+    card = snap[3][0]
+    card["id"] = "4d5ea62fd76aa1136000000c"   # a real Trello id: 2011-02-19
+    card["shortLink"] = "abc12345"
+    backend = export_cli(["--fork"], snap)
+    fork_id = next(b["id"] for b in backend.get_boards() if b["id"] != SRC_BID)
+    assert backend.get_board_cards(fork_id)[0]["dateCreated"].startswith("2011-02-")
+
+
+@pytest.mark.parametrize("stored, canonical", [
+    ("newest", "activity-newest"),
+    ("oldest", "activity-oldest"),
+    ("name", "name"),
+])
+def test_pre_split_sort_values_normalize(board, stored, canonical):
+    backend, bid, lists = board
+    lst = lists[0]["id"]
+    backend.update_list(lst, sort=stored)
+    assert next(l for l in backend.get_lists(bid) if l["id"] == lst)["sort"] == canonical
+
+
+def test_unknown_stored_sort_degrades_to_manual(board):
+    """A store written by a newer build must still read, not crash."""
+    backend, bid, lists = board
+    raw = backend._load_lists(bid)
+    raw[0]["sort"] = "by-vibes"
+    backend._save_lists(bid, raw)
+    assert next(l for l in backend.get_lists(bid) if l["id"] == raw[0]["id"])["sort"] == "manual"
+
+
+def test_update_list_rejects_a_bogus_sort(board):
+    backend, _, lists = board
+    with pytest.raises(SystemExit) as e:
+        backend.update_list(lists[0]["id"], sort="sideways")
+    assert "created-newest" in str(e.value)
+
+
+def test_move_into_an_activity_sorted_list_lands_on_top(board):
+    """The reported bug: a card moved to a "newest first" Done sat at the bottom."""
+    backend, _, lists = board
+    todo, done = lists[0]["id"], lists[2]["id"]
+    backend.create_card(done, "old-1", pos="bottom")
+    backend.create_card(done, "old-2", pos="bottom")
+    backend.update_list(done, sort="activity-newest")
+    moved = backend.move_card(backend.create_card(todo, "arriving")["id"], done)
+    assert [c["name"] for c in backend.get_cards_in_list(done)][0] == "arriving"
+    assert moved["pos"] == min(c["pos"] for c in backend.get_cards_in_list(done))
+
+
+def test_move_into_a_name_sorted_list_lands_alphabetically(board):
+    backend, _, lists = board
+    todo, done = lists[0]["id"], lists[2]["id"]
+    backend.create_card(done, "apple", pos="bottom")
+    backend.create_card(done, "zebra", pos="bottom")
+    backend.update_list(done, sort="name")
+    backend.move_card(backend.create_card(todo, "mango")["id"], done)
+    assert [c["name"] for c in backend.get_cards_in_list(done)] == ["apple", "mango", "zebra"]
+
+
+def test_an_explicit_pos_still_wins_over_the_list_sort(board):
+    """The web drag sends {idList, pos} and clears the sort right after — the card
+    has to land where the user dropped it, not where the sort wants it."""
+    backend, _, lists = board
+    todo, done = lists[0]["id"], lists[2]["id"]
+    backend.create_card(done, "a", pos="bottom")
+    backend.create_card(done, "b", pos="bottom")
+    backend.update_list(done, sort="name")
+    card = backend.create_card(todo, "aaa-would-sort-first")
+    backend.update_card(card["id"], idList=done, pos="bottom")
+    assert [c["name"] for c in backend.get_cards_in_list(done)][-1] == "aaa-would-sort-first"
+
+
+def test_unarchive_into_a_sorted_list_lands_in_its_slot(board):
+    backend, _, lists = board
+    lst = lists[0]["id"]
+    backend.create_card(lst, "apple", pos="bottom")
+    card = backend.create_card(lst, "mango", pos="bottom")
+    backend.create_card(lst, "zebra", pos="bottom")
+    backend.archive_card(card["id"])
+    backend.update_list(lst, sort="name")
+    backend.unarchive_card(card["id"])
+    assert [c["name"] for c in backend.get_cards_in_list(lst)] == ["apple", "mango", "zebra"]
+
+
+def test_created_and_activity_sorts_disagree(board):
+    """The whole point of the split: touching an old card moves it under
+    `activity-newest` but not under `created-newest`."""
+    backend, _, lists = board
+    lst = lists[0]["id"]
+    first = backend.create_card(lst, "first", pos="bottom")
+    backend.create_card(lst, "second", pos="bottom")
+    backend.update_card(first["id"], name="first-edited")  # bumps dateLastActivity only
+
+    backend.update_list(lst, sort="created-newest")
+    assert [c["name"] for c in backend.get_cards_in_list(lst)] == ["second", "first-edited"]
+
+    backend.update_list(lst, sort="activity-newest")
+    assert [c["name"] for c in backend.get_cards_in_list(lst)] == ["first-edited", "second"]
