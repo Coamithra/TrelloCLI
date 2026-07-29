@@ -495,30 +495,48 @@ negation — and is **fuzzy and relevance-ranked**. Tokenisation, stemming, rank
 **Duplicated** (observable rules): field coverage; whole-word matching by default;
 word-prefix under `partial`; AND across terms; `-term` negation; and the operators whose
 data the store actually holds — `name:` `description:` `comment:` `checklist:` (field
-scoping), `list:` `label:` `board:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
+scoping), `list:` `label:` `board:` `is:` `has:` `due:` `edited:` `created:` (filters),
+`sort:` (by `due`, `edited` or `created`).
 
 **Not duplicated** — and this is the whole delta:
 
 - **Relevance ranking and fuzzy expansion.** Unknowable from outside. Local returns board
   order (list, then `pos`), which beats a score the caller can't see.
-- **`created:` / `sort:created`.** Cards written since the `dateCreated` field shipped carry
-  an exact creation time, but older ones don't: `store.new_id()` is `secrets.token_hex(12)`,
-  random, whereas Trello ids encode creation time in their first 8 hex chars — so a
-  pre-field card knows its own creation time only if it was imported from Trello
-  (`local.card_created` decodes it, gated on the `shortLink` that proves the id is Trello's,
-  and otherwise falls back to `dateLastActivity`). For a *query operator* that fallback is
-  the wrong trade: `created:week` would silently include or exclude old local cards on a
-  guess, and absent beats inconsistent. The web's **column sort** made the opposite call and
-  ships `created-newest`/`created-oldest` alongside `activity-newest`/`activity-oldest` — a
-  slightly-off position in a column is visible and harmless, a wrong search result is not.
 - **`has:cover` / `has:stickers`** — no such concept locally. **`member:`/`@name`** —
   single-user store.
 
 Unknown operators — and the Trello-only ones above — degrade to **literal text** rather than
 erroring, so a query is never rejected for using one. Literal text, specifically, and not
-"dropped": dropping `created:week` would silently *widen* the result set, handing back cards
+"dropped": dropping `member:bob` would silently *widen* the result set, handing back cards
 the caller asked to exclude, which is worse than returning nothing. The CLI *hints* when a
 query uses a Trello-only operator on the local backend.
+
+#### `created:` / `sort:created` — omitted at first, and why they aren't now
+
+They shipped **after** the rest of the operator set, and the gap is worth keeping on the
+record. Originally the store recorded no creation time at all: `store.new_id()` is
+`secrets.token_hex(12)`, random, whereas Trello ids encode creation time in their first 8 hex
+chars — so a card knew when it was made only if it had been imported from Trello. Answering
+`created:week` for everything else would have meant answering from `dateLastActivity`, i.e.
+from when the card was last *touched*, and absent beats inconsistent for a query operator.
+(The web's **column sort** made the opposite call on the same data — a slightly-off position
+in a column is visible and harmless, a wrong search result is not.)
+
+What changed is that the data arrived. `local.card_created` now resolves a creation time in
+four steps: the stored `dateCreated` (stamped on create, resolved once at import) → the
+Trello id's encoded timestamp, gated on the `shortLink` that proves the id is Trello's → the
+board's `activity.log` `createCard` entry, via `LocalBackend._created_index` (built and
+memoized per board) → `dateLastActivity`. The survey that justified building it (2026-07-29,
+the author's 5-board, 553-card store — a snapshot, not a property of the design): 245 cards
+answered at steps 1–2, and the log accounted for **all 308** that didn't. The operator therefore answers from a recorded creation time rather than an
+inference, which is what made shipping it honest.
+
+Step 4 survives as a last resort rather than a null, because a null would put a branch for an
+empty population through four read paths (`sort:created`, `created:`, the column sort's key,
+and arrival placement). **The caveat that keeps it non-empty:** `local gc --trim-activity` can
+trim `createCard` entries away, and a pre-`dateCreated` local card whose entry is gone is then
+filtered and sorted as though last-edited meant created. Nothing warns when that happens —
+that is the cost of the trim, and the reason `created:` is documented as best-effort.
 
 ### The one deliberate divergence: `--substring`
 

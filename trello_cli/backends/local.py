@@ -83,20 +83,31 @@ def normalize_sort(sort: Any) -> str:
     return s if s in LIST_SORTS else DEFAULT_SORT
 
 
-def card_created(card: dict) -> str:
+def card_created(card: dict, created_index: dict[str, str] | None = None) -> str:
     """A card's creation time, ISO-8601, best-effort.
 
-    `dateCreated` is stamped by `_new_card` and persisted by an import, so
-    anything written since the field existed answers straight away. Older cards
-    are backfilled at READ time (no migration write, so no Dropbox churn): a card
-    with Trello provenance — `shortLink`/`shortUrl`, which a locally-created card
-    never has — decodes its own creation time from the first 8 hex chars of its
-    Trello id; anything else falls back to `dateLastActivity`, the closest thing
-    the store knows.
+    Four steps, most authoritative first:
 
-    The provenance check is what makes the id decode safe: `store.new_id()` is
-    `secrets.token_hex(12)`, so a local id's leading hex is random and would
-    decode to a plausible-looking but meaningless date."""
+    1. `dateCreated`, stamped by `_new_card` and resolved once at import — so
+       anything written since the field existed answers straight away.
+    2. The Trello id's own encoded timestamp (first 8 hex chars), for a card with
+       Trello provenance. The provenance gate — `shortLink`/`shortUrl`, which a
+       locally-created card never has — is what makes the decode safe:
+       `store.new_id()` is `secrets.token_hex(12)`, so a local id's leading hex
+       is random and would decode to a plausible-looking but meaningless date.
+    3. The board's `activity.log` `createCard` entry, via `created_index` (an
+       id→date map; `LocalBackend._created_index` builds and memoizes one per
+       board). This is what dates the pre-`dateCreated` cards the store actually
+       holds: on a real 5-board store it covered 308 of the 308 cards steps 1-2
+       can't answer.
+    4. `dateLastActivity` — a last resort, not an estimate anyone should rely on:
+       it moves every time the card is touched, so it reads as "created" when it
+       means "last edited". With the log present it fires for no real card; it
+       exists for the one case that removes the log, `local gc --trim-activity`,
+       which can trim a `createCard` entry away.
+
+    Everything after step 1 is resolved at READ time — no migration write, so no
+    Dropbox churn."""
     created = card.get("dateCreated")
     if created:
         return str(created)
@@ -111,6 +122,10 @@ def card_created(card: dict) -> str:
         if _TRELLO_EPOCH_FLOOR <= stamp <= int(time.time()) + 86400:
             return datetime.fromtimestamp(
                 stamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if created_index:
+        logged = created_index.get(str(card.get("id", "")))
+        if logged:
+            return str(logged)
     return card.get("dateLastActivity", "") or ""
 
 
@@ -152,22 +167,45 @@ _MATCH_LINE_MAX = 160
 #
 # Implemented here because the local store holds the data they need. The
 # deliberate omissions, so nobody re-derives them:
-#   created:, sort:created — local ids are random (store.new_id is
-#     secrets.token_hex), so there is no creation timestamp. Cards imported from
-#     Trello keep Trello ids, which DO encode one, so this would work on some
-#     cards and silently not on others; absent beats inconsistent. (activity.log
-#     could back it later.)
 #   has:cover, has:stickers — no such concept in the local store.
 #   member:/@name — single-user store; every card is "mine" (see `card mine`).
 #   is:starred — a board property, and web stars are localStorage-only.
 # Anything not listed stays a literal text term, so a query is never rejected
 # for using an operator we don't know.
+#
+# `created:` / `sort:created` used to be on that omission list — the store
+# genuinely had no creation timestamp, and answering from a guess is worse than
+# not answering. It has one now: `dateCreated` on every card written since the
+# field shipped, and for older cards the backfill chain `card_created`
+# documents — the Trello id's encoded timestamp for imported cards, else the
+# board's `activity.log` `createCard` entry. Between them they answer for every
+# card on a real store rather than most of one — the survey that justified
+# building this (2026-07-29, the author's 5-board 553-card store, a snapshot and
+# not a promise) found 245 cards answered by the field or the id, and the log
+# accounted for all 308 that weren't. So the operator answers from a recorded
+# creation time, not an inference.
+#   The one exception, and the reason `created:` is a best-effort filter rather
+#   than an exact one: `local gc --trim-activity` can trim `createCard` entries
+#   away, and a pre-`dateCreated` local card whose entry is gone falls back to
+#   `dateLastActivity` — i.e. it is filtered and sorted as though last-edited
+#   meant created. That population is empty on an untrimmed store; nothing warns
+#   when it isn't, which is the cost of the trim.
 _FIELD_OPS = ("name", "description", "comment", "checklist")
-_FILTER_OPS = ("list", "label", "board", "is", "has", "due", "edited")
-_SORT_KEYS = {"due": "due", "edited": "dateLastActivity"}
-# Direction is per-key, matching Trello: `sort:edited` is most-recently-edited
-# first, while `sort:due` is soonest-due first.
-_SORT_DESCENDING = frozenset({"edited"})
+_FILTER_OPS = ("list", "label", "board", "is", "has", "due", "edited", "created")
+# key → the value to order a card by. Callables, not card keys, because
+# `created` is `card_created`'s whole backfill chain rather than a stored field.
+# A falsy result means "this card has no such date" and sorts last either way.
+# `created`'s entry is the INDEX-FREE form: `search_cards` replaces it with a
+# closure bound to the searched boards' log indexes, so editing this one alone
+# would change nothing (it is still what decides `sort:created` is a valid key).
+_SORT_KEYS: dict[str, Callable[[dict], Any]] = {
+    "due": lambda c: c.get("due") or "",
+    "edited": lambda c: c.get("dateLastActivity") or "",
+    "created": card_created,
+}
+# Direction is per-key, matching Trello: `sort:edited` and `sort:created` are
+# most-recent-first, while `sort:due` is soonest-due first.
+_SORT_DESCENDING = frozenset({"edited", "created"})
 
 # Match granularity as a per-term operator, symmetric with the whole-query
 # --word/--partial/--substring flags: `scrollbar substring:crollba` mixes a
@@ -180,7 +218,7 @@ _GRAN_OPS = ("word", "partial", "substring")
 # Documented Trello operators with no local equivalent. They are kept as literal
 # text (so the query narrows to nothing rather than silently widening) and the
 # CLI hints about them; main._TRELLO_ONLY_OPS mirrors this list for that hint.
-_TRELLO_ONLY_OPS = ("created", "member")
+_TRELLO_ONLY_OPS = ("member",)
 
 # Relative windows shared by `due:` and `edited:`.
 _TIME_WINDOWS = {"day": 1, "week": 7, "month": 31}
@@ -319,8 +357,7 @@ def _card_due_state(card: dict, value: str) -> bool:
 
 
 def _card_edited_within(card: dict, value: str) -> bool:
-    """`edited:` — day/week/month, against `dateLastActivity` (the only time the
-    local store actually records; see the omissions note above)."""
+    """`edited:` — day/week/month, against `dateLastActivity`."""
     days = _TIME_WINDOWS.get(value)
     if days is None:
         return False
@@ -328,6 +365,19 @@ def _card_edited_within(card: dict, value: str) -> bool:
     if edited is None:
         return False
     return edited >= datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _card_created_within(card: dict, value: str,
+                         created_index: dict[str, str] | None = None) -> bool:
+    """`created:` — day/week/month, against `card_created` (see its backfill
+    chain, and the trimmed-log caveat in the operator table above)."""
+    days = _TIME_WINDOWS.get(value)
+    if days is None:
+        return False
+    created = _parse_iso(card_created(card, created_index))
+    if created is None:
+        return False
+    return created >= datetime.now(timezone.utc) - timedelta(days=days)
 
 
 def _card_has(card: dict, value: str) -> bool:
@@ -348,7 +398,8 @@ def _card_has(card: dict, value: str) -> bool:
 
 def _card_matches_filter(card: dict, op: str, value: str, *,
                          list_names: dict, label_names: dict,
-                         board: tuple[str, str]) -> bool:
+                         board: tuple[str, str],
+                         created_index: dict[str, str] | None = None) -> bool:
     """Evaluate one filter operator against a stored card (before negation).
 
     `board` is the (id, name) of the board the card lives on — required rather
@@ -380,6 +431,8 @@ def _card_matches_filter(card: dict, op: str, value: str, *,
         return _card_due_state(card, value)
     if op == "edited":
         return _card_edited_within(card, value)
+    if op == "created":
+        return _card_created_within(card, value, created_index)
     return False
 
 
@@ -510,8 +563,39 @@ class LocalBackend(Backend):
         # root in one process (e.g. export) don't self-collide. Reads stay
         # lock-free — atomic writes already give each file a consistent view.
         self._lock = get_store_lock(self.store.root / ".lock")
+        # board id → {card id: ISO date} from the log's createCard entries; see
+        # _created_index.
+        self._created_indexes: dict[str, dict[str, str]] = {}
 
     # ── internal helpers ────────────────────────────────────────────
+
+    def _created_index(self, board_id: str) -> dict[str, str]:
+        """A board's `card id → creation date` map, from its `activity.log`
+        `createCard` entries — step 3 of `card_created`'s backfill chain.
+
+        Built once per board per backend instance and cached. Caching can't go
+        stale in a way that matters: a card created after this was built carries
+        its own `dateCreated`, so it never consults the index at all, and the
+        entries it does hold are immutable history. Only the FIRST entry for an
+        id counts — a re-imported board can log a second `createCard` for a card
+        that already existed, and the earliest is the true one.
+
+        Lock-free, like every read here; a partially-synced log just yields
+        fewer entries (`read_activity` skips unparseable lines), which degrades
+        to the `dateLastActivity` last resort rather than failing a search."""
+        cached = self._created_indexes.get(board_id)
+        if cached is not None:
+            return cached
+        index: dict[str, str] = {}
+        for entry in self.store.read_activity(board_id):
+            if entry.get("type") != "createCard":
+                continue
+            card_id = ((entry.get("data") or {}).get("card") or {}).get("id")
+            date = entry.get("date")
+            if card_id and date and card_id not in index:
+                index[str(card_id)] = str(date)
+        self._created_indexes[board_id] = index
+        return index
 
     def _load_board(self, board_id: str) -> dict:
         board = read_json(self.store.board_file(board_id))
@@ -577,19 +661,23 @@ class LocalBackend(Backend):
                 self._save_card(board_id, card)
         return True
 
-    @staticmethod
-    def _sort_key(sort: str) -> tuple[Callable[[dict], Any], bool]:
+    def _sort_key(self, sort: str, board_id: str) -> tuple[Callable[[dict], Any], bool]:
         """`(key, reverse)` for a non-manual list sort.
 
         `name` is case-insensitive alphabetical; `created-*` orders by
         `card_created`, `activity-*` by `dateLastActivity` (a just-touched card's
         is `now`, so it is the most recent — top for `*-newest`, bottom for
-        `*-oldest`)."""
+        `*-oldest`).
+
+        `board_id` is what lets a `created-*` sort reach that board's log index,
+        so a pre-`dateCreated` card is ordered by when it was really made rather
+        than when it was last touched."""
         sort = normalize_sort(sort)
         if sort == "name":
             return lambda c: (c.get("name", "") or "").lower(), False
         if sort.startswith("created-"):
-            key: Callable[[dict], Any] = card_created
+            index = self._created_index(board_id)
+            key: Callable[[dict], Any] = lambda c: card_created(c, index)  # noqa: E731
         else:
             key = lambda c: c.get("dateLastActivity", "") or ""  # noqa: E731
         return key, sort.endswith("-newest")
@@ -605,7 +693,7 @@ class LocalBackend(Backend):
              if c.get("idList") == list_id and not c.get("closed")),
             key=lambda c: c.get("pos", 0),
         )
-        key, reverse = self._sort_key(sort)
+        key, reverse = self._sort_key(sort, board_id)
         keys = [key(c) for c in by_pos]
         return keys == sorted(keys, reverse=reverse)
 
@@ -619,7 +707,7 @@ class LocalBackend(Backend):
             c for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed")
         ]
-        key, reverse = self._sort_key(sort)
+        key, reverse = self._sort_key(sort, board_id)
         ordered = sorted(open_cards, key=key, reverse=reverse)
         for card, pos in zip(ordered, even_positions(len(ordered))):
             if card.get("pos") != pos:
@@ -638,7 +726,7 @@ class LocalBackend(Backend):
 
         The arriving card is excluded by id, since a re-move into the list it is
         already in would otherwise midpoint against its own stale position."""
-        key, reverse = self._sort_key(sort)
+        key, reverse = self._sort_key(sort, board_id)
         existing = [
             c for c in self.store.cards(board_id)
             if c.get("idList") == list_id and not c.get("closed")
@@ -825,6 +913,14 @@ class LocalBackend(Backend):
             # Resolved once, here, rather than left to every read: an import is
             # the last moment a Trello-sourced card is guaranteed to still carry
             # the id its creation time is encoded in (a fork remints ids).
+            #
+            # Steps 1-2 of the chain only, deliberately: step 3 reads the
+            # SOURCE board's activity.log, which an import can't see (the source
+            # is a remote backend, and its log never crosses the wire). A
+            # pre-`dateCreated` card from such a source therefore freezes the
+            # step-4 fallback here, and step 1 wins on every later read — the
+            # local log can't correct it either, since a card imported into this
+            # store has no `createCard` entry in it.
             "dateCreated": card_created(card),
             "dateLastActivity": card.get("dateLastActivity") or now_iso(),
         }
@@ -1070,7 +1166,8 @@ class LocalBackend(Backend):
         written `-foo` must NOT match. Trello's documented operators are honoured
         where the store holds the data for them — `name:`/`description:`/
         `comment:`/`checklist:` scope a term to one field, `list:`/`label:`/`is:`/
-        `board:`/`has:`/`due:`/`edited:` filter, `sort:` orders — plus the
+        `board:`/`has:`/`due:`/`edited:`/`created:` filter, `sort:` orders (by
+        `due`, `edited` or `created`) — plus the
         local-only per-term granularity operators (`word:`/`partial:`/
         `substring:`). See the operator table above for what is deliberately NOT
         supported and why.
@@ -1108,14 +1205,25 @@ class LocalBackend(Backend):
                 board, q, default_gran, list_id=list_id,
                 include_closed=include_closed))
 
-        if q.sort:
+        # `out and` because sorting nothing is free but BUILDING the key isn't:
+        # `created` reads every searched board's activity.log.
+        if out and q.sort:
             key = _SORT_KEYS[q.sort]
+            if q.sort == "created":
+                # One index merged across every board searched, since the hits
+                # are already merged by here. Ids are unique store-wide (a fork
+                # remints every one, exactly so cross-board lookups can't
+                # collide), so one flat map is safe.
+                merged: dict[str, str] = {}
+                for bid, _ in boards:
+                    merged.update(self._created_index(bid))
+                key = lambda c: card_created(c, merged)  # noqa: E731
             reverse = q.sort in _SORT_DESCENDING
             # Cards missing the sort field go last EITHER WAY, so `reverse`
             # can't float them to the top; sort the present ones separately.
-            missing = [c for c in out if not c.get(key)]
-            present = [c for c in out if c.get(key)]
-            present.sort(key=lambda c: c[key], reverse=reverse)
+            missing = [c for c in out if not key(c)]
+            present = [c for c in out if key(c)]
+            present.sort(key=key, reverse=reverse)
             out = present + missing
         return out
 
@@ -1135,6 +1243,10 @@ class LocalBackend(Backend):
         labels = self._load_labels(board_id)
         by_id = {lb["id"]: lb for lb in labels}
         label_names = {lb["id"]: lb.get("name", "") for lb in labels}
+        # Only paid for by a query that actually asks when a card was made.
+        created_index = (self._created_index(board_id)
+                         if any(op == "created" for op, _, _ in q.filters)
+                         else None)
 
         # An explicit `is:archived`/`is:open` decides the CARD's closed state on
         # its own; otherwise --all (include_closed) does. A card in an ARCHIVED
@@ -1156,7 +1268,8 @@ class LocalBackend(Backend):
                 _card_matches_filter(card, op, value,
                                      list_names=list_names,
                                      label_names=label_names,
-                                     board=board) != negated
+                                     board=board,
+                                     created_index=created_index) != negated
                 for op, value, negated in q.filters
             ):
                 continue

@@ -338,7 +338,7 @@ def test_negated_sort_is_ignored(searchable):
 
 # ── operators that only Trello can answer ─────────────────────────────
 
-@pytest.mark.parametrize("query", ["created:week", "member:bob"])
+@pytest.mark.parametrize("query", ["member:bob", "member:@alice"])
 def test_trello_only_operators_are_literal_text_not_dropped(searchable, query):
     """The failure mode this guards: DROPPING the operator would silently WIDEN
     the result set, handing back cards the caller asked to exclude. As literal
@@ -349,9 +349,9 @@ def test_trello_only_operators_are_literal_text_not_dropped(searchable, query):
 
 def test_unsupported_operators_are_recorded(searchable):
     from trello_cli.backends import local as local_mod
-    q = local_mod._parse_query_terms("created:week scrollbar")
-    assert q.unsupported == ["created:week"]
-    assert [t.text for t in q.terms] == ["created:week", "scrollbar"]
+    q = local_mod._parse_query_terms("member:bob scrollbar")
+    assert q.unsupported == ["member:bob"]
+    assert [t.text for t in q.terms] == ["member:bob", "scrollbar"]
 
 
 # ── quoting ───────────────────────────────────────────────────────────
@@ -450,6 +450,106 @@ def test_edited_window(searchable):
     be, bid = searchable["backend"], searchable["bid"]
     assert len(be.search_cards(bid, "edited:day")) == 4
     assert be.search_cards(bid, "edited:bogus") == []
+
+
+# ── created: / sort:created ───────────────────────────────────────────
+
+def _backdate_created(be, card_id, when):
+    """Rewrite a card's stored `dateCreated`, leaving its activity alone."""
+    board_id, card = be._load_card(card_id)
+    card["dateCreated"] = when
+    be._save_card(board_id, card)
+
+
+def test_created_window(searchable):
+    """Everything was just created, so it's all within a day — until one card
+    isn't."""
+    be, bid = searchable["backend"], searchable["bid"]
+    assert len(be.search_cards(bid, "created:day")) == 4
+    _backdate_created(be, searchable["name"], "2020-01-01T00:00:00.000Z")
+    assert searchable["name"] not in _ids(be.search_cards(bid, "created:month"))
+    assert len(be.search_cards(bid, "created:month")) == 3
+    assert be.search_cards(bid, "created:bogus") == []
+
+
+def test_created_is_not_edited(searchable):
+    """The whole point of the operator: editing an old card must not make it
+    newly *created*. `edited:` still sees the edit."""
+    be, bid = searchable["backend"], searchable["bid"]
+    _backdate_created(be, searchable["name"], "2020-01-01T00:00:00.000Z")
+    be.update_card(searchable["name"], name="Fix the scrollbar flicker again")
+    assert searchable["name"] in _ids(be.search_cards(bid, "edited:day"))
+    assert searchable["name"] not in _ids(be.search_cards(bid, "created:day"))
+
+
+def test_created_falls_back_to_the_activity_log(searchable):
+    """A pre-`dateCreated` card is filtered on its logged creation time, not on
+    when it was last touched."""
+    be, bid = searchable["backend"], searchable["bid"]
+    board_id, card = be._load_card(searchable["name"])
+    card.pop("dateCreated")
+    # Pushed far out so the last-resort fallback CANNOT produce this answer —
+    # the log is the only thing left that can say the card is a day old.
+    card["dateLastActivity"] = "2020-01-01T00:00:00.000Z"
+    be._save_card(board_id, card)
+    assert searchable["name"] in _ids(be.search_cards(bid, "created:day"))
+    assert searchable["name"] not in _ids(be.search_cards(bid, "edited:day"))
+
+
+def test_malformed_created_does_not_raise(searchable):
+    be, bid = searchable["backend"], searchable["bid"]
+    _backdate_created(be, searchable["name"], "not-a-date")
+    assert searchable["name"] not in _ids(be.search_cards(bid, "created:day"))
+
+
+def test_sort_created_is_most_recent_first(searchable):
+    """Like `sort:edited`, newest first — but on the creation clock, so an edit
+    to an old card doesn't reorder the results."""
+    be, bid = searchable["backend"], searchable["bid"]
+    _backdate_created(be, searchable["name"], "2020-01-01T00:00:00.000Z")
+    _backdate_created(be, searchable["desc"], "2030-01-01T00:00:00.000Z")
+    got = [c["id"] for c in be.search_cards(bid, "-zzzz sort:created")]
+    assert got[0] == searchable["desc"] and got[-1] == searchable["name"]
+    be.update_card(searchable["name"], name="Fix the scrollbar flicker again")
+    assert [c["id"] for c in be.search_cards(bid, "-zzzz sort:created")] == got
+
+
+def test_sort_created_is_no_longer_unsupported(searchable):
+    """It used to land in `q.unsupported` and be dropped; it's a real key now."""
+    from trello_cli.backends import local as local_mod
+    q = local_mod._parse_query_terms("sort:created scrollbar")
+    assert q.unsupported == [] and q.sort == "created"
+
+
+def test_sort_created_orders_across_boards_and_backfill_sources(backend):
+    """Cross-board `sort:created` merges one index per board, and the two
+    backfill sources have to be comparable: here the older card is dated by its
+    Trello id and the newer one by its board's activity log."""
+    import json
+
+    a = backend.create_board("Alpha")
+    b = backend.create_board("Beta")
+    logged = backend.create_card(backend.get_lists(b["id"])[0]["id"], "zebra recent")
+    imported = backend.create_card(backend.get_lists(a["id"])[0]["id"], "zebra ancient")
+
+    # The imported card: a real Trello id (2011-02-19) with the provenance that
+    # licenses decoding it, and no stored dateCreated.
+    path = backend.store.card_file(a["id"], imported["id"])
+    raw = json.loads(path.read_text())
+    raw.pop("dateCreated")
+    raw["shortLink"] = "abc12345"
+    raw["id"] = "4d5ea62fd76aa1136000000c"
+    path.unlink()
+    backend.store.card_file(a["id"], raw["id"]).write_text(json.dumps(raw))
+
+    # The logged card: pre-field, so only its board's log knows when it was made.
+    path = backend.store.card_file(b["id"], logged["id"])
+    raw2 = json.loads(path.read_text())
+    raw2.pop("dateCreated")
+    path.write_text(json.dumps(raw2))
+
+    got = [c["id"] for c in backend.search_cards(None, "zebra sort:created")]
+    assert got == [logged["id"], "4d5ea62fd76aa1136000000c"]
 
 
 def test_unknown_filter_value_matches_nothing(searchable):
@@ -614,12 +714,12 @@ def test_cli_hints_trello_only_operators_on_local(searchable, store_root, capsys
     """Gated on the query actually using one, per the CLI's hint convention."""
     use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
-    main.cmd_search(["created:week", "scrollbar"])
+    main.cmd_search(["member:bob", "scrollbar"])
     out = capsys.readouterr().out
-    assert "Trello-backend operators" in out
+    assert "Trello-backend operator" in out
     capsys.readouterr()
     main.cmd_search(["scrollbar"])
-    assert "Trello-backend operators" not in capsys.readouterr().out
+    assert "Trello-backend operator" not in capsys.readouterr().out
 
 
 def test_cli_flags_reach_the_backend(searchable, store_root, capsys):
@@ -664,10 +764,10 @@ def test_cli_json_emits_cards_and_sends_hints_to_stderr(
     use_local_cli(store_root)
     config.set_board_override(searchable["bid"])
     monkeypatch.setattr(main, "_JSON_MODE", True)
-    main.cmd_search(["created:week", "crollba"])
+    main.cmd_search(["member:bob", "crollba"])
     captured = capsys.readouterr()
     assert json.loads(captured.out) == []
-    assert "Trello-backend operators" in captured.err
+    assert "Trello-backend operator" in captured.err
     assert captured.err.count("--substring") >= 1
 
     main.cmd_search(["cookie"])
