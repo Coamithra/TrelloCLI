@@ -437,3 +437,38 @@ def test_board_link_positional_says_where_the_board_goes(board):
     with pytest.raises(SystemExit) as ei:
         main.cmd_board(["link", "Roadmap"])
     assert "global flag" in str(ei.value)
+
+
+# ── the local store: never hijack the machine, always say where you looked ──
+
+def test_local_help_advertises_set_default_and_root(capsys):
+    """`local --help` is the only place a cold agent learns that `local init`
+    alone is safe for a scratch store — and that `local root` exists at all."""
+    main.cmd_local(["--help"])
+    out = capsys.readouterr().out
+    assert "--set-default" in out
+    assert "--local-root" in out
+    assert "local root" in out
+    assert "Unknown" not in out
+
+
+def test_scratch_store_setup_changes_nothing_global(tmp_path, capsys):
+    """The wrong turn this card is about: an agent wanting a throwaway store
+    reaches for `local init <path>`, which used to retarget every other
+    `--backend local` invocation on the machine."""
+    main.cmd_local(["init", str(tmp_path / "scratch")])
+    assert not config.CONFIG_PATH.exists()
+    out = capsys.readouterr().out
+    assert "--local-root" in out and "TRELLO_LOCAL_ROOT" in out
+
+
+def test_missing_board_points_at_the_store_and_the_recovery_command(store_root):
+    """A retargeted root and a genuinely absent board look identical otherwise."""
+    be = use_local_cli(store_root)
+    be.create_board("Roadmap")
+    with pytest.raises(SystemExit) as ei:
+        main._resolve_board_ref("6a353ffc")
+    msg = str(ei.value)
+    assert store_root in msg
+    assert "trello local root" in msg
+    assert "--local-root" in msg

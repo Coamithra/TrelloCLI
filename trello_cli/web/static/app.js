@@ -369,7 +369,9 @@ function columnEl(list, cards) {
       // the bottom), so reload to place it correctly; manual columns keep the
       // cheap append.
       if (listSort !== 'manual') {
-        await loadBoard(currentBoardId);
+        // Quiet + state-preserving: the composer keeps its focus across the
+        // rebuild, so you can keep typing the next card.
+        await loadBoard(currentBoardId, { quiet: true });
       } else {
         cardsWrap.appendChild(cardEl(card));
         countFor(cardsWrap);
@@ -400,8 +402,17 @@ function toggleColumnMenu(col, list) {
   sortHead.className = 'column-menu-label';
   sortHead.textContent = 'Sort by';
   menu.appendChild(sortHead);
+  // "Newest" means two different clocks and users mean both, so the menu spells
+  // out which one each entry uses. The server reports a pre-split store's
+  // `newest`/`oldest` in its canonical `activity-*` spelling, so `current`
+  // always matches one of these values.
   const current = list.sort || 'manual';
-  [['manual', 'Manual'], ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['name', 'Card name']]
+  [['manual', 'Manual'],
+   ['created-newest', 'Newest first (created)'],
+   ['created-oldest', 'Oldest first (created)'],
+   ['activity-newest', 'Newest first (updated)'],
+   ['activity-oldest', 'Oldest first (updated)'],
+   ['name', 'Card name']]
     .forEach(([value, label]) => {
       const item = document.createElement('button');
       item.type = 'button';
@@ -413,8 +424,11 @@ function toggleColumnMenu(col, list) {
         if (value === current) return;  // already this sort
         try {
           await patch(`/api/lists/${list.id}`, { sort: value });
-          setStatus(value === 'manual' ? 'Sort cleared' : 'Column sorted: ' + value);
-          await loadBoard(currentBoardId);
+          // Quiet: the re-sort rewrote the column's cards, so the watchdog will
+          // also fire a live `change` — one visible refresh between them, not a
+          // string of "Loading…" flashes.
+          await loadBoard(currentBoardId, { quiet: true });
+          setStatus(value === 'manual' ? 'Sort cleared' : 'Sorted by ' + label.toLowerCase());
         } catch (err) {
           setStatus('Sort failed: ' + err.message, true);
         }
@@ -569,7 +583,74 @@ function initDragging() {
   });
 }
 
+// What a re-render must not destroy: half-typed composer text, the caret, and
+// where the user had scrolled to. A board reload rebuilds every column from
+// scratch, and reloads are not all user-initiated — a live change, or another
+// agent's CLI write, can land while you are mid-sentence in "+ Add a card".
+// Losing the text then reads as the app eating your input, which is what made
+// re-sorting a column feel broken.
+function captureBoardState() {
+  const composers = {};
+  boardEl.querySelectorAll('.composer-input').forEach((input) => {
+    const listId = input.closest('.column')?.dataset.listId;
+    if (!listId) return;
+    if (!input.value && document.activeElement !== input) return;
+    composers[listId] = {
+      value: input.value,
+      focused: document.activeElement === input,
+      start: input.selectionStart,
+      end: input.selectionEnd,
+    };
+  });
+  const scrollTops = {};
+  boardEl.querySelectorAll('.cards').forEach((wrap) => {
+    if (wrap.scrollTop) scrollTops[wrap.dataset.listId] = wrap.scrollTop;
+  });
+  const addInput = boardEl.querySelector('.add-list-input');
+  const addForm = boardEl.querySelector('.add-list-form');
+  return {
+    composers,
+    scrollTops,
+    scrollLeft: boardEl.scrollLeft,
+    addList: addForm && !addForm.classList.contains('hidden')
+      ? { value: addInput ? addInput.value : '',
+          focused: document.activeElement === addInput }
+      : null,
+  };
+}
+
+function restoreBoardState(state) {
+  Object.entries(state.composers).forEach(([listId, s]) => {
+    const input = boardEl.querySelector(
+      `.column[data-list-id="${listId}"] .composer-input`);
+    if (!input) return;  // its column is gone (archived, or another board)
+    input.value = s.value;
+    if (!s.focused) return;
+    input.focus();
+    // setSelectionRange throws on an input whose type doesn't support it; this
+    // one is a plain text input, but guard the caret restore anyway so a browser
+    // quirk can't take the whole render down with it.
+    try { input.setSelectionRange(s.start, s.end); } catch (_) { /* caret is best-effort */ }
+  });
+  Object.entries(state.scrollTops).forEach(([listId, top]) => {
+    const wrap = boardEl.querySelector(`.cards[data-list-id="${listId}"]`);
+    if (wrap) wrap.scrollTop = top;
+  });
+  boardEl.scrollLeft = state.scrollLeft;
+  if (state.addList) {
+    const form = boardEl.querySelector('.add-list-form');
+    const placeholder = boardEl.querySelector('.add-list-placeholder');
+    const input = boardEl.querySelector('.add-list-input');
+    if (!form || !input) return;
+    form.classList.remove('hidden');
+    if (placeholder) placeholder.classList.add('hidden');
+    input.value = state.addList.value;
+    if (state.addList.focused) input.focus();
+  }
+}
+
 function renderBoard(data) {
+  const state = captureBoardState();
   boardEl.innerHTML = '';
   const byList = {};
   (data.cards || []).forEach((c) => { (byList[c.idList] = byList[c.idList] || []).push(c); });
@@ -577,6 +658,7 @@ function renderBoard(data) {
   (data.lists || []).forEach((list) => boardEl.appendChild(columnEl(list, byList[list.id] || [])));
   boardEl.appendChild(addListEl(data.board.id));
   initDragging();
+  restoreBoardState(state);
 }
 
 // Trello-style "Add another list" affordance — a placeholder that swaps to an
@@ -636,15 +718,32 @@ function addListEl(boardId) {
 // board switch/reload calls loadBoard and bumps it; a response whose token is no
 // longer current is stale (the user navigated on) and is dropped before render.
 let boardReqSeq = 0;
+// Serialized payload of the board as currently drawn, so a quiet reload can tell
+// "nothing actually changed" from "something did". Reset by every render, not
+// just the skipping one, and never used to skip a reload the user asked for.
+let lastBoardSig = null;
 
-async function loadBoard(boardId) {
+// `quiet` suppresses the status churn for a refresh the user did not ask for
+// (a live change, or the reload that follows one of their own edits): the board
+// still re-renders, but the top-right doesn't flash "Loading…" → board name each
+// time. Errors are never quiet.
+async function loadBoard(boardId, { quiet = false } = {}) {
   const seq = ++boardReqSeq;
-  setStatus('Loading…');
+  if (!quiet) setStatus('Loading…');
   try {
     const data = await api(`/api/boards/${boardId}`);
     if (seq !== boardReqSeq) return;  // a newer load superseded this one
+    // A quiet reload that would draw exactly what's already on screen is
+    // skipped. Every write the user makes here reaches the store, so the
+    // watchdog reports it back as a live change and we'd re-render the board we
+    // just rendered — and a sync client replaying those same file writes a
+    // moment later says it again. Comparing the payload keeps the refresh
+    // single-step without ever second-guessing WHOSE change it was.
+    const sig = JSON.stringify(data);
+    if (quiet && sig === lastBoardSig) return;
+    lastBoardSig = sig;
     renderBoard(data);
-    setStatus(data.board.name);
+    if (!quiet) setStatus(data.board.name);
   } catch (err) {
     if (seq !== boardReqSeq) return;
     setStatus('Load failed: ' + err.message, true);
@@ -1861,6 +1960,27 @@ document.addEventListener('click', (e) => {
 
 let liveSource = null;
 let liveErrorCount = 0;  // consecutive SSE failures; reset on a successful open
+let liveReloadTimer = null;
+
+// One store write is rarely one `change`: re-sorting a column rewrites every card
+// file in it, and a Dropbox sync replays those writes again a moment later. The
+// server already coalesces per 1s poll tick, but a burst that straddles ticks
+// still arrives as several events — and each one used to be a full board reload.
+// Collapse them into one, a beat after the last event.
+const LIVE_DEBOUNCE_MS = 350;
+
+function scheduleLiveReload() {
+  if (liveReloadTimer) clearTimeout(liveReloadTimer);
+  liveReloadTimer = setTimeout(() => {
+    liveReloadTimer = null;
+    if (!currentBoardId) return;
+    // A drag that started during the wait: hand it back to onEnd rather than
+    // yanking the card out from under the pointer.
+    if (liveDragging) { pendingReload = true; return; }
+    // Quiet — nobody asked for this refresh, so it shouldn't narrate itself.
+    loadBoard(currentBoardId, { quiet: true });
+  }, LIVE_DEBOUNCE_MS);
+}
 
 // Reload the current board when the server signals a change. For the local
 // backend that's a store file change (a Dropbox sync, or another
@@ -1872,6 +1992,9 @@ let liveErrorCount = 0;  // consecutive SSE failures; reset on a successful open
 function initLive(boardId) {
   if (typeof EventSource === 'undefined') return;
   if (liveSource) liveSource.close();
+  // Drop a debounced reload queued for the board we're leaving — selectBoard
+  // loads the new one itself.
+  if (liveReloadTimer) { clearTimeout(liveReloadTimer); liveReloadTimer = null; }
   liveErrorCount = 0;
   liveSource = new EventSource(withToken(withQuery('/api/events', 'board', boardId)));
   liveSource.addEventListener('open', () => { liveErrorCount = 0; });
@@ -1881,7 +2004,7 @@ function initLive(boardId) {
     // dragged card away, but ignoring it entirely would hide another agent's
     // edit until an unrelated later reload. onEnd consumes pendingReload.
     if (liveDragging) { pendingReload = true; return; }
-    loadBoard(currentBoardId);
+    scheduleLiveReload();
   });
   liveSource.addEventListener('error', () => {
     // EventSource auto-reconnects on a dropped stream; count consecutive
