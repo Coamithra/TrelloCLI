@@ -188,7 +188,11 @@ trello configure-http <url> [<tok>]  Save a hosted trellno server + its API toke
                                    for --backend http (see "Hosted server" below)
 trello boards [--archived|--all]   List boards (open by default; --archived =
                                    only archived, --all = both with a State column)
-trello local init [path]           Set up the local file-backend root
+trello local init [path]           Create a local file-backend store folder.
+      [--set-default]              Persists it as this machine's default only
+                                   with --set-default; otherwise nothing global
+                                   changes (use --local-root per command)
+trello local root                  Show the local store in use and who chose it
 trello local gc [--apply]          Clean stale local data (orphaned blobs,
                                    temp cache; --activity-keep <n>, --cache-days
                                    <n>). Dry run unless --apply
@@ -320,10 +324,27 @@ Dropbox-synced folder) — through the same commands and formatting. Select it p
 `--backend local` or `TRELLO_BACKEND=local`.
 
 ```bash
-trello local init                         # root at ~/Dropbox/trello-cli (or: local init <path>)
+trello local init --set-default           # one-time setup: root at ~/Dropbox/trello-cli
+                                          # (or: local init <path> --set-default)
 trello --backend local board add "Home"   # prints the new board id
 trello --backend local --board <id> card add "To Do" "Buy milk"
 trello --backend local --board <id> card ls "To Do"
+```
+
+### Where the store lives
+
+The root resolves as `--local-root <path>` > `TRELLO_LOCAL_ROOT` > the persisted `local_root` in
+`~/.trello-cli.json` > `~/Dropbox/trello-cli`. `trello local root` prints the effective path *and
+which of those four chose it* — the first thing to check if a board seems to have vanished.
+
+Only `local init --set-default` writes the persisted value, and it says so loudly (old → new, plus
+the undo command), because that value is machine-wide: it retargets **every** `--backend local`
+invocation, including sessions already running. For a throwaway store, create it without the flag
+and address it per command:
+
+```bash
+trello local init /tmp/scratch-store                        # creates the folder, persists nothing
+trello --backend local --local-root /tmp/scratch-store boards
 ```
 
 Layout: `<root>/<boardId>/{board.json, lists.json, labels.json, cards/<cardId>.json,

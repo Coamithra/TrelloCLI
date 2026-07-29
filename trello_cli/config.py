@@ -94,7 +94,9 @@ def get_local_root() -> str:
 
     --local-root flag > TRELLO_LOCAL_ROOT env > config 'local_root' > ~/Dropbox/
     trello-cli. The flag/env are per-invocation overrides; the config value is a
-    stable data location (like credentials), not session state, so it persists."""
+    stable data location (like credentials), not session state, so it persists —
+    but only when it was written deliberately (`local init --set-default`), since
+    silently retargeting it breaks every other invocation on the machine."""
     root = (
         _local_root_override
         or os.environ.get("TRELLO_LOCAL_ROOT")
@@ -102,6 +104,27 @@ def get_local_root() -> str:
         or str(DEFAULT_LOCAL_ROOT)
     )
     return os.path.expanduser(root)
+
+
+def local_root_source() -> str:
+    """Where `get_local_root()`'s answer came from, as a human label.
+
+    The whole point of the local-root diagnosis (`local root`, and the
+    "Board not found" hint) is telling an agent WHO set the root it is looking
+    at — a wrong root looks exactly like a missing board otherwise. Kept next to
+    `get_local_root` so the two orders cannot drift apart."""
+    if _local_root_override:
+        return "--local-root flag"
+    if os.environ.get("TRELLO_LOCAL_ROOT"):
+        return "TRELLO_LOCAL_ROOT env var"
+    if _load().get("local_root"):
+        return f"config {CONFIG_PATH}"
+    return "built-in default"
+
+
+def get_stored_local_root() -> str | None:
+    """The persisted `local_root`, ignoring flag/env overrides (None if unset)."""
+    return _load().get("local_root")
 
 
 def set_local_root(path: str) -> None:

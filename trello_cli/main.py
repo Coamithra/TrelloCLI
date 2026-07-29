@@ -48,8 +48,9 @@ Global options:
                                 http = a hosted trellno server, see configure-http)
                                 (also: TRELLO_BACKEND env var)
   --local-root <path>           Local-backend store folder for this command
-                                (also: TRELLO_LOCAL_ROOT env var; persist with
-                                `local init <path>`)
+                                (also: TRELLO_LOCAL_ROOT env var; inspect with
+                                `local root`, persist with
+                                `local init <path> --set-default`)
   --server <url>                Trellno server URL for --backend http
                                 (also: TRELLO_SERVER env var; token via
                                 TRELLO_SERVER_TOKEN; persist with configure-http)
@@ -68,8 +69,14 @@ Global:
         [--archived|--all]      only archived, --all shows both with state).
                                 A query filters by name substring or ID prefix:
                                 `trello boards roadmap`
-  local init [path]             Set up the local file backend root
-                                (default ~/Dropbox/trello-cli)
+  local init [path]             Create a local file-backend store folder.
+       [--set-default]          Changes NO global setting unless --set-default,
+                                which persists it as this machine's default for
+                                EVERY --backend local invocation (other running
+                                sessions included). For a scratch store, skip the
+                                flag and pass --local-root <path> per command
+  local root                    Show which local store is in use and who chose it
+                                (flag / env / config / default) — read-only
   local gc [--apply]            Clean stale local data: orphaned attachment
                                 blobs + temp download cache (--cache-days <n>,
                                 default 7; --activity-keep <n> trims the log).
@@ -319,7 +326,35 @@ def _resolve_board_ref(ref: str) -> str:
     if len(matches) > 1:
         names = ", ".join(m["name"] for m in matches)
         raise SystemExit(f"Ambiguous board name '{ref}'. Matches: {names}")
-    raise SystemExit(f"Board not found: {ref}")
+    raise SystemExit(f"Board not found: {ref}" + _local_root_diagnosis(boards))
+
+
+def _local_root_diagnosis(boards: list[dict] | None = None) -> str:
+    """The tail of a local-backend "not found" error: which store was searched,
+    who chose it, and what is actually in it. Empty on other backends.
+
+    A board that "vanished" is nearly always a retargeted `local_root` (see the
+    `local init --set-default` warning) — and the bare message gave a cold agent
+    no way to discover that, since the store path appears nowhere in the CLI's
+    normal output."""
+    if config.get_backend_name() != "local":
+        return ""
+    lines = [
+        f"\nSearched local store: {config.get_local_root()}",
+        f"  (local_root from {config.local_root_source()})",
+    ]
+    if boards is not None:
+        if boards:
+            names = ", ".join(b.get("name", "?") for b in boards[:5])
+            more = ", …" if len(boards) > 5 else ""
+            lines.append(f"  That store holds {len(boards)} board(s): {names}{more}")
+        else:
+            lines.append("  That store holds no boards at all.")
+    lines.append(
+        "Wrong store? Run `trello local root` to see where that path came from; "
+        "override\nper-command with --local-root <path> or TRELLO_LOCAL_ROOT."
+    )
+    return "\n".join(lines)
 
 
 def _require_board() -> str:
@@ -2147,13 +2182,74 @@ def cmd_attachment(args: list[str]) -> None:
 
 
 def _local_init(args: list[str]) -> None:
-    positional, _ = _parse_flags(args)
+    """Create a local-store folder. Persists nothing unless --set-default.
+
+    `local init <scratch>` used to write `local_root` into ~/.trello-cli.json,
+    which silently retargeted EVERY `--backend local` invocation on the machine —
+    including other sessions already running, which then reported "Board not
+    found" for a board that had not moved. Persisting a machine-wide default is
+    now the deliberate act it always was, and the default behaviour just makes
+    the folder and says how to address it per-invocation."""
+    positional, flags = _parse_flags(args, bool_flags=("--set-default",))
+    if len(positional) > 1:
+        raise SystemExit("Usage: trello local init [path] [--set-default]")
     root = positional[0] if positional else config.get_local_root()
+    root = os.path.abspath(os.path.expanduser(root))
     os.makedirs(root, exist_ok=True)
+
+    if not flags.get("--set-default"):
+        print(f"Local store ready: {root}")
+        print("Nothing was persisted — no global setting changed.")
+        print("\nUse it per-command:")
+        print(f"  trello --backend local --local-root {root} <command>")
+        print(f"  TRELLO_LOCAL_ROOT={root} trello --backend local <command>")
+        print("\nMake it this machine's default (affects EVERY --backend local "
+              "invocation\non this machine, including sessions already running):")
+        print(f"  trello local init {root} --set-default")
+        return
+
+    previous = config.get_stored_local_root()
     config.set_local_root(root)
-    print(f"Local backend initialized at {root}")
-    print("Use it with:  trello --backend local <command>"
+    if previous == root:
+        print(f"Default local root unchanged: {root}  "
+              f"(persisted in {config.CONFIG_PATH})")
+    else:
+        shown = previous if previous else "(unset — was the built-in default)"
+        print(f"Default local root: {shown}  ->  {root}")
+        print(f"Persisted in {config.CONFIG_PATH}.")
+        print("This affects EVERY `--backend local` invocation on this machine, "
+              "including\nsessions already running.")
+        if previous:
+            print(f"\nUndo with:  trello local init {previous} --set-default")
+    print("\nUse it with:  trello --backend local <command>"
           "   (or set TRELLO_BACKEND=local)")
+
+
+def _local_root(args: list[str]) -> None:
+    """Read-only: which store the local backend would use, and who chose it.
+
+    The recovery affordance for an agent whose root was retargeted out from under
+    it — without this there is no way to discover the effective root at all."""
+    if args:
+        raise SystemExit("Usage: trello local root   (read-only; no arguments)")
+    root = config.get_local_root()
+    stored = config.get_stored_local_root()
+    if _is_json():
+        print_json({
+            "root": root,
+            "source": config.local_root_source(),
+            "stored": stored,
+            "config_path": str(config.CONFIG_PATH),
+            "exists": os.path.isdir(root),
+        })
+        return
+    print(f"Local store root: {root}")
+    print(f"  from:     {config.local_root_source()}")
+    print(f"  exists:   {'yes' if os.path.isdir(root) else 'NO — nothing there'}")
+    print(f"  persisted in {config.CONFIG_PATH}: {stored or '(none)'}")
+    print("\nOverride for one command with --local-root <path> or "
+          "TRELLO_LOCAL_ROOT.\nChange the machine-wide default with "
+          "`trello local init <path> --set-default`.")
 
 
 def _opt_int(value: str | bool | None, flag: str) -> int | None:
@@ -2189,7 +2285,13 @@ def _resolve_local_board(backend, ref: str) -> str:
     if len(matches) > 1:
         names = ", ".join(m["name"] for m in matches)
         raise SystemExit(f"Ambiguous board name '{ref}'. Matches: {names}")
-    raise SystemExit(f"Board not found in local store: {ref}")
+    raise SystemExit(
+        f"Board not found in local store: {ref}"
+        f"\nSearched local store: {backend.store.root}"
+        f"  (local_root from {config.local_root_source()})"
+        "\nWrong store? Run `trello local root`; override per-command with "
+        "--local-root <path>."
+    )
 
 
 def _prune_temp_cache(days: int, apply: bool) -> dict:
@@ -2294,6 +2396,7 @@ def _local_rm(args: list[str]) -> None:
 def cmd_local(args: list[str]) -> None:
     _dispatch("local", {
         "init": _local_init,
+        "root": _local_root,
         "gc": _local_gc,
         "rm": _local_rm,
     }, args)

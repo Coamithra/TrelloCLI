@@ -437,7 +437,13 @@ class LocalBackend(Backend):
     def _load_board(self, board_id: str) -> dict:
         board = read_json(self.store.board_file(board_id))
         if board is None:
-            raise SystemExit(f"Board not found: {board_id}")
+            # Name the store: a "missing" board is usually a retargeted
+            # local_root, and the path appears nowhere else in the output. No
+            # provenance here — a LocalBackend can be built with an explicit
+            # root (export, `local gc`), so only the caller knows who chose it.
+            raise SystemExit(
+                f"Board not found: {board_id} (in local store {self.store.root})"
+            )
         return board
 
     def _load_lists(self, board_id: str) -> list[dict]:
