@@ -88,11 +88,21 @@ def print_table(headers: list[str], rows: list[list[str]]) -> None:
         print(fmt.format(*padded))
 
 
-def print_card_detail(card: dict, comments: list[dict] | None = None) -> None:
-    """Print a single card's full details compactly."""
+def print_card_detail(card: dict, comments: list[dict] | None = None,
+                      link: str | None = None) -> None:
+    """Print a single card's full details compactly.
+
+    `link` is the card's magnet (built by the caller, so this stays backend-
+    agnostic). It is the discovery path for the feature — `card show` is what
+    an agent already runs — and it fills the hole where a local card has no
+    `shortUrl` to print. The `URL:` line is omitted when there is no shortUrl
+    rather than printed empty; an empty line was never informative."""
     print(f"  Card:    {card['name']}")
     print(f"  ID:      {card['id']}")
-    print(f"  URL:     {card.get('shortUrl', '')}")
+    if link:
+        print(f"  Link:    {link}")
+    if card.get("shortUrl"):
+        print(f"  URL:     {card['shortUrl']}")
 
     labels = card.get("labels", [])
     if labels:

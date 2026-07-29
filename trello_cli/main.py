@@ -19,7 +19,7 @@ if sys.platform == "win32":
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8")
 
-from . import api, config
+from . import api, config, magnet
 from .fmt import (
     due_str,
     is_image,
@@ -81,6 +81,12 @@ Global:
   board rename <new name>       Rename the --board board
   board archive                 Archive the --board board (soft delete; restorable)
   board restore                 Restore (unarchive) the --board board
+  board link [--as uri|cmd]     Print the board's magnet link (see `card link`)
+             [--short]
+  open <magnet>                 Show whatever a magnet link addresses. The
+                                magnet carries its own board and backend, so no
+                                flags are needed — and it works anywhere a card
+                                id does: `trello card comment <magnet> "done"`
   labels                        Show board labels
   members                       Show board members
   activity [n]                  Show recent activity
@@ -146,6 +152,12 @@ Card:
                                 'after <other_card_id>', or
                                 'before <other_card_id>'
   card mine                     Show cards assigned to me
+  card link <card_id>           Print the card's magnet link: one token that
+       [--as uri|cmd]           carries board + backend + card id, so handing a
+       [--short]                card to another agent is one string instead of
+                                three flags. --as cmd prints a ready-to-run
+                                command line instead; --short abbreviates the
+                                ids. `card show` prints it as a `Link:` line.
 
 List:
   list ls                       Show lists on the board
@@ -271,7 +283,21 @@ def _resolve_board_ref(ref: str) -> str:
     """Resolve a board name or ID to a board ID (for --board / TRELLO_BOARD).
 
     Includes archived boards so an archived board can still be addressed (e.g. to
-    `board restore` or `board show` it) — `get_boards()` alone hides them."""
+    `board restore` or `board show` it) — `get_boards()` alone hides them.
+
+    A board magnet resolves to the board it names. `main()` normally converts a
+    magnet in argv to a plain id before we get here, so this branch is what
+    makes a magnet work in the one place it can't reach: `TRELLO_BOARD` (which
+    then supplies the board only — the backend still comes from the env/flag)."""
+    if magnet.is_magnet(ref):
+        mag = magnet.parse(ref)
+        if mag["type"] != "board":
+            raise SystemExit(
+                f"That is a {mag['type']} magnet, and a board is what's wanted here. "
+                f"A {mag['type']} magnet already carries its board, so pass it "
+                f"where the {mag['type']} goes and drop --board entirely."
+            )
+        return mag["board"]
     _reject_flag_value(ref, "board name or ID")
     boards = api.get_boards(include_closed=True)
     # Exact ID match
@@ -339,7 +365,21 @@ def _resolve_list(board_id: str, name_or_id: str) -> str:
 
 
 def _resolve_card(card_id_prefix: str, include_closed: bool = False) -> str:
-    """Resolve a card ID prefix to a full card ID by searching the active board."""
+    """Resolve a card ID prefix to a full card ID by searching the active board.
+
+    A card magnet is accepted anywhere a card ID is: `main()` has already seeded
+    the board and backend from it, so all that's left here is to unwrap the id
+    and fall through to the ordinary resolution — which is the point, because a
+    stale magnet then still gets the good "Card not found on this board" rather
+    than a blind cross-board write."""
+    if magnet.is_magnet(card_id_prefix):
+        mag = magnet.parse(card_id_prefix)
+        if mag["type"] != "card":
+            raise SystemExit(
+                f"That is a {mag['type']} magnet, and a card is what's wanted here. "
+                f"Get a card's magnet with: trello card link <card_id>"
+            )
+        card_id_prefix = mag["id"]
     _reject_flag_value(card_id_prefix, "card ID")
     # A full 24-char ID: validate it belongs to the current board (when one is
     # set) instead of trusting it blindly — a foreign/deleted id then gets a clean
@@ -574,6 +614,12 @@ _VERB_HINTS = {
     ("card", "assign"): "trello card mine (this CLI is single-user)",
     ("card", "search"): 'trello search <query>  (top-level, not a card verb)',
     ("card", "find"): 'trello search <query>  (top-level, not a card verb)',
+    ("card", "url"): "trello card link <card_id>  (a magnet link; local cards "
+                     "have no Trello URL)",
+    ("card", "magnet"): "trello card link <card_id>",
+    ("card", "open"): "trello open <magnet>  (top-level; for attachments, "
+                      "trello attachment open <card_id> <attachment>)",
+    ("board", "url"): "trello board link",
     ("board", "list"): "trello boards",
     ("board", "ls"): "trello boards",
     ("board", "cards"): "trello card ls",
@@ -593,7 +639,8 @@ _VERB_WORDS = {
     "add", "archive", "assign", "attach", "attachment", "attachments", "board",
     "boards", "card", "cards", "check", "checklist", "checklists", "comment",
     "comments", "create", "del", "delete", "desc", "describe", "download",
-    "due", "edit", "item", "items", "label", "labels", "list", "lists", "ls",
+    "due", "edit", "item", "items", "label", "labels", "link", "list", "lists",
+    "ls", "magnet", "url",
     "find", "mine", "move", "new", "open", "pos", "position", "remove",
     "rename", "reorder", "restore", "rm", "search", "set", "show", "uncheck",
     "unarchive", "unset", "update",
@@ -605,7 +652,9 @@ _SEE_ALSO = {
         "`grab --from <list> --to <list>` claims the top card of a list atomically\n"
         "          (use it instead of `card ls` + `card move` when other agents are\n"
         "          working the same board); comments, labels, checklists and\n"
-        "          attachments are their own noun groups and all take a <card_id>."
+        "          attachments are their own noun groups and all take a <card_id>.\n"
+        "          `card link <card_id>` prints one token carrying board + backend\n"
+        "          + card id, accepted anywhere a <card_id> is."
     ),
     "list": "`card ls <list>` shows the cards in a column.",
     "board": "`--board <name_or_id>` picks the board for every other command.",
@@ -703,6 +752,8 @@ _FLAG_HINTS = {
     "--filter": "Filter by column instead: trello card ls <list>",
     "--limit": "`card ls` takes --limit <n>; elsewhere counts are positional, "
                "e.g. trello activity 20",
+    "--magnet": "The magnet is positional: trello open <magnet>",
+    "--link": "The magnet is positional: trello open <magnet>",
 }
 
 
@@ -866,7 +917,7 @@ def _board_set_closed(closed: bool) -> None:
 
 
 _BOARD_VERBS = {"show": None, "add": None, "rename": None,
-                "archive": None, "restore": None}
+                "archive": None, "restore": None, "link": None}
 
 
 def cmd_board(args: list[str]) -> None:
@@ -879,6 +930,9 @@ def cmd_board(args: list[str]) -> None:
         return
     if verb == "rename":
         _board_rename(args[1:])
+        return
+    if verb == "link":
+        _board_link(args[1:])
         return
     if verb in ("archive", "restore", "unarchive"):
         # These verbs act on the --board board and take NO positionals — a stray
@@ -952,7 +1006,155 @@ def _card_show(args: list[str]) -> None:
     if _is_json():
         print_json({**card, "comments": comments})
         return
-    print_card_detail(card, comments)
+    print_card_detail(card, comments, link=_card_magnet(card))
+
+
+def _card_magnet(card: dict) -> str | None:
+    """The card's magnet for the `Link:` line, or None if we can't build one.
+
+    Never fatal: a card whose dict carries no board id still shows, it just
+    shows without the link."""
+    board_id = card.get("idBoard") or config.get_board_override()
+    if not board_id or len(board_id) != 24:
+        return None
+    backend = config.get_backend_name()
+    server = _link_server(backend)
+    if backend == "http" and not server:
+        return None
+    return magnet.build_card(card["id"], board_id, backend,
+                             name=card.get("name"), server=server)
+
+
+def _link_flags(args: list[str], usage: str) -> tuple[list[str], str, bool]:
+    """Shared `--as uri|cmd` / `--short` parsing for `card link` / `board link`."""
+    positional, flags = _parse_flags(
+        args, bool_flags=("--short",), value_flags=("--as",)
+    )
+    mode = flags.get("--as", "uri")
+    if mode not in ("uri", "cmd"):
+        raise SystemExit(
+            f"--as takes 'uri' (a trello:// magnet, the default) or 'cmd' "
+            f"(a ready-to-run command line), got {mode!r}.\n{usage}"
+        )
+    return positional, str(mode), bool(flags.get("--short"))
+
+
+def _link_cmd(board_id: str, card_id: str | None, backend: str, short: bool) -> str:
+    """The `--as cmd` form: a command line that reaches the same entity.
+
+    The card raises this as a rival to the URI, and for "paste this into your
+    shell" it genuinely is the better form — agents run commands, not URIs. The
+    URI stays the default because only it round-trips back into structured
+    form."""
+    bid = short_id(board_id) if short else board_id
+    parts = ["trello", "--backend", backend]
+    if backend == "http":
+        server = config.get_server_url()
+        if server:
+            parts += ["--server", server]
+    parts += ["--board", bid]
+    if card_id:
+        parts += ["card", "show", short_id(card_id) if short else card_id]
+    else:
+        parts += ["board"]
+    return " ".join(parts)
+
+
+def _link_server(backend: str) -> str | None:
+    """The server URL a magnet needs to be portable off this machine (http only)."""
+    return config.get_server_url() if backend == "http" else None
+
+
+_CARD_LINK_USAGE = "Usage: trello card link <card_id> [--as uri|cmd] [--short]"
+
+
+def _card_link(args: list[str]) -> None:
+    positional, mode, short = _link_flags(args, _CARD_LINK_USAGE)
+    if not positional:
+        raise SystemExit(_CARD_LINK_USAGE)
+    card = api.get_card(_resolve_card(positional[0], include_closed=True))
+    # Prefer the card's own board over --board: it lets `card link <full_id>`
+    # work with no board flag, and it can't disagree with the card.
+    board_id = card.get("idBoard") or _require_board()
+    backend = config.get_backend_name()
+    if mode == "cmd":
+        link = _link_cmd(board_id, card["id"], backend, short)
+    else:
+        link = magnet.build_card(card["id"], board_id, backend,
+                                 name=card.get("name"),
+                                 server=_link_server(backend), short=short)
+    if _is_json():
+        print_json({
+            "link": link, "as": mode, "type": "card", "id": card["id"],
+            "board": board_id, "backend": backend,
+            "server": _link_server(backend),
+            "slug": magnet.slugify(card.get("name")),
+        })
+        return
+    # One bare line, so `$(trello card link X)` is directly usable.
+    print(link)
+
+
+_BOARD_LINK_USAGE = "Usage: trello --board <board> board link [--as uri|cmd] [--short]"
+
+
+def _board_link(args: list[str]) -> None:
+    positional, mode, short = _link_flags(args, _BOARD_LINK_USAGE)
+    if positional:
+        # Same trap as `board archive Scratch`: the board is a global flag, so a
+        # positional here would be silently dropped and the *--board* board
+        # linked instead.
+        raise SystemExit(
+            f"The board is a global flag, not an argument: "
+            f"trello --board {positional[0]!r} board link".replace("'", '"')
+        )
+    board_id = _require_board()
+    b = api.get_board(board_id)
+    backend = config.get_backend_name()
+    if mode == "cmd":
+        link = _link_cmd(board_id, None, backend, short)
+    else:
+        link = magnet.build_board(board_id, backend, name=b.get("name"),
+                                  server=_link_server(backend), short=short)
+    if _is_json():
+        print_json({
+            "link": link, "as": mode, "type": "board", "id": board_id,
+            "board": board_id, "backend": backend,
+            "server": _link_server(backend),
+            "slug": magnet.slugify(b.get("name")),
+        })
+        return
+    print(link)
+
+
+def cmd_open(args: list[str]) -> None:
+    """`trello open <magnet>` — the "I was handed a token, now what" command."""
+    if not args or args[0] in _HELP_WORDS:
+        print("Usage: trello open <magnet>")
+        print()
+        print("Show whatever a magnet link addresses (a card's detail, or a")
+        print("board's info). The magnet carries its own board and backend, so")
+        print("no --board / --backend flags are needed.")
+        print()
+        print("Get one with: trello card link <card_id>  /  trello board link")
+        return
+    token = args[0]
+    if not magnet.is_magnet(token):
+        raise SystemExit(
+            f"`open` takes a magnet link (starting {magnet.SCHEME!r}), "
+            f"got {token!r}.\n"
+            f"Get one with: trello card link <card_id>\n"
+            f"To show a card by id instead: trello card show {token}"
+        )
+    if len(args) > 1:
+        raise SystemExit(f"trello open takes one magnet (got {args[1]!r} as well).")
+    mag = magnet.parse(token)
+    # main() has already seeded board/backend/server from the token, so both
+    # branches are the ordinary show path.
+    if mag["type"] == "card":
+        _card_show([token])
+    else:
+        _board_show([])
 
 
 def _card_row(c: dict) -> list[str]:
@@ -1392,6 +1594,7 @@ def cmd_card(args: list[str]) -> None:
         "due": _card_due,
         "pos": _card_pos,
         "mine": _card_mine,
+        "link": _card_link,
     }, args, ls_takes_args=True)
 
 
@@ -2878,6 +3081,7 @@ COMMANDS = {
     "export": cmd_export,
     "serve": cmd_serve,
     "grab": cmd_grab,
+    "open": cmd_open,
     "board": cmd_board,
     "labels": _label_ls,  # top-level `labels` == `label ls`
     "members": cmd_members,
@@ -2892,6 +3096,125 @@ COMMANDS = {
 }
 
 
+_HEXY_RE = re.compile(r"^[0-9a-f]{4,24}$")
+
+
+def _board_flag_agrees(flag_value: str, magnet_board: str) -> bool:
+    """True when a `--board` value and a magnet's board are the same board.
+
+    Either may be the abbreviated form (`--short` magnets and the 8-char ids
+    every table prints), so agreement is prefix-either-way. A *name* can't be
+    compared without resolving it, so it never agrees — the caller gets the
+    "drop the flag" error instead of a resolve that might pick a third board."""
+    ref = flag_value.lower()
+    if not _HEXY_RE.match(ref):
+        return False
+    return magnet_board.startswith(ref) or ref.startswith(magnet_board)
+
+
+def _apply_magnet(mag: dict, explicit: dict[str, str]) -> None:
+    """Seed board/backend/server from a magnet, refusing a flag that disagrees.
+
+    Precedence is split by how deliberate the setting is:
+
+    - **Env** (TRELLO_BOARD / TRELLO_BACKEND / TRELLO_SERVER): the magnet
+      silently wins. Env is an ambient default and the magnet is specific; an
+      agent with TRELLO_BOARD exported has to be able to paste a magnet and
+      have it work, and erroring would break the feature in exactly the setup
+      it is most needed in.
+    - **An explicit flag that disagrees: hard error**, naming both values.
+      Double-specifying is a real agent habit (a copied `--backend local
+      --board …` prefix in front of a pasted magnet), and resolving a card id
+      against the wrong backend is the plausible-looking-wrong-answer this CLI
+      refuses everywhere else. Agreement is fine and stays silent.
+
+    A flag whose value IS the magnet (`--board trello://board/…`) is agreement
+    by construction, not a conflict."""
+    backend_flag = explicit.get("--backend")
+    if backend_flag and backend_flag.lower() != mag["backend"]:
+        raise SystemExit(
+            f"--backend {backend_flag} disagrees with the magnet link, which "
+            f"says backend {mag['backend']}.\n"
+            f"The magnet already carries its backend — drop the flag."
+        )
+
+    board_flag = explicit.get("--board")
+    if board_flag and magnet.is_magnet(board_flag):
+        # A *board* magnet here is agreement by construction. A card magnet is
+        # not: it does carry a board, but putting it behind --board means the
+        # caller thinks that's where a card goes, and the same token in
+        # TRELLO_BOARD is refused (`_resolve_board_ref`) — so refuse it here
+        # too rather than have the two channels disagree.
+        kind = magnet.parse(board_flag)["type"]
+        if kind != "board":
+            raise SystemExit(
+                f"--board was given a {kind} magnet. A {kind} magnet already "
+                f"carries its board, so pass it where the {kind} goes and drop "
+                f"--board entirely:\n"
+                f"  trello card show {board_flag}"
+            )
+    elif (board_flag
+            and not _board_flag_agrees(board_flag, mag["board"])):
+        named = "" if _HEXY_RE.match(board_flag.lower()) else (
+            " (a board *name* can't be checked against the magnet's id without "
+            "resolving it, so it is refused either way)"
+        )
+        raise SystemExit(
+            f"--board {board_flag} disagrees with the magnet link, which says "
+            f"board {mag['board']}{named}.\n"
+            f"The magnet already carries its board — drop the flag."
+        )
+
+    server_flag = explicit.get("--server")
+    if (server_flag and mag["server"]
+            and server_flag.rstrip("/") != mag["server"].rstrip("/")):
+        raise SystemExit(
+            f"--server {server_flag} disagrees with the magnet link, which "
+            f"says {mag['server']}.\n"
+            f"The magnet already carries its server — drop the flag."
+        )
+
+    config.set_board_override(mag["board"])
+    config.set_backend_override(mag["backend"])
+    if mag["server"]:
+        config.set_server_override(mag["server"])
+
+
+_GLOBAL_VALUE_FLAGS = ("--board", "--backend", "--server", "--local-root")
+
+
+def _find_magnet(args: list[str]) -> dict | None:
+    """The magnet in *reference position*, parsed — or None if there isn't one.
+
+    Scans the raw arguments *before* the flags are stripped, so a magnet used
+    as a flag value (`--board trello://board/…`) is seen too. Parsing here also
+    means a malformed magnet fails immediately, with the grammar, rather than
+    surfacing as a mystery "Card not found" further down.
+
+    It stops at the first token that is neither a flag, a flag's value, nor a
+    command/verb word — i.e. the first *argument*, which is where a ref goes.
+    Scanning the whole of argv instead would let a magnet quoted in free text
+    hijack the invocation: `comment add <id> "done, see trello://card/http/…"`
+    would have been posted against the backend and board named in the comment
+    body. Free text is always a later positional than the ref, so stopping at
+    the first argument is what separates the two."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if magnet.is_magnet(a):
+            return magnet.parse(a)
+        if a in _GLOBAL_VALUE_FLAGS:
+            if i + 1 < len(args) and magnet.is_magnet(args[i + 1]):
+                return magnet.parse(args[i + 1])
+            i += 2  # skip the flag's value: it is not a ref position
+            continue
+        if a.startswith("-") or a in COMMANDS or a.lower() in _VERB_WORDS:
+            i += 1
+            continue
+        return None  # the first argument, and it is not a magnet
+    return None
+
+
 def main() -> None:
     global _JSON_MODE
     args = sys.argv[1:]
@@ -2899,6 +3222,12 @@ def main() -> None:
     if "--json" in args:
         _JSON_MODE = True
         args = [a for a in args if a != "--json"]
+
+    # A magnet link supplies board + backend (+ server), so it has to be read
+    # before the flags it replaces are applied. The token itself stays in argv
+    # and flows on to the command, where `_resolve_card` unwraps it.
+    mag = _find_magnet(args)
+    explicit: dict[str, str] = {}
 
     # Extract --board flag before dispatch. Each of these consumes the *next*
     # token as its value; refuse a following flag (starts with "-") so a dropped
@@ -2908,6 +3237,7 @@ def main() -> None:
         idx = args.index("--board")
         if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--board requires a board name or ID.")
+        explicit["--board"] = args[idx + 1]
         config.set_board_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
@@ -2916,6 +3246,7 @@ def main() -> None:
         idx = args.index("--backend")
         if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--backend requires a name (trello, local or http).")
+        explicit["--backend"] = args[idx + 1]
         config.set_backend_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
@@ -2924,6 +3255,7 @@ def main() -> None:
         idx = args.index("--server")
         if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
             raise SystemExit("--server requires a URL.")
+        explicit["--server"] = args[idx + 1]
         config.set_server_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
@@ -2934,6 +3266,9 @@ def main() -> None:
             raise SystemExit("--local-root requires a path.")
         config.set_local_root_override(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
+
+    if mag:
+        _apply_magnet(mag, explicit)
 
     if not args or args[0] in ("-h", "--help", "help"):
         # `trello help card` / `trello --help card` — the one group, not all ten.

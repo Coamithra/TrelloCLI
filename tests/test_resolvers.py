@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from trello_cli import main
+from trello_cli import magnet, main
 from tests.conftest import use_local_cli
 
 
@@ -210,3 +210,66 @@ def test_dispatch_known_verb_dispatched():
     subcmds = {"ls": lambda a: None, "add": lambda a: calls.append(a)}
     main._dispatch("list", subcmds, ["add", "New"])
     assert calls == [["New"]]
+
+
+# ── magnet links in the resolvers ─────────────────────────────────────
+
+def test_resolve_card_accepts_a_card_magnet(cli):
+    be, bid = cli
+    lst = be.create_list(bid, "To Do")
+    card = be.create_card(lst["id"], "Target")
+    link = magnet.build_card(card["id"], bid, "local", name="Target")
+    assert main._resolve_card(link) == card["id"]
+
+
+def test_resolve_card_accepts_a_short_magnet(cli):
+    be, bid = cli
+    lst = be.create_list(bid, "To Do")
+    card = be.create_card(lst["id"], "Target")
+    link = magnet.build_card(card["id"], bid, "local", short=True)
+    assert main._resolve_card(link) == card["id"]
+
+
+def test_resolve_card_ignores_a_stale_slug(cli):
+    be, bid = cli
+    lst = be.create_list(bid, "To Do")
+    card = be.create_card(lst["id"], "Renamed since")
+    link = magnet.build_card(card["id"], bid, "local", name="The old name")
+    assert main._resolve_card(link) == card["id"]
+
+
+def test_resolve_card_rejects_a_board_magnet(cli):
+    _be, bid = cli
+    with pytest.raises(SystemExit) as ei:
+        main._resolve_card(magnet.build_board(bid, "local"))
+    assert "board magnet" in str(ei.value)
+
+
+def test_a_magnet_for_another_board_is_not_found_not_silently_written(cli):
+    """The unwrapped id still goes through the ordinary board check, so a stale
+    magnet gets the good error rather than a blind cross-board mutation."""
+    be, bid = cli
+    other = be.create_board("Other", default_lists=False)
+    lst = be.create_list(other["id"], "To Do")
+    card = be.create_card(lst["id"], "Elsewhere")
+    with pytest.raises(SystemExit) as ei:
+        main._resolve_card(magnet.build_card(card["id"], bid, "local"))
+    assert "not found" in str(ei.value).lower()
+
+
+def test_resolve_board_ref_accepts_a_board_magnet(cli):
+    _be, bid = cli
+    assert main._resolve_board_ref(magnet.build_board(bid, "local")) == bid
+
+
+def test_resolve_board_ref_rejects_a_card_magnet(cli):
+    _be, bid = cli
+    with pytest.raises(SystemExit) as ei:
+        main._resolve_board_ref(magnet.build_card("a" * 24, bid, "local"))
+    assert "card magnet" in str(ei.value)
+
+
+def test_resolve_board_ref_rejects_a_malformed_magnet(cli):
+    with pytest.raises(SystemExit) as ei:
+        main._resolve_board_ref("trello://board/local/not-hex")
+    assert "Not a valid magnet link" in str(ei.value)
