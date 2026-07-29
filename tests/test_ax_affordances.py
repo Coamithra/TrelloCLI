@@ -373,3 +373,67 @@ def test_board_positional_is_not_swallowed_by_an_override(board):
     with pytest.raises(SystemExit) as e:
         main.cmd_board(["show", "Scratch"])
     assert "--board" in str(e.value)
+
+
+# ── magnet links: discoverable from the surface alone ────────────────
+
+def test_card_show_prints_the_link(board, capsys):
+    """The discovery path: `card show` is what an agent already runs, and on a
+    local card it is the only place a shareable reference can come from."""
+    _be, bid, lists = board
+    main.cmd_card(["ls", "To Do"])
+    capsys.readouterr()
+    card = [c for c in main.api.get_board_cards(bid) if c["name"] == "Fix login bug"][0]
+    main.cmd_card(["show", card["id"]])
+    out = capsys.readouterr().out
+    assert f"Link:    trello://card/local/{bid}/{card['id']}" in out
+
+
+def test_card_show_omits_an_empty_url_line(board, capsys):
+    """A local card has no shortUrl; an empty `URL:` line told nobody anything."""
+    _be, bid, _lists = board
+    card = main.api.get_board_cards(bid)[0]
+    main.cmd_card(["show", card["id"]])
+    assert "URL:" not in capsys.readouterr().out
+
+
+def test_card_help_advertises_link(board, capsys):
+    main.cmd_card(["--help"])
+    out = capsys.readouterr().out
+    assert "card link" in out
+
+
+def test_card_url_points_at_link(board):
+    """`card url` is the obvious guess for "how do I reference this card"."""
+    with pytest.raises(SystemExit) as ei:
+        main.cmd_card(["url", "abc"])
+    assert "card link" in str(ei.value)
+
+
+def test_open_without_arguments_explains_itself(capsys):
+    main.cmd_open([])
+    out = capsys.readouterr().out
+    assert "trello open <magnet>" in out
+    assert "card link" in out  # where to get one
+
+
+def test_open_on_a_bare_id_says_what_to_run_instead(board):
+    with pytest.raises(SystemExit) as ei:
+        main.cmd_open(["94ab1031"])
+    assert "card show 94ab1031" in str(ei.value)
+
+
+def test_link_rejects_a_bad_as_mode(board):
+    _be, bid, _lists = board
+    card = main.api.get_board_cards(bid)[0]
+    with pytest.raises(SystemExit) as ei:
+        main.cmd_card(["link", card["id"], "--as", "json"])
+    assert "uri" in str(ei.value) and "cmd" in str(ei.value)
+
+
+def test_board_link_positional_says_where_the_board_goes(board):
+    """Same trap as `board archive Scratch`: a positional here would be dropped
+    and the *--board* board linked instead."""
+    with pytest.raises(SystemExit) as ei:
+        main.cmd_board(["link", "Roadmap"])
+    assert "global flag" in str(ei.value)
