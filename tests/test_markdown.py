@@ -20,6 +20,7 @@ Auto-skips when `node` is not on PATH.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -52,6 +53,8 @@ class El {
     this.attrs = {}; this.style = {};
   }
   set textContent(v) { this.children = v === '' ? [] : [new TextNode(v)]; this._text = v; }
+  set className(v) { this.attrs.class = v; }
+  get className() { return this.attrs.class; }
   get textContent() { return this._text; }
   set href(v) { this.attrs.href = v; }
   set target(v) { this.attrs.target = v; }
@@ -87,13 +90,16 @@ def _extract_source() -> str:
     return src[start:end]
 
 
-def _run(inputs: list[str]) -> list:
+def _run(inputs: list[str], *, with_parser: bool = True) -> list:
+    """Render each input. `with_parser=False` omits the vendored bundle, which
+    is exactly what a failed `<script>` load looks like to app.js -- the only
+    way to reach renderMarkdown's degraded branch."""
     node = shutil.which("node")
     if node is None:  # pragma: no cover - environment-dependent
         pytest.skip("node not on PATH")
     script = (
         _SHIM
-        + VENDOR_MD.read_text(encoding="utf-8")
+        + (VENDOR_MD.read_text(encoding="utf-8") if with_parser else "")
         + "\n"
         + _extract_source()
         + f"\nconst INPUTS = {json.dumps(inputs)};\n"
@@ -269,6 +275,27 @@ def test_anchors_never_nest():
     assert _text(node) == "https://example.com/label"
 
 
+def test_linked_image_does_not_nest_anchors():
+    """`[![alt](img)](target)` is already inside an anchor, so the image's own
+    link is suppressed -- createElement builds the tree directly and there is no
+    HTML parser to un-nest a nested <a> afterwards."""
+    node = _one("[![alt](https://cdn.example.com/p.png)](https://target.example.com/)")
+    anchors = _anchors(node)
+    assert len(anchors) == 1
+    assert anchors[0]["href"] == "https://target.example.com/"
+    assert _text(node) == "alt"
+
+
+def test_refused_link_label_is_ordinary_prose():
+    """A link whose href fails the gate keeps its label as text -- and that text
+    is treated like any other prose, so a URL inside it still linkifies (to
+    itself, never to the refused href)."""
+    node = _one("[https://label.example.com/x](/relative/path)")
+    anchors = _anchors(node)
+    assert [a["href"] for a in anchors] == ["https://label.example.com/x"]
+    assert _text(node) == "https://label.example.com/x"
+
+
 def test_www_and_mailto_are_not_linked():
     """One URL semantics app-wide: http(s) only, as linkify has always done."""
     assert _anchors(_one("www.example.com and mailto:me@example.com")) == []
@@ -434,3 +461,50 @@ def test_empty_input_is_an_empty_fragment():
     node = _one("")
     assert node[0] == "#fragment"
     assert node[3] == []
+
+
+# ── degraded path (vendored parser missing) ────────────────────────
+
+def test_fallback_to_linkify_when_the_parser_is_absent():
+    """A failed `<script>` load must not blank the panel: the text still shows,
+    bare URLs still link, and Markdown syntax simply stays literal."""
+    src = "**bold** stays literal, see https://example.com/a."
+    (node,) = _run([src], with_parser=False)
+    assert _text(node) == src
+    assert [a["href"] for a in _anchors(node)] == ["https://example.com/a"]
+
+
+def test_fallback_preserves_whitespace():
+    """Both hosts dropped `white-space: pre-wrap` for the Markdown path, so the
+    fallback carries a class that puts it back -- without it a whole
+    description reflows onto one line."""
+    (node,) = _run(["line one\n\nline two"], with_parser=False)
+    assert _tags(node) == ["span"]
+    assert node[3][0][1] == {"class": "md-fallback"}
+    assert "\n\n" in _text(node)
+
+
+def test_fallback_marker_class_exists_in_the_stylesheet():
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert ".md-fallback" in css
+    assert re.search(r"\.md-fallback\s*\{[^}]*white-space:\s*pre-wrap", css)
+
+
+# ── vendored artifact provenance ───────────────────────────────────
+
+# sha256 of the upstream `package/dist/markdown-it.min.js` from
+# https://registry.npmjs.org/markdown-it/-/markdown-it-14.3.0.tgz, with the
+# trailing sourceMappingURL comment removed (see static/vendor/README.md).
+# Compared after normalising line endings, since git may rewrite them.
+VENDOR_MD_SHA256 = "9fc19d0c0ea39204f6e1d8b1f2bb3b431c21245c38570ec1b204dd79df08e2cd"
+
+
+def test_vendored_parser_is_the_pinned_artifact():
+    """A 125 KB opaque bundle is exactly the thing that should not change
+    without someone noticing. If this fails, the file was swapped, re-minified
+    or upgraded -- update the hash here AND the provenance in
+    static/vendor/README.md in the same change."""
+    raw = VENDOR_MD.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == VENDOR_MD_SHA256
+    readme = (STATIC / "vendor" / "README.md").read_text(encoding="utf-8")
+    assert "markdown-it 14.3.0" in readme

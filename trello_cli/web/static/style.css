@@ -383,7 +383,6 @@ body.dragging .cards { overflow-y: hidden; }
 .detail-desc {
   word-break: break-word;
   background: var(--card-bg); border-radius: 6px; padding: 10px;
-  margin: 0; font: inherit;
 }
 .checklist { list-style: none; padding: 0; margin: 0; }
 .checklist li { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
@@ -398,6 +397,10 @@ body.dragging .cards { overflow-y: hidden; }
    and turns single newlines into <br>, so preserved whitespace would only add
    phantom blank lines between them. Every tag styled here is in app.js's
    MD_TAGS whitelist -- add a tag there, give it a rule here. */
+/* renderMarkdown's fallback when the vendored parser did not load: plain
+   linkified text, which still needs the preserved whitespace the Markdown path
+   does not. */
+.markdown .md-fallback { white-space: pre-wrap; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: 0 0 8px; }

@@ -771,15 +771,24 @@ function linkify(text) {
 // rather than adding markdown-it's bundled matcher as a second one.
 const MD_OPTS = { html: false, linkify: false, breaks: true, typographer: false };
 
-// This whitelist IS the security boundary for element types. A token whose tag
-// is not here is not dropped: its children are rendered into the parent
-// instead, so no user text ever disappears. ADDING A TAG? Add it here and give
-// it a rule under `.markdown` in style.css.
+// This whitelist IS the security boundary for element types: EVERY element the
+// walker creates goes through mdEl(), so a tag that is not listed cannot be
+// produced by either path (container tokens in mdWalk, leaf tokens in mdLeaf).
+// A refused tag drops no content -- the token's children or text render into
+// the parent instead, so no user text ever disappears. ADDING A TAG? Add it
+// here and give it a rule under `.markdown` in style.css.
 const MD_TAGS = new Set([
   'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'strong', 'em', 's', 'code', 'pre', 'blockquote',
   'ul', 'ol', 'li', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
 ]);
+
+// The one place an element is created FROM A TOKEN. Returns null for a tag off
+// MD_TAGS, so the whitelist governs the leaf tokens in mdLeaf as well as
+// mdWalk's containers, and callers fall back to plain text.
+function mdEl(tag) {
+  return MD_TAGS.has(tag) ? document.createElement(tag) : null;
+}
 
 function mdAttr(token, name) {
   const attrs = token.attrs || [];
@@ -798,7 +807,8 @@ function mdSafeHref(url) {
 }
 
 function mdAnchor(href, title) {
-  const a = document.createElement('a');
+  const a = mdEl('a');
+  if (!a) return null;
   a.href = href;
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
@@ -832,11 +842,14 @@ function mdLeaf(parent, t, ctx) {
         : linkify(t.content));
       return;
     case 'softbreak':
-    case 'hardbreak':
-      parent.appendChild(document.createElement('br'));
+    case 'hardbreak': {
+      const br = mdEl('br');
+      parent.appendChild(br || document.createTextNode('\n'));
       return;
+    }
     case 'code_inline': {
-      const code = document.createElement('code');
+      const code = mdEl('code');
+      if (!code) { parent.appendChild(document.createTextNode(t.content)); return; }
       code.textContent = t.content;
       parent.appendChild(code);
       return;
@@ -845,16 +858,19 @@ function mdLeaf(parent, t, ctx) {
     case 'code_block': {
       // The fence's info string (```js) is dropped: there is no highlighting,
       // and it keeps user-controlled text off the element as a class.
-      const pre = document.createElement('pre');
-      const code = document.createElement('code');
+      const pre = mdEl('pre');
+      const code = mdEl('code');
+      if (!pre || !code) { parent.appendChild(document.createTextNode(t.content)); return; }
       code.textContent = t.content;
       pre.appendChild(code);
       parent.appendChild(pre);
       return;
     }
-    case 'hr':
-      parent.appendChild(document.createElement('hr'));
+    case 'hr': {
+      const hr = mdEl('hr');
+      if (hr) parent.appendChild(hr);
       return;
+    }
     case 'image': {
       // Images are deliberately NOT rendered as <img>. A card description
       // should not make every viewer's browser fetch a remote URL (tracking
@@ -862,8 +878,11 @@ function mdLeaf(parent, t, ctx) {
       // linked to the source when that is an http(s) URL.
       const src = mdSafeHref(mdAttr(t, 'src'));
       const label = t.content || mdAttr(t, 'src') || '';
-      if (src) {
-        const a = mdAnchor(src, mdAttr(t, 'title'));
+      // `[![alt](img)](target)` is a linked image: inside an anchor already, so
+      // linking the alt text too would nest <a> elements. createElement builds
+      // the tree directly, with no HTML parser to un-nest them afterwards.
+      const a = src && !ctx.inLink ? mdAnchor(src, mdAttr(t, 'title')) : null;
+      if (a) {
         a.textContent = label || src;
         parent.appendChild(a);
       } else if (label) {
@@ -891,20 +910,20 @@ function mdWalk(parent, tokens, ctx) {
     } else if (t.nesting === 1) {
       stack.push({ el: cur, inLink: ctx.inLink });
       let el = null;
-      if (MD_TAGS.has(t.tag)) {
-        if (t.tag === 'a') {
-          const href = mdSafeHref(mdAttr(t, 'href'));
-          if (href) {
-            el = mdAnchor(href, mdAttr(t, 'title'));
-            ctx.inLink = true;
-          }
-        } else {
-          el = document.createElement(t.tag);
-          mdDecorate(el, t);
+      if (t.tag === 'a') {
+        const href = mdSafeHref(mdAttr(t, 'href'));
+        if (href) {
+          el = mdAnchor(href, mdAttr(t, 'title'));
+          if (el) ctx.inLink = true;
         }
+      } else {
+        el = mdEl(t.tag);
+        if (el) mdDecorate(el, t);
       }
       // No element (tag off the whitelist, or an href that failed the gate):
-      // `cur` stays put, so the children render into the parent as content.
+      // `cur` stays put, so the children render into the parent as content --
+      // for a refused link that means its label renders as ordinary prose,
+      // linkified like any other text.
       if (el) {
         cur.appendChild(el);
         cur = el;
@@ -936,7 +955,18 @@ function markdownParser() {
 function renderMarkdown(text) {
   const src = text || '';
   const md = markdownParser();
-  if (!md) return linkify(src);
+  if (!md) {
+    // Degraded: linkify() returns bare text nodes carrying the source's real
+    // newlines, and the hosts dropped `white-space: pre-wrap` because rendered
+    // Markdown does not want it. Wrap the fallback in something that restores
+    // it, or a whole description reflows onto one line.
+    const frag = document.createDocumentFragment();
+    const span = document.createElement('span');
+    span.className = 'md-fallback';
+    span.appendChild(linkify(src));
+    frag.appendChild(span);
+    return frag;
+  }
   const frag = document.createDocumentFragment();
   if (src) mdWalk(frag, md.parse(src, {}), { inLink: false });
   return frag;
