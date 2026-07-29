@@ -92,12 +92,11 @@ _MATCH_LINE_MAX = 160
 #     could back it later.)
 #   has:cover, has:stickers — no such concept in the local store.
 #   member:/@name — single-user store; every card is "mine" (see `card mine`).
-#   board: — search is --board-scoped; needs cross-board search first.
 #   is:starred — a board property, and web stars are localStorage-only.
 # Anything not listed stays a literal text term, so a query is never rejected
 # for using an operator we don't know.
 _FIELD_OPS = ("name", "description", "comment", "checklist")
-_FILTER_OPS = ("list", "label", "is", "has", "due", "edited")
+_FILTER_OPS = ("list", "label", "board", "is", "has", "due", "edited")
 _SORT_KEYS = {"due": "due", "edited": "dateLastActivity"}
 # Direction is per-key, matching Trello: `sort:edited` is most-recently-edited
 # first, while `sort:due` is soonest-due first.
@@ -114,7 +113,7 @@ _GRAN_OPS = ("word", "partial", "substring")
 # Documented Trello operators with no local equivalent. They are kept as literal
 # text (so the query narrows to nothing rather than silently widening) and the
 # CLI hints about them; main._TRELLO_ONLY_OPS mirrors this list for that hint.
-_TRELLO_ONLY_OPS = ("created", "member", "board")
+_TRELLO_ONLY_OPS = ("created", "member")
 
 # Relative windows shared by `due:` and `edited:`.
 _TIME_WINDOWS = {"day": 1, "week": 7, "month": 31}
@@ -281,10 +280,17 @@ def _card_has(card: dict, value: str) -> bool:
 
 
 def _card_matches_filter(card: dict, op: str, value: str, *,
-                         list_names: dict, label_names: dict) -> bool:
+                         list_names: dict, label_names: dict,
+                         board_name: str = "") -> bool:
     """Evaluate one filter operator against a stored card (before negation)."""
     if op == "list":
         name = (list_names.get(card.get("idList")) or "").lower()
+        return name == value or name.startswith(value)
+    if op == "board":
+        # Same equality-or-prefix rule as `list:` — a board is addressed by name
+        # everywhere else in the CLI the same way. Only interesting cross-board,
+        # but it filters honestly under --board too.
+        name = board_name.lower()
         return name == value or name.startswith(value)
     if op == "label":
         names = [label_names.get(i, "").lower() for i in card.get("idLabels", [])]
@@ -931,11 +937,11 @@ class LocalBackend(Backend):
         by_id = {lb["id"]: lb for lb in self._load_labels(board_id)}
         return [self._enrich_card(board_id, c, by_id) for c in cards]
 
-    def search_cards(self, board_id: str, query: str, *,
+    def search_cards(self, board_id: str | None, query: str, *,
                      list_id: str | None = None, include_closed: bool = False,
                      partial: bool = False,
                      substring: bool = False) -> list[dict]:
-        """Find cards on a board by text, mirroring Trello's native search.
+        """Find cards by text, mirroring Trello's native search.
 
         Deliberately an *approximation* of `GET /1/search`, not a reimplementation
         (see DESIGN.md). Duplicated because it has observable rules: the field
@@ -953,20 +959,58 @@ class LocalBackend(Backend):
         written `-foo` must NOT match. Trello's documented operators are honoured
         where the store holds the data for them — `name:`/`description:`/
         `comment:`/`checklist:` scope a term to one field, `list:`/`label:`/`is:`/
-        `has:`/`due:`/`edited:` filter, `sort:` orders — plus the local-only
-        per-term granularity operators (`word:`/`partial:`/`substring:`). See the
-        operator table above for what is deliberately NOT supported and why.
+        `board:`/`has:`/`due:`/`edited:` filter, `sort:` orders — plus the
+        local-only per-term granularity operators (`word:`/`partial:`/
+        `substring:`). See the operator table above for what is deliberately NOT
+        supported and why.
+
+        `board_id=None` searches EVERY board in the store instead of one, in
+        `store.board_ids()` order (sorted, so it's stable run to run) and board
+        order within each. Archived boards join in only under `include_closed`,
+        which is the same "show me the hidden things" the flag already means for
+        cards. A `sort:` key still orders the whole merged result, not each
+        board separately.
 
         Matched cards carry a transient `_match` key describing the hit (field +
         the matching line) for the CLI's context block. Set after the read, never
         persisted — same pattern as `rebalanced` in store.py.
         """
-        self._load_board(board_id)
         q = _parse_query_terms(query)
         if not q:
             return []
         default_gran = ("substring" if substring
                         else "partial" if partial else "word")
+
+        if board_id is None:
+            board_ids = [b["id"] for b in
+                         self.get_boards(include_closed=include_closed)]
+        else:
+            self._load_board(board_id)
+            board_ids = [board_id]
+
+        out: list[dict] = []
+        for bid in board_ids:
+            out.extend(self._search_one_board(
+                bid, q, default_gran, list_id=list_id,
+                include_closed=include_closed))
+
+        if q.sort:
+            key = _SORT_KEYS[q.sort]
+            reverse = q.sort in _SORT_DESCENDING
+            # Cards missing the sort field go last EITHER WAY, so `reverse`
+            # can't float them to the top; sort the present ones separately.
+            missing = [c for c in out if not c.get(key)]
+            present = [c for c in out if c.get(key)]
+            present.sort(key=lambda c: c[key], reverse=reverse)
+            out = present + missing
+        return out
+
+    def _search_one_board(self, board_id: str, q: "_Query", default_gran: str,
+                          *, list_id: str | None,
+                          include_closed: bool) -> list[dict]:
+        """One board's hits for an already-parsed query, in board order (list,
+        then pos). `search_cards` applies any `sort:` across every board's hits
+        afterwards, so this never sorts by the query's key itself."""
         lists = self._load_lists(board_id)
         open_lists = {l["id"] for l in lists if not l.get("closed")}
         list_names = {l["id"]: l.get("name", "") for l in lists}
@@ -974,6 +1018,7 @@ class LocalBackend(Backend):
         labels = self._load_labels(board_id)
         by_id = {lb["id"]: lb for lb in labels}
         label_names = {lb["id"]: lb.get("name", "") for lb in labels}
+        board_name = self._load_board(board_id).get("name", "")
 
         # An explicit `is:archived`/`is:open` decides the CARD's closed state on
         # its own; otherwise --all (include_closed) does. A card in an ARCHIVED
@@ -994,7 +1039,8 @@ class LocalBackend(Backend):
             if not all(
                 _card_matches_filter(card, op, value,
                                      list_names=list_names,
-                                     label_names=label_names) != negated
+                                     label_names=label_names,
+                                     board_name=board_name) != negated
                 for op, value, negated in q.filters
             ):
                 continue
@@ -1002,18 +1048,8 @@ class LocalBackend(Backend):
             if match is not None:
                 hits.append((card, match))
 
-        if q.sort:
-            key = _SORT_KEYS[q.sort]
-            reverse = q.sort in _SORT_DESCENDING
-            # Cards missing the sort field go last EITHER WAY, so `reverse`
-            # can't float them to the top; sort the present ones separately.
-            missing = [h for h in hits if not h[0].get(key)]
-            present = [h for h in hits if h[0].get(key)]
-            present.sort(key=lambda h: h[0][key], reverse=reverse)
-            hits = present + missing
-        else:
-            hits.sort(key=lambda h: (order.get(h[0].get("idList"), len(order)),
-                                     h[0].get("pos", 0)))
+        hits.sort(key=lambda h: (order.get(h[0].get("idList"), len(order)),
+                                 h[0].get("pos", 0)))
         out = []
         for card, match in hits:
             enriched = self._enrich_card(board_id, card, by_id)

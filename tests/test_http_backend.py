@@ -59,6 +59,19 @@ def test_search_round_trips(http):
         == ["Login bug"]
 
 
+def test_cross_board_search_round_trips(http):
+    """`board_id=None` crosses the wire as JSON null. `_RPC_OPS` whitelists by
+    op NAME, so widening the ABC's signature needed no server change at all."""
+    hb, be, bid, lists = http
+    be.create_card(lists[0]["id"], "Login bug")
+    other = be.create_board("Infra")
+    be.create_card(be.get_lists(other["id"])[0]["id"], "Login rotation")
+    got = hb.search_cards(None, "login")
+    assert got == be.search_cards(None, "login")
+    assert {c["name"] for c in got} == {"Login bug", "Login rotation"}
+    assert {c["idBoard"] for c in got} == {bid, other["id"]}
+
+
 # ── card lifecycle via the remote backend ─────────────────────────────
 
 def test_card_crud(http):

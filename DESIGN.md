@@ -491,7 +491,7 @@ negation — and is **fuzzy and relevance-ranked**. Tokenisation, stemming, rank
 **Duplicated** (observable rules): field coverage; whole-word matching by default;
 word-prefix under `partial`; AND across terms; `-term` negation; and the operators whose
 data the store actually holds — `name:` `description:` `comment:` `checklist:` (field
-scoping), `list:` `label:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
+scoping), `list:` `label:` `board:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
 
 **Not duplicated** — and this is the whole delta:
 
@@ -504,7 +504,7 @@ scoping), `list:` `label:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
   (Tracked separately, along with the fact that the web's `newest`/`oldest` column sort is
   really `dateLastActivity`, not creation.)
 - **`has:cover` / `has:stickers`** — no such concept locally. **`member:`/`@name`** —
-  single-user store. **`board:`** — search is `--board`-scoped.
+  single-user store.
 
 Unknown operators — and the Trello-only ones above — degrade to **literal text** rather than
 erroring, so a query is never rejected for using one. Literal text, specifically, and not
@@ -521,6 +521,34 @@ plausible results for a query that meant something else — the worst outcome fo
 caller. Granularity is available per-query (`--partial` / `--substring`; whole-word is the
 default, so it needs no flag) and per-term (`word:` / `partial:` / `substring:`), so one
 query can mix strict and loose terms — `scrollbar substring:crollba`.
+
+### Cross-board: `board_id=None`, not a second op
+
+`trello search <q>` with no `--board` searches **every** board. It is the same ABC op with
+`board_id` widened to `str | None` rather than a new `search_all_cards`, because both
+backends already answer cross-board natively — Trello's `GET /1/search` is cross-board by
+default and the `idBoards` narrowing was always ours, and local just loops `board_ids()`. A
+second op would have doubled the RPC surface, the CLI seam and the test matrix for one
+boolean. `POST /api/rpc` whitelists by op **name**, so the http backend needed no server
+change at all.
+
+Nothing that worked before changed: no board used to be `_require_board`'s error, so an
+error became a feature. Consequences worth knowing:
+
+- **Attribution is `idBoard`**, a key every card already carried — no synthetic field, so
+  `--json` output is unchanged. Trello's search now requests `idBoard` in `card_fields`.
+- **The formatted table gains a `Board` column only when unscoped** (a bare list name is
+  ambiguous across boards). Board-scoped output stays byte-identical.
+- **`--all-boards`** forces cross-board even when `TRELLO_BOARD` is exported — the env is an
+  ambient default, and without the flag most agent sessions could never reach the feature.
+- **`--list` needs a `--board`** (a column resolves against one board; guessing which is
+  worse than refusing). `list:` matches column *names* across boards and still works.
+- **Ordering** is `board_ids()` order (sorted, stable), board order within each; a `sort:`
+  key orders the whole merged result, so the key rather than the boards decides.
+- **`board:`** became implementable the moment scope could exceed one board. It filters on
+  board name with the same equality-or-prefix rule as `list:`.
+- **`--all`** means "include the hidden things" uniformly: archived cards, and unscoped,
+  archived boards too.
 
 `boards <query>` is plain substring on name (or id prefix) on every backend: board listing
 is client-side everywhere, so there is no remote index to mirror and no divergence to create.
