@@ -19,13 +19,10 @@ without it.
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
-APP_JS = Path(__file__).resolve().parent.parent / "trello_cli" / "web" / "static" / "app.js"
+from tests.jsrunner import APP_JS, run_node
 
 # The slice of app.js under test: from the URL_RE declaration through the end of
 # linkify(). Both markers are asserted below, so a rename trips a clear failure
@@ -77,21 +74,13 @@ def _extract_source() -> str:
 
 
 def _run(inputs: list[str]) -> list[list[list]]:
-    node = shutil.which("node")
-    if node is None:  # pragma: no cover - environment-dependent
-        pytest.skip("node not on PATH")
-    script = (
+    return run_node(
         _SHIM
         + _extract_source()
         + f"\nconst INPUTS = {json.dumps(inputs)};\n"
-        + _DRIVER
+        + _DRIVER,
+        timeout=30,
     )
-    proc = subprocess.run(
-        [node, "--input-type=module", "-e", script],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
-    return json.loads(proc.stdout)
 
 
 def _links(nodes: list[list]) -> list[str]:

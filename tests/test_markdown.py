@@ -23,15 +23,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 
 import pytest
 
-STATIC = Path(__file__).resolve().parent.parent / "trello_cli" / "web" / "static"
-APP_JS = STATIC / "app.js"
+from tests.jsrunner import APP_JS, STATIC, run_node
+
 VENDOR_MD = STATIC / "vendor" / "markdown-it.min.js"
 
 # The slice under test runs from linkify's regex (renderMarkdown calls linkify
@@ -94,10 +90,7 @@ def _run(inputs: list[str], *, with_parser: bool = True) -> list:
     """Render each input. `with_parser=False` omits the vendored bundle, which
     is exactly what a failed `<script>` load looks like to app.js -- the only
     way to reach renderMarkdown's degraded branch."""
-    node = shutil.which("node")
-    if node is None:  # pragma: no cover - environment-dependent
-        pytest.skip("node not on PATH")
-    script = (
+    return run_node(
         _SHIM
         + (VENDOR_MD.read_text(encoding="utf-8") if with_parser else "")
         + "\n"
@@ -105,18 +98,6 @@ def _run(inputs: list[str], *, with_parser: bool = True) -> list:
         + f"\nconst INPUTS = {json.dumps(inputs)};\n"
         + _DRIVER
     )
-    # Via a temp FILE, not `node -e`: the vendored parser is ~125 KB and Windows
-    # caps a command line at ~32 KB (test_linkify.py's slice is small enough to
-    # inline, this is not).
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "run.mjs"
-        path.write_text(script, encoding="utf-8")
-        proc = subprocess.run(
-            [node, str(path)],
-            capture_output=True, text=True, timeout=60,
-        )
-    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
-    return json.loads(proc.stdout)
 
 
 def _one(src: str):
