@@ -188,7 +188,11 @@ trello configure-http <url> [<tok>]  Save a hosted trellno server + its API toke
                                    for --backend http (see "Hosted server" below)
 trello boards [--archived|--all]   List boards (open by default; --archived =
                                    only archived, --all = both with a State column)
-trello local init [path]           Set up the local file-backend root
+trello local init [path]           Create a local file-backend store folder.
+      [--set-default]              Persists it as this machine's default only
+                                   with --set-default; otherwise nothing global
+                                   changes (use --local-root per command)
+trello local root                  Show the local store in use and who chose it
 trello local gc [--apply]          Clean stale local data (orphaned blobs,
                                    temp cache; --activity-keep <n>, --cache-days
                                    <n>). Dry run unless --apply
@@ -320,10 +324,27 @@ Dropbox-synced folder) — through the same commands and formatting. Select it p
 `--backend local` or `TRELLO_BACKEND=local`.
 
 ```bash
-trello local init                         # root at ~/Dropbox/trello-cli (or: local init <path>)
+trello local init --set-default           # one-time setup: root at ~/Dropbox/trello-cli
+                                          # (or: local init <path> --set-default)
 trello --backend local board add "Home"   # prints the new board id
 trello --backend local --board <id> card add "To Do" "Buy milk"
 trello --backend local --board <id> card ls "To Do"
+```
+
+### Where the store lives
+
+The root resolves as `--local-root <path>` > `TRELLO_LOCAL_ROOT` > the persisted `local_root` in
+`~/.trello-cli.json` > `~/Dropbox/trello-cli`. `trello local root` prints the effective path *and
+which of those four chose it* — the first thing to check if a board seems to have vanished.
+
+Only `local init --set-default` writes the persisted value, and it says so loudly (old → new, plus
+the undo command), because that value is machine-wide: it retargets **every** `--backend local`
+invocation, including sessions already running. For a throwaway store, create it without the flag
+and address it per command:
+
+```bash
+trello local init /tmp/scratch-store                        # creates the folder, persists nothing
+trello --backend local --local-root /tmp/scratch-store boards
 ```
 
 Layout: `<root>/<boardId>/{board.json, lists.json, labels.json, cards/<cardId>.json,
@@ -496,16 +517,23 @@ either way are visible in both. (Permanent delete is local-backend only.)
 
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its
-cards are hidden, not destroyed) and a **Sort by** section (Manual / Newest / Oldest / Name) in
-that same menu.
+cards are hidden, not destroyed) and a **Sort by** section in that same menu: Manual, Newest /
+Oldest first **(created)**, Newest / Oldest first **(updated)**, Card name.
 
 **Persisted per-column auto-sort (local backend — beats Trello):** picking a sort other than
-Manual doesn't just re-order the column once — it is **saved on the list**, and every new card
-added to that column is auto-placed into its sorted slot (alphabetical, or by newest/oldest
-activity). The setting survives reloads. Manually dragging a card into an auto-sorted column
-**clears that column's sort back to Manual** (so your hand-placement isn't immediately
-overridden by the next add). This is a **local-backend feature**: Trello's API has no per-list
-sort field, so on a `--backend trello` board the Sort by menu is a no-op.
+Manual doesn't just re-order the column once — it is **saved on the list**, and every card that
+lands in the column is auto-placed into its sorted slot: created there, **moved in from another
+column**, or unarchived. The setting survives reloads. "Created" and "updated" are two
+different clocks — a card you edited today is newest by update but not by creation. Manually
+dragging a card into an auto-sorted column **clears that column's sort back to Manual** (so your
+hand-placement isn't immediately overridden by the next add). This is a **local-backend
+feature**: Trello's API has no per-list sort field, so on a `--backend trello` board the Sort by
+menu is a no-op.
+
+Creation time is recorded on every card written since the split shipped. Older cards fall back
+to their Trello id (which encodes its own creation time) if they came from Trello, and to their
+last-activity date otherwise — so a `created` sort is exact going forward and best-effort
+backwards.
 
 **Live refresh:** when serving a `--backend local` board, the page reloads itself
 as the store changes on disk — a Dropbox sync from another machine, or another `--backend local`
