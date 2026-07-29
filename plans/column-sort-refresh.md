@@ -66,9 +66,10 @@ destination is sorted.
 
 ### Out of scope
 
-- `sort:created` / `created:` in `trello search` — DESIGN.md's "absent beats inconsistent"
-  reasoning still holds for a *query* operator; a column sort degrades gracefully, a search
-  filter silently omits.
+- ~~`sort:created` / `created:` in `trello search`~~ — was out of scope here on DESIGN.md's
+  "absent beats inconsistent" reasoning. SHIPPED since, on card db0babb3: the backfill grew
+  an activity.log step that dates the cards the reasoning was about, so the operators answer
+  from a recorded creation time. See DESIGN.md.
 - A CLI verb for setting a list sort (still web-only).
 - Suppressing the redundant SSE reload that follows the client's own mutation — the
   debounce collapses the burst and nothing is lost across a render, which is what actually

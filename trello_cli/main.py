@@ -2820,6 +2820,8 @@ def _fork_snapshot(lists: list[dict], labels: list[dict], cards: list[dict],
                     # Trello card encodes it in its id, and the fresh id is
                     # random. The stale `shortLink` survives the fork, so
                     # `card_created` would otherwise decode the new random id.
+                    # No log index to pass: the source of a `--to local` export
+                    # is never the local store (see `_card_shape`).
                     "dateCreated": card_created(card),
                     "idList": list_map.get(card.get("idList", ""), card.get("idList", "")),
                     # Drop the resolved `labels` dicts: they carry the source's
@@ -3100,8 +3102,13 @@ def cmd_grab(args: list[str]) -> None:
 # table in backends/local.py, which is the authority — tests assert these agree).
 # Detected only to HINT: the query still runs, they're just literal text locally.
 _TRELLO_ONLY_OPS = ("member",)
+# None when the list is empty — the next operator the local store learns to
+# answer empties it, and an empty alternation compiles to `(?:^|\s)-?(?:):`,
+# which matches a bare `:` and would hint about nothing on any query containing
+# one.
 _TRELLO_ONLY_OP_RE = re.compile(
-    r"(?:^|\s)-?(?:" + "|".join(_TRELLO_ONLY_OPS) + r"):", re.IGNORECASE)
+    r"(?:^|\s)-?(?:" + "|".join(_TRELLO_ONLY_OPS) + r"):", re.IGNORECASE
+) if _TRELLO_ONLY_OPS else None
 
 
 def _search_hints(query: str, backend: str, found: int, substring: bool,
@@ -3122,7 +3129,8 @@ def _search_hints(query: str, backend: str, found: int, substring: bool,
     # honours --substring, one fronting Trello doesn't. Guessing would mean
     # telling half of those users something false.
     hints: list[str] = []
-    if backend == "local" and _TRELLO_ONLY_OP_RE.search(query):
+    if (backend == "local" and _TRELLO_ONLY_OP_RE is not None
+            and _TRELLO_ONLY_OP_RE.search(query)):
         # Singular/plural, because the list shrinks as the local store learns to
         # answer an operator (`created:` moved off it) and a hardcoded "are"
         # would read as broken English the moment one is left.

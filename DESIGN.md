@@ -526,9 +526,9 @@ What changed is that the data arrived. `local.card_created` now resolves a creat
 four steps: the stored `dateCreated` (stamped on create, resolved once at import) → the
 Trello id's encoded timestamp, gated on the `shortLink` that proves the id is Trello's → the
 board's `activity.log` `createCard` entry, via `LocalBackend._created_index` (built and
-memoized per board) → `dateLastActivity`. Measured on a real 5-board, 553-card store before
-building this: 245 cards answered at steps 1–2, and the log accounted for **all 308** that
-didn't. The operator therefore answers from a recorded creation time rather than an
+memoized per board) → `dateLastActivity`. The survey that justified building it (2026-07-29,
+the author's 5-board, 553-card store — a snapshot, not a property of the design): 245 cards
+answered at steps 1–2, and the log accounted for **all 308** that didn't. The operator therefore answers from a recorded creation time rather than an
 inference, which is what made shipping it honest.
 
 Step 4 survives as a last resort rather than a null, because a null would put a branch for an

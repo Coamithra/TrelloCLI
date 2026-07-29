@@ -488,10 +488,12 @@ def test_created_falls_back_to_the_activity_log(searchable):
     be, bid = searchable["backend"], searchable["bid"]
     board_id, card = be._load_card(searchable["name"])
     card.pop("dateCreated")
+    # Pushed far out so the last-resort fallback CANNOT produce this answer —
+    # the log is the only thing left that can say the card is a day old.
+    card["dateLastActivity"] = "2020-01-01T00:00:00.000Z"
     be._save_card(board_id, card)
-    # The log says "just now", so it stays in the window even though nothing but
-    # the fallback would agree once the card is edited far in the future.
     assert searchable["name"] in _ids(be.search_cards(bid, "created:day"))
+    assert searchable["name"] not in _ids(be.search_cards(bid, "edited:day"))
 
 
 def test_malformed_created_does_not_raise(searchable):

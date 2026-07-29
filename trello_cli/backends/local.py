@@ -83,7 +83,7 @@ def normalize_sort(sort: Any) -> str:
     return s if s in LIST_SORTS else DEFAULT_SORT
 
 
-def card_created(card: dict, created_index: dict | None = None) -> str:
+def card_created(card: dict, created_index: dict[str, str] | None = None) -> str:
     """A card's creation time, ISO-8601, best-effort.
 
     Four steps, most authoritative first:
@@ -178,9 +178,11 @@ _MATCH_LINE_MAX = 160
 # not answering. It has one now: `dateCreated` on every card written since the
 # field shipped, and for older cards the backfill chain `card_created`
 # documents — the Trello id's encoded timestamp for imported cards, else the
-# board's `activity.log` `createCard` entry. Measured on a real 5-board store,
-# those two cover every card: 245 carry provenance or the field, and the log
-# accounted for all 308 that don't. So the operator answers from a recorded
+# board's `activity.log` `createCard` entry. Between them they answer for every
+# card on a real store rather than most of one — the survey that justified
+# building this (2026-07-29, the author's 5-board 553-card store, a snapshot and
+# not a promise) found 245 cards answered by the field or the id, and the log
+# accounted for all 308 that weren't. So the operator answers from a recorded
 # creation time, not an inference.
 #   The one exception, and the reason `created:` is a best-effort filter rather
 #   than an exact one: `local gc --trim-activity` can trim `createCard` entries
@@ -191,9 +193,11 @@ _MATCH_LINE_MAX = 160
 _FIELD_OPS = ("name", "description", "comment", "checklist")
 _FILTER_OPS = ("list", "label", "board", "is", "has", "due", "edited", "created")
 # key → the value to order a card by. Callables, not card keys, because
-# `created` is `card_created`'s whole backfill chain rather than a stored field
-# (and it needs the board's log index, which `search_cards` binds in). A falsy
-# result means "this card has no such date" and sorts last either way.
+# `created` is `card_created`'s whole backfill chain rather than a stored field.
+# A falsy result means "this card has no such date" and sorts last either way.
+# `created`'s entry is the INDEX-FREE form: `search_cards` replaces it with a
+# closure bound to the searched boards' log indexes, so editing this one alone
+# would change nothing (it is still what decides `sort:created` is a valid key).
 _SORT_KEYS: dict[str, Callable[[dict], Any]] = {
     "due": lambda c: c.get("due") or "",
     "edited": lambda c: c.get("dateLastActivity") or "",
@@ -364,7 +368,7 @@ def _card_edited_within(card: dict, value: str) -> bool:
 
 
 def _card_created_within(card: dict, value: str,
-                         created_index: dict | None = None) -> bool:
+                         created_index: dict[str, str] | None = None) -> bool:
     """`created:` — day/week/month, against `card_created` (see its backfill
     chain, and the trimmed-log caveat in the operator table above)."""
     days = _TIME_WINDOWS.get(value)
@@ -395,7 +399,7 @@ def _card_has(card: dict, value: str) -> bool:
 def _card_matches_filter(card: dict, op: str, value: str, *,
                          list_names: dict, label_names: dict,
                          board: tuple[str, str],
-                         created_index: dict | None = None) -> bool:
+                         created_index: dict[str, str] | None = None) -> bool:
     """Evaluate one filter operator against a stored card (before negation).
 
     `board` is the (id, name) of the board the card lives on — required rather
@@ -909,6 +913,14 @@ class LocalBackend(Backend):
             # Resolved once, here, rather than left to every read: an import is
             # the last moment a Trello-sourced card is guaranteed to still carry
             # the id its creation time is encoded in (a fork remints ids).
+            #
+            # Steps 1-2 of the chain only, deliberately: step 3 reads the
+            # SOURCE board's activity.log, which an import can't see (the source
+            # is a remote backend, and its log never crosses the wire). A
+            # pre-`dateCreated` card from such a source therefore freezes the
+            # step-4 fallback here, and step 1 wins on every later read — the
+            # local log can't correct it either, since a card imported into this
+            # store has no `createCard` entry in it.
             "dateCreated": card_created(card),
             "dateLastActivity": card.get("dateLastActivity") or now_iso(),
         }
@@ -1193,7 +1205,9 @@ class LocalBackend(Backend):
                 board, q, default_gran, list_id=list_id,
                 include_closed=include_closed))
 
-        if q.sort:
+        # `out and` because sorting nothing is free but BUILDING the key isn't:
+        # `created` reads every searched board's activity.log.
+        if out and q.sort:
             key = _SORT_KEYS[q.sort]
             if q.sort == "created":
                 # One index merged across every board searched, since the hits
