@@ -517,16 +517,23 @@ either way are visible in both. (Permanent delete is local-backend only.)
 
 **Managing columns:** an **"Add another list"** affordance sits after the last column, and
 each column header has a `⋯` menu with **Delete list** (an archive — the column and its
-cards are hidden, not destroyed) and a **Sort by** section (Manual / Newest / Oldest / Name) in
-that same menu.
+cards are hidden, not destroyed) and a **Sort by** section in that same menu: Manual, Newest /
+Oldest first **(created)**, Newest / Oldest first **(updated)**, Card name.
 
 **Persisted per-column auto-sort (local backend — beats Trello):** picking a sort other than
-Manual doesn't just re-order the column once — it is **saved on the list**, and every new card
-added to that column is auto-placed into its sorted slot (alphabetical, or by newest/oldest
-activity). The setting survives reloads. Manually dragging a card into an auto-sorted column
-**clears that column's sort back to Manual** (so your hand-placement isn't immediately
-overridden by the next add). This is a **local-backend feature**: Trello's API has no per-list
-sort field, so on a `--backend trello` board the Sort by menu is a no-op.
+Manual doesn't just re-order the column once — it is **saved on the list**, and every card that
+lands in the column is auto-placed into its sorted slot: created there, **moved in from another
+column**, or unarchived. The setting survives reloads. "Created" and "updated" are two
+different clocks — a card you edited today is newest by update but not by creation. Manually
+dragging a card into an auto-sorted column **clears that column's sort back to Manual** (so your
+hand-placement isn't immediately overridden by the next add). This is a **local-backend
+feature**: Trello's API has no per-list sort field, so on a `--backend trello` board the Sort by
+menu is a no-op.
+
+Creation time is recorded on every card written since the split shipped. Older cards fall back
+to their Trello id (which encodes its own creation time) if they came from Trello, and to their
+last-activity date otherwise — so a `created` sort is exact going forward and best-effort
+backwards.
 
 **Live refresh:** when serving a `--backend local` board, the page reloads itself
 as the store changes on disk — a Dropbox sync from another machine, or another `--backend local`

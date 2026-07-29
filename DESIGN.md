@@ -501,12 +501,16 @@ scoping), `list:` `label:` `is:` `has:` `due:` `edited:` (filters), `sort:`.
 
 - **Relevance ranking and fuzzy expansion.** Unknowable from outside. Local returns board
   order (list, then `pos`), which beats a score the caller can't see.
-- **`created:` / `sort:created`.** The local store records **no creation time**:
-  `store.new_id()` is `secrets.token_hex(12)`, random, whereas Trello ids encode creation
-  time in their first 8 hex chars. Cards *imported* from Trello keep Trello ids, so this
-  would work for some cards and silently not for others — absent beats inconsistent.
-  (Tracked separately, along with the fact that the web's `newest`/`oldest` column sort is
-  really `dateLastActivity`, not creation.)
+- **`created:` / `sort:created`.** Cards written since the `dateCreated` field shipped carry
+  an exact creation time, but older ones don't: `store.new_id()` is `secrets.token_hex(12)`,
+  random, whereas Trello ids encode creation time in their first 8 hex chars — so a
+  pre-field card knows its own creation time only if it was imported from Trello
+  (`local.card_created` decodes it, gated on the `shortLink` that proves the id is Trello's,
+  and otherwise falls back to `dateLastActivity`). For a *query operator* that fallback is
+  the wrong trade: `created:week` would silently include or exclude old local cards on a
+  guess, and absent beats inconsistent. The web's **column sort** made the opposite call and
+  ships `created-newest`/`created-oldest` alongside `activity-newest`/`activity-oldest` — a
+  slightly-off position in a column is visible and harmless, a wrong search result is not.
 - **`has:cover` / `has:stickers`** — no such concept locally. **`member:`/`@name`** —
   single-user store. **`board:`** — search is `--board`-scoped.
 
