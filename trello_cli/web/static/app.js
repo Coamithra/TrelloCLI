@@ -583,6 +583,7 @@ function initDragging() {
   });
 }
 
+// >>> render-state (sliced by tests/test_render_state.py) >>>
 // What a re-render must not destroy: half-typed composer text, the caret, and
 // where the user had scrolled to. A board reload rebuilds every column from
 // scratch, and reloads are not all user-initiated — a live change, or another
@@ -648,6 +649,7 @@ function restoreBoardState(state) {
     if (state.addList.focused) input.focus();
   }
 }
+// <<< render-state <<<
 
 function renderBoard(data) {
   const state = captureBoardState();
@@ -714,6 +716,7 @@ function addListEl(boardId) {
   return wrap;
 }
 
+// >>> board-load (sliced by tests/test_render_state.py) >>>
 // Monotonic token so a slow board response can't render over a newer one. Every
 // board switch/reload calls loadBoard and bumps it; a response whose token is no
 // longer current is stale (the user navigated on) and is dropped before render.
@@ -749,6 +752,7 @@ async function loadBoard(boardId, { quiet = false } = {}) {
     setStatus('Load failed: ' + err.message, true);
   }
 }
+// <<< board-load <<<
 
 // ── detail drawer (editable, Trello-style) ─────────────────────────
 
@@ -1962,6 +1966,7 @@ let liveSource = null;
 let liveErrorCount = 0;  // consecutive SSE failures; reset on a successful open
 let liveReloadTimer = null;
 
+// >>> live-debounce (sliced by tests/test_render_state.py) >>>
 // One store write is rarely one `change`: re-sorting a column rewrites every card
 // file in it, and a Dropbox sync replays those writes again a moment later. The
 // server already coalesces per 1s poll tick, but a burst that straddles ticks
@@ -1981,6 +1986,7 @@ function scheduleLiveReload() {
     loadBoard(currentBoardId, { quiet: true });
   }, LIVE_DEBOUNCE_MS);
 }
+// <<< live-debounce <<<
 
 // Reload the current board when the server signals a change. For the local
 // backend that's a store file change (a Dropbox sync, or another
