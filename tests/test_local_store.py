@@ -705,6 +705,69 @@ def test_card_created_backfills_from_a_trello_id(board):
     assert card_created(local_card) == "2026-01-01T00:00:00.000Z"
 
 
+def test_card_created_backfills_from_the_activity_log(board):
+    """Step 3 of the chain, and the one that matters on a real store: a
+    pre-`dateCreated` card made locally has no Trello id to decode, but the
+    board's log recorded when it was created."""
+    from trello_cli.backends.local import card_created
+
+    backend, bid, lists = board
+    card = backend.create_card(lists[0]["id"], "logged")
+    raw = json.loads(backend.store.card_file(bid, card["id"]).read_text())
+    raw.pop("dateCreated")                       # a card written before the field
+    raw["dateLastActivity"] = "2026-01-01T00:00:00.000Z"   # edited long after
+    backend.store.card_file(bid, card["id"]).write_text(json.dumps(raw))
+
+    index = backend._created_index(bid)
+    assert index[card["id"]] != raw["dateLastActivity"]
+    assert card_created(raw, index) == index[card["id"]]
+    # Without the index there is nothing left but the last-resort fallback.
+    assert card_created(raw) == "2026-01-01T00:00:00.000Z"
+
+
+def test_card_created_prefers_a_trello_id_over_the_log(board):
+    """Precedence: an imported card's own id is the authority, and a re-import
+    can log a `createCard` for it long after Trello really made it."""
+    from trello_cli.backends.local import card_created
+
+    trello_card = {"id": "4d5ea62fd76aa1136000000c", "shortLink": "abc12345",
+                   "dateLastActivity": "2026-01-01T00:00:00.000Z"}
+    index = {"4d5ea62fd76aa1136000000c": "2026-05-05T00:00:00.000Z"}
+    assert card_created(trello_card, index).startswith("2011-02-")
+
+
+def test_created_index_takes_the_first_entry_for_a_card(board):
+    """A re-import can log a second `createCard` for a card that already
+    existed; the earliest is the true one."""
+    backend, bid, lists = board
+    card = backend.create_card(lists[0]["id"], "twice")
+    first = backend._created_index(bid)[card["id"]]
+    backend._log(bid, "createCard",
+                 {"card": {"id": card["id"], "name": "twice"}})
+    backend._created_indexes.clear()
+    assert backend._created_index(bid)[card["id"]] == first
+
+
+def test_created_sort_orders_by_the_log_not_last_activity(board):
+    """The bug the split was opened for, at the column level: touching an old
+    card must not move it under a `created-*` sort."""
+    backend, bid, lists = board
+    lst = lists[0]["id"]
+    old = backend.create_card(lst, "old")
+    new = backend.create_card(lst, "new")
+    for card, activity in ((old, "2030-01-01T00:00:00.000Z"),
+                           (new, "2020-01-01T00:00:00.000Z")):
+        raw = json.loads(backend.store.card_file(bid, card["id"]).read_text())
+        raw.pop("dateCreated")          # pre-field cards, so the log answers
+        raw["dateLastActivity"] = activity
+        backend.store.card_file(bid, card["id"]).write_text(json.dumps(raw))
+
+    backend.update_list(lst, sort="created-newest")
+    assert [c["name"] for c in backend.get_cards_in_list(lst)] == ["new", "old"]
+    backend.update_list(lst, sort="activity-newest")
+    assert [c["name"] for c in backend.get_cards_in_list(lst)] == ["old", "new"]
+
+
 def test_import_resolves_created_before_a_fork_remints_the_id(export_cli):
     """A fork keeps the source's stale `shortLink` but mints a fresh random id;
     decoding THAT would file the card under a garbage date."""

@@ -117,10 +117,10 @@ Find:
                                 --substring matches mid-word (crollba ->
                                 scrollbar) and is LOCAL-BACKEND ONLY, because
                                 Trello's search is a word index.
-                                Trello's operators (due:, label:, board:, is:,
-                                has:, sort:, name:, description:, comment:,
-                                checklist:) work on both backends;
-                                created:/member: are Trello-only and are literal
+                                Trello's operators (due:, edited:, created:,
+                                label:, board:, is:, has:, sort:, name:,
+                                description:, comment:, checklist:) work on both
+                                backends; member: is Trello-only and is literal
                                 text locally.
 
 Workflow:
@@ -3099,7 +3099,7 @@ def cmd_grab(args: list[str]) -> None:
 # Operators Trello's index implements but the local store can't (see the operator
 # table in backends/local.py, which is the authority — tests assert these agree).
 # Detected only to HINT: the query still runs, they're just literal text locally.
-_TRELLO_ONLY_OPS = ("created", "member")
+_TRELLO_ONLY_OPS = ("member",)
 _TRELLO_ONLY_OP_RE = re.compile(
     r"(?:^|\s)-?(?:" + "|".join(_TRELLO_ONLY_OPS) + r"):", re.IGNORECASE)
 
@@ -3123,11 +3123,18 @@ def _search_hints(query: str, backend: str, found: int, substring: bool,
     # telling half of those users something false.
     hints: list[str] = []
     if backend == "local" and _TRELLO_ONLY_OP_RE.search(query):
+        # Singular/plural, because the list shrinks as the local store learns to
+        # answer an operator (`created:` moved off it) and a hardcoded "are"
+        # would read as broken English the moment one is left.
+        one = len(_TRELLO_ONLY_OPS) == 1
+        tail = ("is a Trello-backend operator; on the local backend it's"
+                if one else
+                "are Trello-backend operators; on the local backend they're")
         hints.append(
             "Note: " + "/".join(f"{o}:" for o in _TRELLO_ONLY_OPS)
-            + " are Trello-backend operators; on the local backend they're "
-              "matched as literal text (so they narrow to nothing rather than "
-              "being ignored)."
+            + f" {tail} matched as literal text (so "
+            + ("it narrows" if one else "they narrow")
+            + " to nothing rather than being ignored)."
         )
     if not found and board_name is not None:
         # Backend-agnostic: the scoping is this command's, not the backend's.
