@@ -144,8 +144,12 @@ projects concurrently, so nothing about *which* board or backend is persisted
 - `~/.trello-cli.json` persists only stable config: credentials and
   `"local_root": "<path>"` (a data location, like a credential — not selection state).
   `TRELLO_LOCAL_ROOT` overrides it per-invocation.
-- `trello local init [path]` sets up the root (default `~/Dropbox/trello-cli`) and
-  records `local_root`; `trello configure` stays for Trello creds.
+- `trello local init [path]` creates the root folder (default `~/Dropbox/trello-cli`)
+  but records **nothing**; only `local init <path> --set-default` writes `local_root`.
+  It is the one persisted value that changes where *other* invocations look, so
+  setting it is opt-in and loud, and `trello local root` reports the effective root
+  plus which of flag/env/config/default supplied it. `trello configure` stays for
+  Trello creds.
 - **No "active board".** The legacy active-board state was removed; board scope is
   always `--board` / `TRELLO_BOARD`. The resolvers operate within the selected backend.
 

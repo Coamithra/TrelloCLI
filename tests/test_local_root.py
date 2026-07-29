@@ -22,7 +22,7 @@ from tests.conftest import use_local_cli
 
 # ── `local init` does not persist without --set-default ──────────────
 
-def test_init_creates_the_folder_but_writes_no_config(tmp_path, capsys):
+def test_init_creates_the_folder_but_writes_no_config(tmp_path):
     root = tmp_path / "scratch"
     main.cmd_local(["init", str(root)])
     assert root.is_dir()
@@ -30,7 +30,7 @@ def test_init_creates_the_folder_but_writes_no_config(tmp_path, capsys):
     assert config.get_stored_local_root() is None
 
 
-def test_init_leaves_an_existing_local_root_alone(tmp_path, capsys):
+def test_init_leaves_an_existing_local_root_alone(tmp_path):
     config.set_local_root(str(tmp_path / "real"))
     main.cmd_local(["init", str(tmp_path / "scratch")])
     assert config.get_stored_local_root() == str(tmp_path / "real")
@@ -144,7 +144,7 @@ def test_local_root_is_read_only(tmp_path):
 
 # ── the self-diagnosing "Board not found" ────────────────────────────
 
-def test_board_not_found_names_the_store_and_its_source(store_root, capsys):
+def test_board_not_found_names_the_store_and_its_source(store_root):
     be = use_local_cli(store_root)
     be.create_board("Roadmap")
     with pytest.raises(SystemExit) as e:
@@ -170,7 +170,7 @@ def test_diagnosis_is_local_backend_only():
     assert main._local_root_diagnosis([]) == ""
 
 
-def test_local_store_resolver_also_diagnoses(store_root, capsys):
+def test_local_store_resolver_also_diagnoses(store_root):
     """`local gc` / `local rm` resolve against the store directly."""
     from trello_cli.backends.local import LocalBackend
 
@@ -190,3 +190,91 @@ def test_backend_load_board_names_the_store(store_root):
     with pytest.raises(SystemExit) as e:
         be.get_board("6a353ffc61a1ba7c32c0ff72")
     assert store_root in str(e.value)
+
+
+def test_local_store_resolver_lists_what_the_store_holds(store_root):
+    """Same tail as the --board path — one text, not two that drift."""
+    from trello_cli.backends.local import LocalBackend
+
+    be = LocalBackend(store_root)
+    be.create_board("Roadmap")
+    with pytest.raises(SystemExit) as e:
+        main._resolve_local_board(be, "6a353ffc")
+    assert "1 board(s): Roadmap" in str(e.value)
+
+
+def test_diagnosis_survives_a_nameless_board():
+    """A board.json with a null name must not turn the error into a TypeError."""
+    config.set_backend_override("local")
+    assert "?" in main._local_root_diagnosis([{"name": None}])
+
+
+# ── path handling ────────────────────────────────────────────────────
+
+def test_set_default_stores_an_absolute_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    main.cmd_local(["init", "scratch", "--set-default"])
+    stored = config.get_stored_local_root()
+    assert os.path.isabs(stored)
+    assert stored == str(tmp_path / "scratch")
+
+
+def test_printed_commands_quote_a_path_with_spaces(tmp_path, capsys):
+    root = tmp_path / "my store"
+    main.cmd_local(["init", str(root)])
+    out = capsys.readouterr().out
+    assert f'--local-root "{root}"' in out
+    assert f'TRELLO_LOCAL_ROOT="{root}"' in out
+    assert f'trello local init "{root}" --set-default' in out
+
+
+def test_undo_line_quotes_the_previous_path(tmp_path, capsys):
+    old = tmp_path / "old store"
+    config.set_local_root(str(old))
+    capsys.readouterr()
+    main.cmd_local(["init", str(tmp_path / "new"), "--set-default"])
+    assert f'trello local init "{old}" --set-default' in capsys.readouterr().out
+
+
+def test_set_default_from_unset_explains_how_to_get_back(tmp_path, capsys):
+    """The first --set-default has no earlier path to re-init to, so the only
+    route back is the config key — say so rather than leaving a one-way door."""
+    main.cmd_local(["init", str(tmp_path / "store"), "--set-default"])
+    out = capsys.readouterr().out
+    assert "local_root" in out
+    assert str(config.CONFIG_PATH) in out
+
+
+def test_init_rejects_an_empty_path(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        main.cmd_local(["init", "   "])
+    assert "Empty path" in str(e.value)
+
+
+def test_init_on_a_file_path_is_a_clean_error(tmp_path):
+    clash = tmp_path / "afile"
+    clash.write_text("not a directory")
+    with pytest.raises(SystemExit) as e:
+        main.cmd_local(["init", str(clash / "store")])
+    assert "Cannot create local store" in str(e.value)
+
+
+# ── `boards` on an empty local store says where it looked ────────────
+
+def test_boards_on_an_empty_local_store_names_the_store(store_root, capsys):
+    use_local_cli(store_root)
+    os.makedirs(store_root, exist_ok=True)
+    main.cmd_boards([])
+    out = capsys.readouterr().out
+    assert store_root in out
+    assert "trello local root" in out
+    assert "ID" not in out, "a bare table header is the symptom, not the answer"
+
+
+def test_boards_still_lists_a_populated_store(store_root, capsys):
+    be = use_local_cli(store_root)
+    be.create_board("Roadmap")
+    main.cmd_boards([])
+    out = capsys.readouterr().out
+    assert "Roadmap" in out
+    assert "Searched local store" not in out
