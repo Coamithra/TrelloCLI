@@ -23,6 +23,9 @@
   <aside id="detail" class="detail hidden" aria-label="Card detail"></aside>
 
   <script src="/static/vendor/Sortable.min.js"></script>
+  <!-- Parser only: app.js walks its token stream and builds DOM nodes itself,
+       never calling md.render(). See static/vendor/README.md. -->
+  <script src="/static/vendor/markdown-it.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

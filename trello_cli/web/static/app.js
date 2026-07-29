@@ -750,6 +750,199 @@ function linkify(text) {
   return frag;
 }
 
+// >>> markdown-render (sliced by tests/test_markdown.py) >>>
+// Render user text as Markdown, for card descriptions and comment bodies.
+//
+// markdown-it is used as a PARSER ONLY: `md.parse()` returns a flat token
+// stream and the walker below turns it into DOM nodes with
+// document.createElement. Its HTML renderer (`md.render`) is never called and
+// nothing here touches innerHTML, so user text still never passes through an
+// HTML parser -- the same escape-by-construction property linkify() has, and
+// the reason no sanitizer is vendored alongside it. (A sanitizer would also be
+// untestable here: DOMPurify needs a real DOM, and tests/ exercises this code
+// under node against a shim.)
+//
+// `html: false` means raw HTML in card text is never tokenised at all -- it
+// arrives as a `text` token and ends up a text node. `breaks: true` maps a
+// single newline to <br>, so a plain non-Markdown description still reads the
+// way it did under `white-space: pre-wrap`. `linkify: false` because we run our
+// own linkify() over text tokens instead, keeping one URL semantics across
+// every render path (http(s) only, with trimUrlTail's punctuation rules)
+// rather than adding markdown-it's bundled matcher as a second one.
+const MD_OPTS = { html: false, linkify: false, breaks: true, typographer: false };
+
+// This whitelist IS the security boundary for element types. A token whose tag
+// is not here is not dropped: its children are rendered into the parent
+// instead, so no user text ever disappears. ADDING A TAG? Add it here and give
+// it a rule under `.markdown` in style.css.
+const MD_TAGS = new Set([
+  'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'strong', 'em', 's', 'code', 'pre', 'blockquote',
+  'ul', 'ol', 'li', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+]);
+
+function mdAttr(token, name) {
+  const attrs = token.attrs || [];
+  for (const pair of attrs) if (pair[0] === name) return pair[1];
+  return null;
+}
+
+// Only an absolute http(s) URL may become an href. Applied AFTER markdown-it's
+// own normalisation (it percent-decodes/encodes and runs validateLink first),
+// so this sees the final string. Anything else -- a relative path, a bare
+// fragment, javascript:/data:/vbscript: -- yields null and the link's label
+// renders as plain text instead.
+function mdSafeHref(url) {
+  const u = (url == null ? '' : String(url)).trim();
+  return /^https?:\/\/[^\s/?#]/i.test(u) ? u : null;
+}
+
+function mdAnchor(href, title) {
+  const a = document.createElement('a');
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  // As in linkify(): an explicit empty title stops the read view's
+  // title="Click to edit" tooltip being inherited by the anchor.
+  a.title = title || '';
+  return a;
+}
+
+// The ONLY attributes ever copied off a non-anchor token. Nothing else on the
+// token is read, so an `on*` handler cannot end up on a produced element.
+function mdDecorate(el, t) {
+  if (t.tag === 'ol') {
+    const start = mdAttr(t, 'start');
+    if (start && /^[0-9]+$/.test(String(start))) el.setAttribute('start', String(start));
+  } else if (t.tag === 'th' || t.tag === 'td') {
+    // Column alignment arrives as style="text-align:left"; re-derive it rather
+    // than copying the style string through.
+    const m = /text-align:\s*(left|right|center)/i.exec(mdAttr(t, 'style') || '');
+    if (m) el.style.textAlign = m[1].toLowerCase();
+  }
+}
+
+function mdLeaf(parent, t, ctx) {
+  switch (t.type) {
+    case 'text':
+      // Bare URLs in prose still become links -- but never inside an anchor's
+      // own label, which would nest <a> elements.
+      parent.appendChild(ctx.inLink
+        ? document.createTextNode(t.content)
+        : linkify(t.content));
+      return;
+    case 'softbreak':
+    case 'hardbreak':
+      parent.appendChild(document.createElement('br'));
+      return;
+    case 'code_inline': {
+      const code = document.createElement('code');
+      code.textContent = t.content;
+      parent.appendChild(code);
+      return;
+    }
+    case 'fence':
+    case 'code_block': {
+      // The fence's info string (```js) is dropped: there is no highlighting,
+      // and it keeps user-controlled text off the element as a class.
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = t.content;
+      pre.appendChild(code);
+      parent.appendChild(pre);
+      return;
+    }
+    case 'hr':
+      parent.appendChild(document.createElement('hr'));
+      return;
+    case 'image': {
+      // Images are deliberately NOT rendered as <img>. A card description
+      // should not make every viewer's browser fetch a remote URL (tracking
+      // pixel / referrer leak) just by being opened. Show the alt text,
+      // linked to the source when that is an http(s) URL.
+      const src = mdSafeHref(mdAttr(t, 'src'));
+      const label = t.content || mdAttr(t, 'src') || '';
+      if (src) {
+        const a = mdAnchor(src, mdAttr(t, 'title'));
+        a.textContent = label || src;
+        parent.appendChild(a);
+      } else if (label) {
+        parent.appendChild(document.createTextNode(label));
+      }
+      return;
+    }
+    default:
+      // Unknown leaf -- including html_inline/html_block, which `html: false`
+      // should never produce. Keep the text, drop the markup.
+      if (t.content) parent.appendChild(document.createTextNode(t.content));
+  }
+}
+
+// Walk a flat markdown-it token stream into `parent`. Tokens nest via
+// `nesting` (+1 open / -1 close), so a stack tracks the current container;
+// `inline` tokens carry their own child stream. `ctx.inLink` rides the same
+// stack so it is restored exactly when its anchor closes.
+function mdWalk(parent, tokens, ctx) {
+  let cur = parent;
+  const stack = [];
+  for (const t of tokens) {
+    if (t.type === 'inline') {
+      mdWalk(cur, t.children || [], ctx);
+    } else if (t.nesting === 1) {
+      stack.push({ el: cur, inLink: ctx.inLink });
+      let el = null;
+      if (MD_TAGS.has(t.tag)) {
+        if (t.tag === 'a') {
+          const href = mdSafeHref(mdAttr(t, 'href'));
+          if (href) {
+            el = mdAnchor(href, mdAttr(t, 'title'));
+            ctx.inLink = true;
+          }
+        } else {
+          el = document.createElement(t.tag);
+          mdDecorate(el, t);
+        }
+      }
+      // No element (tag off the whitelist, or an href that failed the gate):
+      // `cur` stays put, so the children render into the parent as content.
+      if (el) {
+        cur.appendChild(el);
+        cur = el;
+      }
+    } else if (t.nesting === -1) {
+      const prev = stack.pop();
+      if (prev) {
+        cur = prev.el;
+        ctx.inLink = prev.inLink;
+      }
+    } else {
+      mdLeaf(cur, t, ctx);
+    }
+  }
+}
+
+let mdParser;  // built on first use; `false` once we know the vendor script is missing
+
+function markdownParser() {
+  if (mdParser === undefined) {
+    mdParser = typeof window.markdownit === 'function' ? window.markdownit(MD_OPTS) : false;
+  }
+  return mdParser;
+}
+
+// Drop-in replacement for linkify() on the description/comment paths: same
+// DocumentFragment contract. If the vendored parser failed to load, degrade to
+// linkify() rather than leaving the panel blank.
+function renderMarkdown(text) {
+  const src = text || '';
+  const md = markdownParser();
+  if (!md) return linkify(src);
+  const frag = document.createDocumentFragment();
+  if (src) mdWalk(frag, md.parse(src, {}), { inLink: false });
+  return frag;
+}
+// <<< markdown-render <<<
+
 // Clamp a popover under its anchor within the viewport. Measured against the
 // popover's *current* size, so callers re-run it after async content lands.
 function positionPopover(pop, anchor) {
@@ -1241,8 +1434,8 @@ function commentEl(c) {
   meta.className = 'comment-meta';
   meta.textContent = `@${who} · ${date}`;
   const body = document.createElement('div');
-  body.className = 'comment-body';
-  body.appendChild(linkify((c.data && c.data.text) || ''));
+  body.className = 'comment-body markdown';
+  body.appendChild(renderMarkdown((c.data && c.data.text) || ''));
   div.append(meta, body);
   return div;
 }
@@ -1339,15 +1532,18 @@ async function openDetail(cardId) {
       value: card.desc || '',
       multiline: true,
       render: () => {
-        const pre = document.createElement('pre');
-        pre.className = 'detail-desc';
+        // A <div>, not a <pre>: the rendered Markdown is block-level elements,
+        // and `white-space: pre` would wreck their layout. `breaks: true` in
+        // renderMarkdown keeps single newlines showing as line breaks.
+        const box = document.createElement('div');
+        box.className = 'detail-desc markdown';
         if ((openCard.desc || '').trim()) {
-          pre.appendChild(linkify(openCard.desc));
+          box.appendChild(renderMarkdown(openCard.desc));
         } else {
-          pre.textContent = 'Add a more detailed description…';
-          pre.classList.add('placeholder');
+          box.textContent = 'Add a more detailed description…';
+          box.classList.add('placeholder');
         }
-        return pre;
+        return box;
       },
       save: async (desc) => {
         const updated = await patch(`/api/cards/${card.id}`, { desc });
