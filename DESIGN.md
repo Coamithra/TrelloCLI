@@ -541,12 +541,15 @@ error became a feature. Consequences worth knowing:
   ambiguous across boards). Board-scoped output stays byte-identical.
 - **`--all-boards`** forces cross-board even when `TRELLO_BOARD` is exported — the env is an
   ambient default, and without the flag most agent sessions could never reach the feature.
+  It **refuses** an explicit `--board` (or magnet) instead of beating it: that is a decision
+  about this command, not an ambient default. `config.get_board_flag()` draws the line.
 - **`--list` needs a `--board`** (a column resolves against one board; guessing which is
   worse than refusing). `list:` matches column *names* across boards and still works.
 - **Ordering** is `board_ids()` order (sorted, stable), board order within each; a `sort:`
   key orders the whole merged result, so the key rather than the boards decides.
 - **`board:`** became implementable the moment scope could exceed one board. It filters on
-  board name with the same equality-or-prefix rule as `list:`.
+  board **name or id**, equality-or-prefix on either: `list:`'s rule for the name, plus the id
+  because every table prints ids and `board:<id>` is what a caller who copied one will type.
 - **`--all`** means "include the hidden things" uniformly: archived cards, and unscoped,
   archived boards too.
 

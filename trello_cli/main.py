@@ -3036,7 +3036,16 @@ def cmd_search(args: list[str]) -> None:
     # No board at all is cross-board rather than the error `_require_board`
     # gives everywhere else, and `--all-boards` reaches that even from a session
     # that exports TRELLO_BOARD (most of them) — the env is an ambient default,
-    # not a decision to search one board.
+    # not a decision to search one board. An explicit --board (or a magnet) is
+    # such a decision, so disagreeing with it is a hard error naming both, the
+    # same split `_apply_magnet` draws between the env and a flag.
+    if flags.get("--all-boards") and config.get_board_flag():
+        raise SystemExit(
+            f"--all-boards contradicts --board {config.get_board_flag()}: one "
+            "searches every board, the other exactly one.\n"
+            "Drop whichever you didn't mean (--all-boards is only needed to "
+            "override an ambient TRELLO_BOARD)."
+        )
     override = None if flags.get("--all-boards") else config.get_board_override()
     board_id = _resolve_board_ref(override) if override else None
     list_ref = flags.get("--list")
@@ -3082,6 +3091,13 @@ def cmd_search(args: list[str]) -> None:
     # gathered per board that actually appears — and a bare list name is
     # ambiguous across boards, hence the extra Board column. A board-scoped
     # search renders exactly as it always did.
+    #
+    # Cost, on the remote backends: one get_lists per board WITH HITS, plus one
+    # get_boards. Bounded by the boards actually in the result (usually one or
+    # two), not by the store — but a query matching everywhere does pay it, and
+    # this path is now reachable by omitting --board rather than only on
+    # purpose. The List column is worth it: it is how a caller sees whether a
+    # hit is backlog or done.
     hit_boards = ([board_id] if board_id
                   else sorted({c["idBoard"] for c in cards if c.get("idBoard")}))
     names = {l["id"]: l["name"] for b in hit_boards for l in api.get_lists(b)}

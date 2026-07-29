@@ -281,17 +281,23 @@ def _card_has(card: dict, value: str) -> bool:
 
 def _card_matches_filter(card: dict, op: str, value: str, *,
                          list_names: dict, label_names: dict,
-                         board_name: str = "") -> bool:
-    """Evaluate one filter operator against a stored card (before negation)."""
+                         board: tuple[str, str]) -> bool:
+    """Evaluate one filter operator against a stored card (before negation).
+
+    `board` is the (id, name) of the board the card lives on — required rather
+    than defaulted, because a missing name would make `board:` quietly match
+    nothing instead of raising."""
     if op == "list":
         name = (list_names.get(card.get("idList")) or "").lower()
         return name == value or name.startswith(value)
     if op == "board":
-        # Same equality-or-prefix rule as `list:` — a board is addressed by name
-        # everywhere else in the CLI the same way. Only interesting cross-board,
-        # but it filters honestly under --board too.
-        name = board_name.lower()
-        return name == value or name.startswith(value)
+        # Equality-or-prefix on the NAME, the `list:` rule — plus the id, since
+        # every table prints ids and `board:<id>` is the spelling a caller who
+        # copied one will reach for. Matching only the name would answer that
+        # with a confident empty result.
+        bid, name = board[0].lower(), board[1].lower()
+        return (name == value or name.startswith(value)
+                or bid == value or bid.startswith(value))
     if op == "label":
         names = [label_names.get(i, "").lower() for i in card.get("idLabels", [])]
         return any(n == value or n.startswith(value) for n in names if n)
@@ -968,8 +974,11 @@ class LocalBackend(Backend):
         `store.board_ids()` order (sorted, so it's stable run to run) and board
         order within each. Archived boards join in only under `include_closed`,
         which is the same "show me the hidden things" the flag already means for
-        cards. A `sort:` key still orders the whole merged result, not each
-        board separately.
+        cards — note the asymmetry with `is:archived`, which reaches archived
+        CARDS without `include_closed` but never widens the set of BOARDS,
+        because it is a filter over cards and boards are the enumeration. A
+        `sort:` key still orders the whole merged result, not each board
+        separately.
 
         Matched cards carry a transient `_match` key describing the hit (field +
         the matching line) for the CLI's context block. Set after the read, never
@@ -981,17 +990,17 @@ class LocalBackend(Backend):
         default_gran = ("substring" if substring
                         else "partial" if partial else "word")
 
+        # (id, name) pairs, so `board:` costs no second read of board.json.
         if board_id is None:
-            board_ids = [b["id"] for b in
-                         self.get_boards(include_closed=include_closed)]
+            boards = [(b["id"], b.get("name", "")) for b in
+                      self.get_boards(include_closed=include_closed)]
         else:
-            self._load_board(board_id)
-            board_ids = [board_id]
+            boards = [(board_id, self._load_board(board_id).get("name", ""))]
 
         out: list[dict] = []
-        for bid in board_ids:
+        for board in boards:
             out.extend(self._search_one_board(
-                bid, q, default_gran, list_id=list_id,
+                board, q, default_gran, list_id=list_id,
                 include_closed=include_closed))
 
         if q.sort:
@@ -1005,12 +1014,15 @@ class LocalBackend(Backend):
             out = present + missing
         return out
 
-    def _search_one_board(self, board_id: str, q: "_Query", default_gran: str,
-                          *, list_id: str | None,
+    def _search_one_board(self, board: tuple[str, str], q: "_Query",
+                          default_gran: str, *, list_id: str | None,
                           include_closed: bool) -> list[dict]:
         """One board's hits for an already-parsed query, in board order (list,
-        then pos). `search_cards` applies any `sort:` across every board's hits
-        afterwards, so this never sorts by the query's key itself."""
+        then pos). `board` is its (id, name) — the caller has both already, and
+        re-reading board.json here would cost one extra read per board on a
+        cross-board search. `search_cards` applies any `sort:` across every
+        board's hits afterwards, so this never sorts by the query's key."""
+        board_id = board[0]
         lists = self._load_lists(board_id)
         open_lists = {l["id"] for l in lists if not l.get("closed")}
         list_names = {l["id"]: l.get("name", "") for l in lists}
@@ -1018,7 +1030,6 @@ class LocalBackend(Backend):
         labels = self._load_labels(board_id)
         by_id = {lb["id"]: lb for lb in labels}
         label_names = {lb["id"]: lb.get("name", "") for lb in labels}
-        board_name = self._load_board(board_id).get("name", "")
 
         # An explicit `is:archived`/`is:open` decides the CARD's closed state on
         # its own; otherwise --all (include_closed) does. A card in an ARCHIVED
@@ -1040,7 +1051,7 @@ class LocalBackend(Backend):
                 _card_matches_filter(card, op, value,
                                      list_names=list_names,
                                      label_names=label_names,
-                                     board_name=board_name) != negated
+                                     board=board) != negated
                 for op, value, negated in q.filters
             ):
                 continue

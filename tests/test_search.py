@@ -278,6 +278,18 @@ def test_board_operator_filters_by_board_name(two_boards):
         two_boards["name"]}
 
 
+def test_board_operator_also_takes_an_id(two_boards):
+    """Every table prints ids, so `board:<id>` is what a caller who copied one
+    reaches for. Matching only the name would answer that with a confident
+    empty result — the plausible-looking wrong answer this module refuses."""
+    be = two_boards["backend"]
+    bid = two_boards["other_bid"]
+    assert _ids(be.search_cards(None, f"scrollbar board:{bid}")) == {
+        two_boards["other_card"]}
+    assert _ids(be.search_cards(None, f"scrollbar board:{bid[:8]}")) == {
+        two_boards["other_card"]}
+
+
 def test_board_operator_is_no_longer_trello_only(two_boards):
     """It used to be literal text (matching nothing); now it filters. The
     _TRELLO_ONLY_OPS agreement test covers the other half of this move."""
@@ -541,6 +553,27 @@ def test_trello_passes_query_through_verbatim():
     assert "partial=true" in seen["url"]
 
 
+def test_trello_cross_board_omits_idboards():
+    """The narrowing was always ours: `GET /1/search` is cross-board by default,
+    so cross-board is the absence of `idBoards` rather than a new call. And
+    `idBoard` must be in card_fields either way, since it is the only thing
+    attributing a cross-board hit."""
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"cards": []})
+
+    be = _trello_backend(handler)
+    be.search_cards(None, "cookie")
+    assert "idBoards" not in seen["params"]
+    assert "idBoard" in seen["params"]["card_fields"].split(",")
+
+    be.search_cards("b" * 24, "cookie")
+    assert seen["params"]["idBoards"] == "b" * 24
+    assert "idBoard" in seen["params"]["card_fields"].split(",")
+
+
 def test_trello_post_filters_closed_and_list():
     """`is:archived` misbehaved when probed, so visibility/list scoping are
     applied client-side rather than trusted to the operators."""
@@ -670,15 +703,29 @@ def test_cli_no_board_searches_every_board(two_boards, store_root, capsys):
     assert "scrollbar flicker" in out and "scrollbar certificate" in out
 
 
-def test_cli_all_boards_beats_an_ambient_board(two_boards, store_root, capsys):
-    """TRELLO_BOARD is an ambient default, so --all-boards has to be able to
-    reach cross-board from a session that exports one."""
+def test_cli_all_boards_beats_an_ambient_board(two_boards, store_root, capsys,
+                                               monkeypatch):
+    """TRELLO_BOARD is an ambient default a session exports once, so
+    --all-boards has to be able to reach cross-board from inside one."""
     use_local_cli(store_root)
-    config.set_board_override(two_boards["bid"])
+    monkeypatch.setenv("TRELLO_BOARD", two_boards["bid"])
     main.cmd_search(["scrollbar"])
     assert "scrollbar certificate" not in capsys.readouterr().out
     main.cmd_search(["scrollbar", "--all-boards"])
     assert "scrollbar certificate" in capsys.readouterr().out
+
+
+def test_cli_all_boards_refuses_an_explicit_board(two_boards, store_root):
+    """An explicit --board is a decision about THIS command, not an ambient
+    default — so a flag that contradicts it is an error naming both, never a
+    silent win. (Same split `_apply_magnet` draws between env and flag.)"""
+    use_local_cli(store_root)
+    config.set_board_override(two_boards["bid"])
+    with pytest.raises(SystemExit) as e:
+        main.cmd_search(["scrollbar", "--all-boards"])
+    msg = str(e.value)
+    assert "--all-boards" in msg and "--board" in msg
+    assert two_boards["bid"] in msg
 
 
 def test_cli_board_column_only_appears_cross_board(two_boards, store_root, capsys):
@@ -719,18 +766,24 @@ def test_cli_list_flag_needs_a_board(two_boards, store_root):
     assert "--board" in msg and "list:" in msg
 
 
-def test_cli_hints_the_board_it_searched_on_a_miss(searchable, store_root, capsys):
+def test_cli_hints_the_board_it_searched_on_a_miss(two_boards, store_root,
+                                                   capsys, monkeypatch):
     """A miss on one board can't be told from "it isn't anywhere" in the output,
     so say which board was looked at — and don't say it when nothing was
     scoped away."""
     use_local_cli(store_root)
-    config.set_board_override(searchable["bid"])
+    monkeypatch.setenv("TRELLO_BOARD", two_boards["bid"])
     main.cmd_search(["bananas"])
     out = capsys.readouterr().out
     assert 'Searched only the board "Roadmap"' in out and "--all-boards" in out
 
+    # The absence of the hint is only meaningful if the search really went
+    # cross-board — otherwise this half would pass with the hint deleted.
     main.cmd_search(["bananas", "--all-boards"])
-    assert "Searched only the board" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "No cards matching" in out and "Searched only the board" not in out
+    main.cmd_search(["scrollbar", "--all-boards"])
+    assert "scrollbar certificate" in capsys.readouterr().out
 
 
 def test_cli_rejects_invented_flags(searchable, store_root):

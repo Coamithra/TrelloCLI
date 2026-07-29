@@ -31,6 +31,17 @@ def get_board_override() -> str | None:
     return _board_override or os.environ.get("TRELLO_BOARD")
 
 
+def get_board_flag() -> str | None:
+    """The board set *explicitly* this invocation (the --board flag or a
+    magnet), ignoring the TRELLO_BOARD env var.
+
+    The two channels are not equivalent: the env is an ambient default a
+    session exports once, while a flag is a decision made about this command.
+    Anything that overrides the ambient one silently must still refuse to
+    override an explicit one (see `search --all-boards`)."""
+    return _board_override
+
+
 def set_backend_override(value: str) -> None:
     """Set a per-invocation backend override (from --backend flag)."""
     global _backend_override
