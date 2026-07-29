@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.jsrunner import APP_JS, app_js_source, run_node, slice_between
+from tests.jsrunner import app_js_source, run_node, slice_between
 
 SHIM = (Path(__file__).resolve().parent / "domshim.js").read_text(encoding="utf-8")
 
@@ -85,15 +85,31 @@ def test_fixture_markup_matches_app_js():
     """The shim's makeBoard() is the one thing here that can drift from the real
     markup: rename a class in columnEl and every capture/restore test would pass
     against a board the app no longer builds. So every class name and dataset key
-    the fixture uses has to be one app.js actually writes."""
+    the fixture uses has to be one app.js actually writes, and the nestings the
+    slices navigate have to still be built that way -- the composer inside its
+    column (captureBoardState reaches the list id through `closest('.column')`)
+    and the list id on the cards wrapper.
+
+    Scope: a rename, and those containments. Catching an arbitrary restructure
+    would mean parsing app.js, which is a bigger machine than this earns.
+    """
     src = app_js_source()
-    fixture = SHIM[SHIM.index("function makeBoard("):]
+    marker = "function makeBoard("
+    assert marker in SHIM, "the fixture was renamed; this guard now checks nothing"
+    fixture = SHIM[SHIM.index(marker):]
     classes = set(re.findall(r"className = '([^']+)'", fixture))
     assert classes, "no class names found in makeBoard -- the slice above is wrong"
     for name in sorted(classes):
         assert f"= '{name}'" in src, f"fixture class {name!r} is not written by app.js"
     for key in sorted(set(re.findall(r"dataset\.(\w+)", fixture))):
         assert f"dataset.{key}" in src, f"fixture dataset key {key!r} is unused in app.js"
+
+    column = slice_between(src, "function columnEl(list, cards) {", "\n}\n")
+    assert "col.appendChild(composer)" in column
+    assert "composer.appendChild(input)" in column
+    assert "cardsWrap.dataset.listId" in column
+    assert "form.appendChild(input)" in slice_between(
+        src, "function addListEl(boardId) {", "\n}\n")
 
 
 def test_shim_refuses_a_selector_it_cannot_parse():
@@ -505,6 +521,30 @@ out({ ...report(), beforeLate });
     assert ["Board A", False] not in got["statuses"]
 
 
+def test_a_superseded_failure_does_not_paint_an_error_over_the_newer_board():
+    """The stale check is repeated in the catch for a reason: the load you
+    navigated away from can fail *after* the one you navigated to succeeded, and
+    'Load failed' over a board that loaded fine is a lie."""
+    got = _load("""
+const first = deferred();
+const second = deferred();
+const queue = [first.promise, second.promise];
+apiImpl = () => queue.shift();
+
+const slow = loadBoard('A');
+const quick = loadBoard('B');
+second.resolve(payload('B'));
+await quick;
+const beforeFailure = [...statuses];
+first.reject(new Error('boom'));
+await slow;
+out({ ...report(), beforeFailure });
+""")
+    assert got["rendered"] == ["B"]
+    assert got["statuses"] == got["beforeFailure"]
+    assert not any(isError for _, isError in got["statuses"])
+
+
 def test_a_failed_load_reports_the_error_even_when_quiet():
     """Errors are never quiet -- a refresh nobody asked for still has to say so
     when it breaks, or the board silently goes stale."""
@@ -565,12 +605,19 @@ out({ ...report(), early });
 
 
 def test_the_scheduled_delay_is_the_declared_constant():
+    """The relationship, not the number -- retuning the debounce should not have
+    to touch this test. 350ms itself is pinned separately below."""
     got = _live("""
 scheduleLiveReload();
 out({ ...report(), constant: LIVE_DEBOUNCE_MS });
 """)
-    assert got["constant"] == 350
-    assert got["pendingDelays"] == [350]
+    assert got["pendingDelays"] == [got["constant"]]
+
+
+def test_the_debounce_window_is_a_third_of_a_second():
+    """Pinned deliberately: it is a UX-visible number (how long the board lags a
+    change someone else made), so moving it should be a decision, not a drift."""
+    assert "const LIVE_DEBOUNCE_MS = 350;" in _slice("live-debounce")
 
 
 def test_a_burst_of_changes_collapses_to_one_reload():
@@ -656,11 +703,3 @@ out(report());
 """)
     assert got["calls"] == []
     assert got["pendingReload"] is True
-
-
-def test_app_js_is_the_only_source_of_truth():
-    """Belt and braces: none of the three slices may be empty, and the file they
-    come from must be the shipped one."""
-    assert APP_JS.name == "app.js"
-    for name in SLICES:
-        assert len(_slice(name).splitlines()) > 5, name

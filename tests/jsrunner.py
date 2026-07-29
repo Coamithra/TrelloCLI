@@ -40,8 +40,8 @@ def node_or_skip() -> str:
     return node
 
 
-def slice_between(text: str, start: str, end: str, *, keep_end: bool = True) -> str:
-    """The block of `text` from `start` through `end`.
+def slice_between(text: str, start: str, end: str) -> str:
+    """The block of `text` from `start` through `end`, both markers included.
 
     Both markers are required: a rename upstream raises here rather than
     silently yielding a slice that tests nothing.
@@ -52,7 +52,7 @@ def slice_between(text: str, start: str, end: str, *, keep_end: bool = True) -> 
     if end not in text[begin:]:
         raise AssertionError(f"end marker not found after start: {end!r}")
     stop = text.index(end, begin)
-    return text[begin:stop + len(end)] if keep_end else text[begin:stop]
+    return text[begin:stop + len(end)]
 
 
 def run_node(script: str, *, timeout: int = 60) -> Any:

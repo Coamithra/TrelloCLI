@@ -22,7 +22,7 @@ import json
 
 import pytest
 
-from tests.jsrunner import APP_JS, run_node
+from tests.jsrunner import app_js_source, run_node
 
 # The slice of app.js under test: from the URL_RE declaration through the end of
 # linkify(). Both markers are asserted below, so a rename trips a clear failure
@@ -62,7 +62,7 @@ console.log(JSON.stringify(out));
 
 
 def _extract_source() -> str:
-    src = APP_JS.read_text(encoding="utf-8")
+    src = app_js_source()
     start = src.index(_START)
     end = src.index(_END, start)
     # From `_END` (the start of linkify) to the closing brace of linkify. The
@@ -94,7 +94,7 @@ def _text(nodes: list[list]) -> str:
 def test_markers_still_present():
     """If this fails, the slice above no longer finds the code and every other
     test in this file would be silently vacuous."""
-    src = APP_JS.read_text(encoding="utf-8")
+    src = app_js_source()
     assert _START in src
     assert _END in src
     extracted = _extract_source()

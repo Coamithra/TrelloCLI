@@ -2,22 +2,20 @@
 //
 // A real .js file rather than a Python string because it is big enough to want
 // syntax highlighting, and it is loaded off disk the same way test_markdown.py
-// loads the vendored parser. It supplies exactly what the three app.js slices
-// under test touch and nothing more -- an unsupported selector throws rather
-// than quietly matching nothing, so a slice that outgrows the shim fails loudly.
+// loads the vendored parser. It supplies what the three app.js slices under test
+// touch and nothing more: no createElement, no text nodes, no event dispatch,
+// because none of those three needs them. That is the point -- an unsupported
+// selector throws, and a missing method is a TypeError, so a slice that outgrows
+// the shim fails loudly instead of quietly matching nothing (which would read as
+// "the state was never captured").
 //
 // The other two JS test files (test_linkify.py, test_markdown.py) keep their own
 // smaller shims on purpose; see tests/jsrunner.py for why.
 
 // ── elements ───────────────────────────────────────────────────────
 
-class TextNode {
-  constructor(text) { this.kind = 'text'; this.text = text; this.parentNode = null; }
-}
-
 class El {
   constructor(tag) {
-    this.kind = 'el';
     this.tagName = tag.toUpperCase();
     this.children = [];
     this.parentNode = null;
@@ -37,7 +35,6 @@ class El {
       add(...names) { names.forEach((n) => self._classes.add(n)); },
       remove(...names) { names.forEach((n) => self._classes.delete(n)); },
       contains(name) { return self._classes.has(name); },
-      toggle(name, on) { if (on) self._classes.add(name); else self._classes.delete(name); },
     };
   }
 
@@ -67,11 +64,7 @@ class El {
 
   append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
 
-  addEventListener() { /* no handler in any slice under test is ever fired */ }
-
   focus() { document.activeElement = this; }
-
-  blur() { if (document.activeElement === this) document.activeElement = null; }
 
   setSelectionRange(start, end) {
     this.selectionStart = start;
@@ -139,7 +132,6 @@ function attrValue(el, name) {
 }
 
 function matchesCompound(el, comp) {
-  if (el.kind !== 'el') return false;
   if (comp.tag && el.tagName !== comp.tag) return false;
   if (!comp.classes.every((c) => el._classes.has(c))) return false;
   return comp.attrs.every(([k, v]) => String(attrValue(el, k)) === v);
@@ -160,7 +152,6 @@ function matchChain(el, parts, i) {
 // the real querySelectorAll.
 function descendants(root, out = []) {
   root.children.forEach((child) => {
-    if (child.kind !== 'el') return;
     out.push(child);
     descendants(child, out);
   });
@@ -174,11 +165,9 @@ function queryAll(root, sel) {
 
 // ── document ───────────────────────────────────────────────────────
 
-const document = {
-  activeElement: null,
-  createElement: (tag) => new El(tag),
-  createTextNode: (t) => new TextNode(t),
-};
+// Only what the slices read. `createElement` is deliberately absent: none of the
+// three builds an element, and the fixture below constructs `El` directly.
+const document = { activeElement: null };
 
 // ── fake timers ────────────────────────────────────────────────────
 //
@@ -222,8 +211,10 @@ function clearTimeout(id) { clock.clear(id); }
 // ── board fixture ──────────────────────────────────────────────────
 //
 // The markup columnEl()/addListEl() produce, reduced to the parts the slices
-// look at. tests/test_render_state.py asserts these class names and dataset
-// keys still appear in app.js, so this cannot drift into testing nothing.
+// look at. tests/test_render_state.py checks these class names and dataset keys
+// against the real builders, plus the two nestings the slices navigate -- enough
+// to catch a rename or either containment being dropped, not an arbitrary
+// restructure.
 
 function makeBoard(listIds) {
   // No class on the root: it stands in for `#board`, which app.js addresses by

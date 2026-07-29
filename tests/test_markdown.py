@@ -26,7 +26,7 @@ import re
 
 import pytest
 
-from tests.jsrunner import APP_JS, STATIC, run_node
+from tests.jsrunner import STATIC, app_js_source, run_node, slice_between
 
 VENDOR_MD = STATIC / "vendor" / "markdown-it.min.js"
 
@@ -80,10 +80,7 @@ console.log(JSON.stringify(INPUTS.map((src) => ser(renderMarkdown(src)))));
 
 
 def _extract_source() -> str:
-    src = APP_JS.read_text(encoding="utf-8")
-    start = src.index(_START)
-    end = src.index(_END, start) + len(_END)
-    return src[start:end]
+    return slice_between(app_js_source(), _START, _END)
 
 
 def _run(inputs: list[str], *, with_parser: bool = True) -> list:
@@ -126,7 +123,7 @@ def _anchors(node) -> list[dict]:
 
 def test_markers_still_present():
     """If this fails the slice finds nothing and every test below is vacuous."""
-    src = APP_JS.read_text(encoding="utf-8")
+    src = app_js_source()
     assert _START in src
     assert _END in src
     extracted = _extract_source()
