@@ -26,8 +26,11 @@ Get your API key and token from https://trello.com/power-ups/admin.
 
 This CLI is built to be driven by an agent, not memorized by a human. Tell your project's
 CLAUDE.md where the board lives (id, backend, list names) and then just talk to Claude in
-plain language. Real phrasings that come up all the time, pulled from actual sessions
-(lightly edited for clarity):
+plain language. For the full workflow this enables — a generic card-to-PR runbook plus
+`/grab`, `/review`, and `/farm` skills for solo cards and supervised parallel agent
+fleets — see [`CONTRIBUTING.example.md`](CONTRIBUTING.example.md) and
+[`skills/`](skills/). Real phrasings that come up all the time, pulled from actual
+sessions (lightly edited for clarity):
 
 ### Setting up a project
 
