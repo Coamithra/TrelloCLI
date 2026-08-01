@@ -44,33 +44,14 @@ worktree flow.
 
 ---
 
-## Before You Start: Create a Tracker Doc
+## Before You Start: Track Your Progress
 
-Before anything else, create a tracker file (`plans/tracker_<branch>.md` or
-`docs/tracker_<branch>.md` — match the project's plans/docs layout) with every step from
-this runbook as a checkbox list. Example:
-
-```markdown
-# Tracker: fix/some-bug
-
-## Phase 1: Pick Up the Card
-- [ ] Claim the top card with `trello grab`, before anything else
-- [ ] Pull latest <branch>
-- [ ] Read the card (description, comments, linked plan)
-- [ ] Create worktree and branch
-
-## Phase 2: Research
-- [ ] Read the referenced code
-- [ ] Trace the call chain
-
-## Phase 3: Design
-- [ ] Settle the approach, get user approval
-- [ ] Post the short "here's my approach" comment on the card (before coding)
-...
-```
-
-Check off each step as you complete it — it's your source of truth for progress if you
-get interrupted or context is lost. Delete the tracker file after the card ships.
+Keep the phase steps below in your session task list as you go, so nothing in the back
+half of the runbook (especially Phase 6's paperwork) evaporates on a long card. **If the
+card will span sessions or you are handing off, ALSO write a durable tracker file**
+(`plans/tracker_<branch>.md` or `docs/tracker_<branch>.md` — match the project's
+plans/docs layout): nothing in context survives a dead session, a file does. Delete it
+after the card ships.
 
 ---
 
@@ -129,6 +110,13 @@ on the same ticket. On the **local and http backends** the grab is **truly atomi
 under the store lock). On the **remote Trello backend** `grab` settles ties with a brief
 (~10-30s) claim-comment handshake internally — you never run it by hand. For a *specific
 named* card, skip `grab` and move it by hand (step 3 below).
+
+**A `I am doing this now — claim <id>` comment on a card is `grab`'s own bookkeeping, not a
+person's hold.** The winner's copy is never retracted (deleting it would let a competitor
+mid-handshake declare a second win), so it sits on the card forever. On the Trello backend
+`grab` prints the id it posted as `Claim: <id>` — that is how you tell your own claim from a
+rival's. The real claim is simply the card sitting in the in-progress list; a claim comment
+older than a minute settles nothing at all.
 
 **Expect the card `grab` returns to differ from the one you just saw on top — that's
 normal, not a bug.** Between you eyeballing the board and `grab` running, another agent may
@@ -220,6 +208,11 @@ tests, a headless smoke suite, a build, and/or a visual + console-error-free bro
   that don't exist, and dead-code residue.
 - **Flag what needs manual testing** — leave the user a note of anything you couldn't fully
   verify.
+- **Close the browser tabs you opened** — the moment the browser/visual check passes,
+  close them and let any empty tab group your tooling created go away. Do NOT leave them
+  sitting through peer review, the PR, and the card paperwork — they pile up and drown out
+  the user's own browser. Close them again after the Phase 6 re-verify. Dev servers and
+  other background processes can stay up until Phase 7 if you will need them again.
 
 > **Cost-gated / external actions:** never auto-run anything that spends money or hits a real
 > external service (paid-API integration tests, live model calls, GPU renders, real sends to
@@ -245,15 +238,9 @@ tests, a headless smoke suite, a build, and/or a visual + console-error-free bro
 1. **Default to the incoming (default-branch) version.** If a conflict is in code you didn't
    intentionally change, accept the default branch's side — someone else fixed a bug or added
    a feature; don't silently revert their work.
-2. **Assume incoming changes are important.** Treat every conflict as "the default branch has
-   a critical fix" until you've read the diff and confirmed otherwise. Be very careful about
-   overwriting new code with your version.
-3. **Only keep your side for lines you specifically wrote.** If you and the default branch
-   both changed a function, read both carefully and merge surgically — keep their fix, layer
-   your change on top.
-4. **If the merge is messy, restart from the default branch.** A clean re-apply of your
+2. **If the merge is messy, restart from the default branch.** A clean re-apply of your
    change beats a botched merge.
-5. **Re-read the final result.** After resolving, read every conflicted file in full — don't
+3. **Re-read the final result.** After resolving, read every conflicted file in full — don't
    just trust the conflict markers.
 
 4. **Re-verify after the merge** — re-run the Phase 5 gate so the merge didn't break anything.
@@ -291,8 +278,9 @@ tests, a headless smoke suite, a build, and/or a visual + console-error-free bro
 
 ## Phase 7: Clean up
 
-Stop any dev servers / app instances / background processes you started, and close any
-browser tabs you opened for verification.
+Stop any dev servers / app instances / background processes you started (the ones you kept
+alive past Phase 5). Browser tabs should already be closed back in Phase 5 — if any are
+still open, close them now.
 
 ---
 
