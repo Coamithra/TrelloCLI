@@ -31,16 +31,9 @@ Review the diff for branch `<branch>` against `<base>`:
 
 For larger changes also open the changed files at HEAD — diff hunks hide context.
 
-You have NO prior context on this work. That is the point: flag anything that looks
-off to a fresh reader. Beyond the usual (logic errors, edge cases, dead code,
-security, resource handling), specifically:
-
-- Convention violations — skim neighbouring files in the same module to learn the
-  LOCAL style first, rather than applying general defaults.
-- Naming that is misleading, vague, or stale.
-- Comments that lie, restate the obvious, or rot ("used by X", task references).
-- Tests that don't actually assert the behaviour they claim, or miss a new branch.
-- Backwards-incompatible API changes that aren't called out.
+Flag anything that looks off to a fresh reader. Before flagging convention or style
+issues, skim neighbouring files in the same module to learn the LOCAL style rather
+than applying general defaults.
 
 Numbered list. Per finding: <file>:<line> — one-line summary, 2-4 sentences on the
 problem and a concrete fix, then Severity: blocker | should-fix | nit. No preamble,
