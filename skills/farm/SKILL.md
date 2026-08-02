@@ -21,9 +21,8 @@ implementer**: one background agent per card.
 - **A card ONLY the user can do** (a deploy, a feel check, their screen) isn't farmed —
   surface it at triage instead of silently skipping it. Partly theirs? Farm it; the
   user's part joins the end-of-run checklist.
-- **No one rewrites a card's text to match what the work revealed** — least of all the
-  agent working it. A wrong premise is corrected in a card comment, so the original ask
-  stays visible to judge the reframed work against. Put the rule in spawn prompts.
+- **Agents never rewrite a card's text** — when the work reveals the spec is wrong, the
+  correction goes in a comment.
 
 ## Learnings from live runs (the non-obvious part)
 
