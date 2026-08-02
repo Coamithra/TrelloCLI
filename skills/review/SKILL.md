@@ -68,15 +68,10 @@ PATH, skip silently (mention the latter in Step 3). Never dump cards into a defa
 The bar is "is this real feedback?", not "is it important?" — the cosmetic and
 low-priority items are the whole point of the card.
 
-```bash
-trello --board <id> card add "<list>" "Review follow-ups: <branch>" "<description>"
-trello --board <id> checklist add <card_id> "Reviewer feedback"
-trello --board <id> checklist item add <card_id> "Reviewer feedback" "<file>:<line> — <summary>"
-```
-
-Target the leftmost non-Done list (`Backlog`/`To Do`/`Inbox`); ask if none is obvious. The
-description needs branch, base, HEAD SHA and a one-line "what this branch did" so the
-items make sense cold. Pass real newlines, not `\n`. Name the card in your Step 3 summary.
+One card — "Review follow-ups: <branch>" — with a checklist item per finding
+(`<file>:<line> — <summary>`), in the leftmost non-Done list; ask if none is obvious.
+The description needs branch, base, HEAD SHA and a one-line "what this branch did" so
+the items make sense cold. Name the card in your Step 3 summary.
 
 ## Notes
 
