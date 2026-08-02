@@ -1,13 +1,6 @@
-# Ruling on what a batch produced
+# Ruling on the cards agents file
 
 Companion to [`SKILL.md`](SKILL.md). Read before your first ruling of a run.
-
-## Discovery is a board diff, not trust in reports
-
-A report is a lead, never the inventory — agents file cards their reports undersell or
-omit, so the board diff (cadence in [`SKILL.md`](SKILL.md)) is what finds them. Rule per
-completion, not at batch end: a bounce-back is only cheap while the filing agent is
-still warm and resumable.
 
 ## Every proposal gets an explicit ruling — and "file a card" is not the default
 

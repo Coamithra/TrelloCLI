@@ -20,8 +20,7 @@ research+design and gets its plan reviewed before writing code**.
 - A card ONLY the user can do (a deploy, a feel check, their screen) isn't farmed —
   tag it `[HUMAN REQUIRED]` for future runs and surface it. Partly theirs? Farm it; the
   user's part joins the end-of-run checklist.
-- Snapshot the backlog's card ids — the board diff in [`rulings.md`](rulings.md) needs
-  this baseline.
+- Snapshot the backlog's card ids — the completion-time board diff needs this baseline.
 - Scan the board for cards worth combining into one spawn — same surface area, or a
   clutch of small fixes. Each agent costs a worktree, a plan review, and a PR; a card
   should be worth that overhead.
@@ -74,8 +73,9 @@ can be verified may be wrong.
   most when the fleet runs a cheaper tier than you.
 - Escalate user-owned calls via the ask-a-question tool. Don't rule on the user's behalf.
 - After EVERY agent completion, re-list the backlog and diff against the triage
-  snapshot; rule on anything new per [`rulings.md`](rulings.md) — "file a card" is not
-  the default outcome.
+  snapshot — a report is a lead, never the inventory; agents file cards their reports
+  undersell or omit. Rule on anything new per [`filed-cards.md`](filed-cards.md) while
+  the filer is still warm and resumable — "file a card" is not the default outcome.
 - Agents run `/review` themselves; if it fails, they say so in their report and you
   cover it.
 - A card agent hitting a real tooling gap gets a separate agent to build the
@@ -93,7 +93,7 @@ In order, before the next batch:
 3. **Trim the batch's CLAUDE.md changes** — agents bloat docs with their change's story:
    what they didn't end up doing, how it used to work, function-level detail. Keep the
    durable rule or gotcha, cut the narrative.
-4. **Groom the backlog the batch grew** — per [`rulings.md`](rulings.md).
+4. **Groom the backlog the batch grew** — per [`filed-cards.md`](filed-cards.md).
 5. **Sweep the in-progress list for orphans** — a dead or stalled agent leaves its card
    claimed, and the board can't tell that from healthy work. Match every card to a live
    agent; for the rest, read the branch first, then finish or return the card. Never

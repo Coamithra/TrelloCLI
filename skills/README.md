@@ -19,7 +19,7 @@ Copy each folder into your user-level skills directory:
 ~/.claude/skills/grab/SKILL.md
 ~/.claude/skills/review/SKILL.md
 ~/.claude/skills/farm/SKILL.md
-~/.claude/skills/farm/rulings.md
+~/.claude/skills/farm/filed-cards.md
 ```
 
 Then wire up the environment the skills assume — they deliberately do not carry it
@@ -61,9 +61,9 @@ states itself once.
 
 `farm` strains hardest against this, since an overseer needs more in context than an
 implementer. Its answer is progressive disclosure: `SKILL.md` is the orchestration spine,
-and the taxonomy for ruling on cards that arrive mid-run lives in
-[`farm/rulings.md`](farm/rulings.md), loaded at a batch boundary. Prefer that split to
-letting the spine grow.
+and the taxonomy for ruling on cards agents file mid-run lives in
+[`farm/filed-cards.md`](farm/filed-cards.md), loaded when the first ruling comes up.
+Prefer that split to letting the spine grow.
 
 Model names are pinned as *rules with a current answer* ("the cheapest tier that reviews
 well; today that's Opus"), because a bare name goes stale silently and expensively. When
