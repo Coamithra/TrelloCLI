@@ -63,7 +63,9 @@ states itself once.
 implementer. Its answer is progressive disclosure: `SKILL.md` is the orchestration spine,
 and the taxonomy for ruling on cards agents file mid-run lives in
 [`farm/filed-cards.md`](farm/filed-cards.md), loaded when the first ruling comes up.
-Prefer that split to letting the spine grow.
+Prefer that split to letting the spine grow. `review` isolates its tracker wiring the
+same way: Steps 1–3 assume only git and a base branch, Step 4 is the only Trello-aware
+part — porting the bare cold-reviewer pattern elsewhere means dropping just that step.
 
 Model names are pinned as *rules with a current answer* ("the cheapest tier that reviews
 well; today that's Opus"), because a bare name goes stale silently and expensively. When

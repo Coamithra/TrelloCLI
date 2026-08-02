@@ -15,10 +15,9 @@ Find the base branch (`main`/`master`). If you're ON it, or the diff is empty, s
 stop — don't invent a comparison.
 
 Spawn `subagent_type: "general-purpose"` in the foreground with an **explicitly pinned
-`model`**. Omitted, it inherits the session model, so a session on a pricier tier silently
-pays that rate for a review a cheaper tier does just as well. Name the cheapest tier that
-reviews well; today that's `"opus"`. Never silently upgrade past it, however important the
-diff seems — only the user asking (`/review with haiku`) changes it.
+`model`**: the cheapest tier that reviews well — today that's `"opus"`. Never silently
+upgrade past it, however important the diff seems — only the user asking (`/review with
+haiku`) changes it.
 
 **Hand it the raw diff and nothing else.** Do not summarise your understanding of the
 changes for it. Starting cold is the entire value of this skill.
@@ -88,7 +87,5 @@ items make sense cold. Pass real newlines, not `\n`. Name the card in your Step 
 
 ## Notes
 
-- **Steps 1–3 are domain-agnostic** — they assume only git and a base branch. Step 4 is
-  the only tracker-wired part; drop it for the bare cold-reviewer pattern.
 - Split across two agents by directory only if the diff is huge (>2000 lines).
 - This is self-review during active work, not a replacement for human PR review.
