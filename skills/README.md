@@ -22,9 +22,27 @@ Copy each folder into your user-level skills directory:
 ~/.claude/skills/farm/rulings.md
 ```
 
-Then put a copy of `CONTRIBUTING.example.md` where the skills expect the generic runbook
-(`~/.claude/CONTRIBUTING.md`), adapt its specifics, and give each project a `CLAUDE.md`
-that names its board id, backend, columns, default branch, and verification gate.
+Then wire up the environment the skills assume — they deliberately do not carry it
+themselves:
+
+1. **The generic runbook.** Put an adapted copy of `CONTRIBUTING.example.md` at
+   `~/.claude/CONTRIBUTING.md`.
+2. **Your global `~/.claude/CLAUDE.md`.** The skills (`farm` especially) don't re-explain
+   the contributing flow or where project specifics live — that's standing knowledge
+   every session should have, so it belongs in your global memory, not repeated per
+   skill. Add a block like:
+
+   > **Contributing workflow:** projects with a GitHub repo and a Trello board follow a
+   > shared card → worktree → PR workflow; the generic runbook is
+   > `~/.claude/CONTRIBUTING.md`. Before picking up a task, read the project's local
+   > `CLAUDE.md` for its board id, backend (remote `trello` vs `--backend local`), list
+   > names, default branch, worktree layout + per-worktree bootstrap, and verification
+   > gate. Where they differ, the project file wins. No board or repo → the runbook
+   > doesn't apply.
+
+3. **Each project's `CLAUDE.md`.** Name its board id, backend, columns, default branch,
+   and verification gate.
+
 `/grab` works a single card; `/farm` runs the fleet.
 
 ## A note on style
@@ -35,6 +53,11 @@ itself. **If a rule is one the model would have followed anyway, it doesn't earn
 lines** — every kept sentence should change behaviour. `farm`'s "Learnings from live runs"
 is the scar tissue of many sessions. Resist adding scaffolding these files don't have —
 that's a design decision, not an omission.
+
+The same test applies to *facts about your environment*: anything every session already
+knows from your global `CLAUDE.md` (like the contributing-workflow block above) is not
+repeated in a skill. A skill states the decisions unique to its job; the environment
+states itself once.
 
 `farm` strains hardest against this, since an overseer needs more in context than an
 implementer. Its answer is progressive disclosure: `SKILL.md` is the orchestration spine,

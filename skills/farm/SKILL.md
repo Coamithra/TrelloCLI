@@ -6,22 +6,23 @@ argument-hint: (nothing = triage whole backlog) | batch size | "only the <topic>
 
 # Farm the backlog — parallel card agents with an overseer
 
-You are the **overseer, not an implementer**: one background agent per card, your effort
-goes to triage, plan review, mid-flight rulings, and the merged result. The core contract
-is that **every agent stops after research+design and gets its plan reviewed before
-writing code** — that checkpoint is where drift is cheapest to catch. Approval is the
-default outcome; what you add is checking the plan against what the card *actually* asks,
-and being the only one who sees every plan (a glance across them catches collisions no
-per-card review can).
+The design: the most capable model in the run — you — orchestrates parallel agents
+working the backlog. They implement; you check their work, supply the big-picture context
+they lack, and take the complicated problems they hit. You are the **overseer, not an
+implementer**: one background agent per card.
 
-Resolve project specifics as `/grab` step 1 does. Batch to your own review bandwidth,
-never "spawn the whole backlog". Cards needing the user's own hands (their screen,
-deploys, outward-facing actions) are not farmed out — list them loudly.
-
-Two authority points the runbook leaves open: **your** approval satisfies its "align with
-the user before writing code" for in-scope work — say so in the spawn prompt, since only
-scope, product feel and outward-facing calls still go up. And when a stop reveals a card's
-premise was wrong, the correction goes on the card as a comment, not into its text.
+- **Every agent stops after research+design and gets its plan reviewed before writing
+  code.** Approval is the default outcome; what you add is checking the plan
+  against what the card *actually* asks.
+- **Your approval satisfies the runbook's "align with the user before writing code"**
+  for in-scope work — say so in the spawn prompt. Only scope, product feel, and
+  outward-facing calls still go up to the user.
+- **Batch to your own review bandwidth**, never "spawn the whole backlog".
+- **A card ONLY the user can do** (a deploy, a feel check, their screen) isn't farmed —
+  surface it at triage instead of silently skipping it. Partly theirs? Farm it; the
+  user's part joins the end-of-run checklist.
+- **A wrong card premise gets corrected as a card comment**, not by rewriting the
+  card's text.
 
 ## Learnings from live runs (the non-obvious part)
 
@@ -38,7 +39,9 @@ premise was wrong, the correction goes on the card as a comment, not into its te
 - **A git failure in the ROOT checkout is probably a sibling shipping this second** —
   tell agents to wait and retry, never force. Likewise: if a card moved since triage,
   another session took it — stop and report, don't move it back.
-- **`/review` runs fine from inside a subagent** — have agents run it themselves.
+- **`/review` runs fine from inside a subagent** — have agents run it themselves. Give
+  them the fallback anyway (say so in the final report, overseer covers it) so a failure
+  doesn't stall the card.
 - **Agents will do silently-destructive git things** (one dropped a stash and tripped
   the harness's security flag). Put it in the spawn prompt from batch one: narrate any
   discard BEFORE doing it, never touch dirty state you didn't create.
@@ -64,10 +67,9 @@ premise was wrong, the correction goes on the card as a comment, not into its te
 
 ## Spawn prompt
 
-**Pin the fleet's model explicitly on every spawn.** Omitted, it inherits the overseer's
-session model, so the whole fleet silently bills at whatever tier you happen to be on —
-expensive when that's the top one. Name the cheapest tier that implements well; today
-that's `model: "opus"`. The overseer stays on the session model. (A user-named model wins.)
+**Pin the fleet's model explicitly on every spawn** — omitted, agents inherit *your*
+tier. Name the cheapest tier that implements well; today that's `model: "opus"`. (A
+user-named model wins.)
 
 Agents inherit none of your context, so each prompt carries: repo path, card id, the
 runbook reading list, the claim command (a pre-assigned card is `card move`d, never
