@@ -18,10 +18,13 @@ research+design and gets its plan reviewed before writing code**.
   drift between filing and pickup; corrections go in the spawn prompt, and agents
   re-verify the rest.
 - A card ONLY the user can do (a deploy, a feel check, their screen) isn't farmed —
-  surface it instead of silently skipping it. Partly theirs? Farm it; the user's part
-  joins the end-of-run checklist.
+  tag it `[HUMAN REQUIRED]` for future runs and surface it. Partly theirs? Farm it; the
+  user's part joins the end-of-run checklist.
 - Snapshot the backlog's card ids — the board diff in [`rulings.md`](rulings.md) needs
   this baseline.
+- Scan the board for cards worth combining into one spawn — same surface area, or a
+  clutch of small fixes. Each agent costs a worktree, a plan review, and a PR; a card
+  should be worth that overhead.
 - Size the batch to your own review bandwidth, never "the whole backlog". Pre-assign
   each card a worktree slot and branch name — simultaneous agents racing "pick a free
   slot" is a known failure — and serialize broad sweeps over the same tree into
@@ -29,16 +32,12 @@ research+design and gets its plan reviewed before writing code**.
 
 ## 2 — Spawn
 
-Pin the fleet's model explicitly on every spawn — omitted, agents inherit *your* tier.
-Name the cheapest tier that implements well; today that's `model: "opus"`. (A user-named
-model wins.)
+Pin the fleet's model explicitly on every spawn: the cheapest tier that implements well
+— today that's `model: "opus"`. (A user-named model wins.)
 
 Agents inherit none of your context, so each prompt carries: repo path, card id, the
-runbook reading list, the claim command (a pre-assigned card is `card move`d, never
-`grab`bed), the slot + branch, your stale-fact corrections and cross-card warnings, and
-the project's verification doctrine restated as direct instructions — rules agents merely
-*read* get under-weighted, so bans are spelled out. These four have all bitten; include
-them every time:
+runbook reading list, the slot + branch, your stale-fact corrections and cross-card
+warnings, and the project's verification doctrine. Include these four rules every time:
 
 - Never rewrite a card's text — when the work reveals the spec is wrong, the correction
   goes in a comment.
@@ -59,18 +58,21 @@ And the checkpoint contract:
 
 ## 3 — Review plans
 
-Approval is the default outcome; what you add is checking the plan against what the card
-*actually* asks. Your approval satisfies the runbook's "align with the user before
-writing code" for in-scope work — say so in the approval; only scope, product feel, and
-outward-facing calls go up to the user. Sweeps pilot small before running wide, and STOP
-on a surprise verdict — a card's claim about how its own work can be verified may itself
-be wrong.
+Check the plan against what the card *actually* asks. Your approval satisfies the
+runbook's "align with the user before writing code" for in-scope work — say so in the
+approval; only scope, product feel, and outward-facing calls go up to the user. Broad
+sweeps prove the change on a small sample before running wide; a surprising verification
+result on the pilot means STOP and escalate — the card's own claim about how its work
+can be verified may be wrong.
 
 ## 4 — While agents run
 
 - Rule on every question a stopped agent raises; the agent stays paused while you do.
-- Escalate user-owned calls via the ask-a-question tool, never prose — a question buried
-  in a status report gets missed. Don't rule on the user's behalf.
+- Tell agents in the spawn prompt that beyond the checkpoint, you're available as an
+  **advisor** on hard calls mid-implementation — Anthropic's advisor strategy: the
+  executor escalates decisions it can't reasonably solve to a stronger model. Matters
+  most when the fleet runs a cheaper tier than you; prompt-only, no extra tooling.
+- Escalate user-owned calls via the ask-a-question tool. Don't rule on the user's behalf.
 - After EVERY agent completion, re-list the backlog and diff against the triage
   snapshot; rule on anything new per [`rulings.md`](rulings.md) — "file a card" is not
   the default outcome.
