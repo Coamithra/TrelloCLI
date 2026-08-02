@@ -19,6 +19,7 @@ Copy each folder into your user-level skills directory:
 ~/.claude/skills/grab/SKILL.md
 ~/.claude/skills/review/SKILL.md
 ~/.claude/skills/farm/SKILL.md
+~/.claude/skills/farm/rulings.md
 ```
 
 Then put a copy of `CONTRIBUTING.example.md` where the skills expect the generic runbook
@@ -29,8 +30,21 @@ that names its board id, backend, columns, default branch, and verification gate
 ## A note on style
 
 These are living documents grown out of real runs, deliberately kept short: they encode
-the surprises (things that actually bit), not the procedures a capable model can derive
-itself. `farm`'s "Learnings from live runs" section is the scar tissue of many real
-farming sessions. Resist the urge to add scaffolding these files don't have — that's a
-design decision, not an omission. The origin story is on
+the surprises (things that actually bit), not the procedures a capable model derives
+itself. **If a rule is one the model would have followed anyway, it doesn't earn its
+lines** — every kept sentence should change behaviour. `farm`'s "Learnings from live runs"
+is the scar tissue of many sessions. Resist adding scaffolding these files don't have —
+that's a design decision, not an omission.
+
+`farm` strains hardest against this, since an overseer needs more in context than an
+implementer. Its answer is progressive disclosure: `SKILL.md` is the orchestration spine,
+and the taxonomy for ruling on cards that arrive mid-run lives in
+[`farm/rulings.md`](farm/rulings.md), loaded at a batch boundary. Prefer that split to
+letting the spine grow.
+
+Model names are pinned as *rules with a current answer* ("the cheapest tier that reviews
+well; today that's Opus"), because a bare name goes stale silently and expensively. When
+the lineup shifts, update the name — don't drop the pin.
+
+The origin story is on
 [the author's devblog](https://haraldmaassen.com/devblog).
