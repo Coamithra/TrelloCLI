@@ -45,9 +45,10 @@ warnings, and the project's verification doctrine. Include these four rules ever
   and retry, never force.
 - If the card isn't where triage saw it, another session took it — stop and report.
 
-**Phrase a shared-resource constraint as orchestration, not design.** Told "no wire
-changes", agents treat the fence as a budget and build workarounds inside it rather than
-ask — even with an escape hatch. Say instead: "design as if you own the <shared thing>;
+**Your role is to enable agents, not constrain them — shared-resource conflicts are
+yours to sequence, not theirs to design around.** Told "no wire changes", agents treat
+the fence as a budget and build workarounds inside it rather than ask — even with an
+escape hatch. Say instead: "design as if you own the <shared thing>;
 if your best design touches it, say so at the checkpoint and I'll sequence the edits."
 And verify the domain facts behind any constraint with the user before designs are
 priced on them — one false "backward compatibility matters" taxes a whole batch.
