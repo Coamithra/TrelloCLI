@@ -85,64 +85,26 @@ else about orchestration you can work out yourself.
   and makes the options explicit. An agent blocked on such a call stays paused while
   you ask — don't rule on the user's behalf, and don't let the agent pick "whatever
   unblocks me".
-- **After every batch, groom the backlog the batch just grew.** Card agents reliably
-  file follow-up cards (a good instinct — don't suppress it), but they file them from
-  a single card's viewpoint. You have the cross-batch view and the stronger model, so
-  give the new arrivals a once-over: merge cards that one session could do and verify
-  in one go (same code area, or a handful of small independent fixes); close or trim
-  cards already covered by in-flight or existing backlogged work; and sanity-check
-  each card's premise while the context is still fresh — a correction now is a one-line
-  edit, the same correction next month is a wasted research phase.
-- **Every agent-proposed follow-up gets an explicit ACCEPTANCE ruling from the
-  overseer — and "file a card" is not the default outcome.** The failure mode (seen
-  live): an agent fixes 14 silently-rejecting debug flags, then files "the REST of
-  the flag families still reject silently" — a finish-my-job card. It had the
-  pattern, the helper, the probe rig and the full context loaded; the remaining
-  families were mechanical repetition, and carding them converts an hour of warm-
-  context work into a cold research phase for some future agent. Rule each proposal
-  into one of three bins: **(a) bounce it back** — "you just do it, same branch or a
-  fresh one" — when it's a mechanical continuation of the work just done (same
-  pattern, same files, same verification rig); an agent's "larger blast radius"
-  hesitation is usually deference, not a real boundary. **(b) not card-worthy** — too
-  insignificant to justify a future session's claim-research-worktree overhead; do it
-  yourself in the root checkout, fold it into a sibling's scope, or drop it and say
-  so. **(c) accept** — genuinely separate work: a different kind of task (a defect
-  discovered vs. the sweep that found it), a different code area, gated on something,
-  or big enough to deserve its own plan review. Legitimacy test: would you have
-  chartered this card on its own merits during triage, or does it only exist because
-  an agent stopped at its card's literal edge?
-  **(d) DECLINE — "if it ain't broke".** Ask this BEFORE the other three bins, because
-  all three quietly assume the work is worth doing by someone: *what actually breaks if
-  we never do this?* Agents systematically over-file here — they surface a symptom
-  faithfully, then propose fixing it without ever asking whether it has a victim. The
-  tells: it is transient (a burst at startup or on a reset that settles and never
-  returns), it is cosmetic (a counter, a log line, an internal name no player and no
-  future reader is misled by), it is theoretical (an edge nothing reachable produces),
-  or the proposal's own evidence says "no adverse effect" in passing and then carries on
-  regardless. Decline those out loud and record why ON the card — a written decline is
-  what stops the next agent that trips over the same symptom re-filing it.
-  **The one thing worth rescuing from a decline, and it is easy to miss:** "nothing is
-  broken" is not "nothing is lost". Check whether the benign symptom shares a CHANNEL
-  with a real fault — one counter, one log line, one error path serving both — because
-  declining then trains everyone to ignore the alarm that would have caught the real
-  thing. When that is the case the right card is usually far SMALLER than the one
-  proposed: split the channel so the benign case names itself, and drop the
-  investigation half entirely. (Live example: a duplicate-spawn counter fired on
-  ordinary respawns AND on a protocol mismatch. The filed card said "reproduce the burst
-  and explain it"; the useful card was "split the counter by cause" — an hour, headless,
-  and it made the repro unnecessary because the counter now states which case it is.)
-  **Taste calls are the user's, not yours.** If the decline turns on how something should
-  FEEL or read rather than on whether it works — wording, how generous a game rule is,
-  whether a stall is annoying — put the options to them in a sentence and let them rule.
-  Don't quietly bin it, and don't quietly build it.
-  **Discovery is a board diff, not trust in reports.** Snapshot the backlog's card
-  ids at triage; after EVERY agent completion — not at batch end — re-list the
-  backlog and diff against the known set, and rule on anything new immediately.
-  Agents file cards their reports undersell or omit (and the propose-don't-file
-  contract only helps for agents spawned after it existed), so the report is a lead,
-  never the inventory. Ruling per-completion matters because the bounce-back bin is
-  only cheap while the filing agent is still warm and resumable; a card discovered
-  at batch end has already lost that option's main value.
+- **Every card and proposal that arrives DURING the run gets an explicit ruling from
+  you — and "file a card" is not the default outcome.** Card agents reliably propose
+  follow-ups (a good instinct — don't suppress it) and sometimes file them anyway,
+  always from one card's viewpoint; you have the cross-batch view and the stronger
+  model. **Read [`rulings.md`](rulings.md) (next to this file) before the first ruling
+  of a batch** — it holds the four bins (decline / bounce back / not card-worthy /
+  accept), the board-diff discovery rule, and the backlog groom, kept out of here so
+  this file stays the orchestration spine.
+- **Claim-first means a dead agent leaves an ORPHANED card — reconcile the in-progress
+  list at every batch boundary.** Claiming happens before any work (that's what stops
+  collisions), so an agent that dies, stalls, or ends its turn without shipping leaves
+  a card parked in the in-progress column with nobody working it — and nothing in the
+  board's own state distinguishes that from healthy in-flight work. At each boundary,
+  list that column and match every card to a live agent you spawned. For each with no
+  live agent, look at its branch/PR before touching the card: shipped but paperwork
+  missed → finish the paperwork and move it to Done; partial work → comment what
+  exists and where (branch, worktree slot, how far the runbook got), then move it back
+  to the backlog so it can be re-claimed cleanly; nothing at all → move it back and
+  free the slot. Never re-spawn onto an orphan without doing that first — an agent
+  inheriting a half-finished worktree it didn't build is worse than a cold restart.
 - **After every batch, review and TRIM the batch's CLAUDE.md changes.** Card agents
   reliably bloat the docs with their own change's story: what they did NOT end up doing,
   how it USED to work, and noodly function-level detail — all meaningless to a fresh
@@ -158,11 +120,13 @@ else about orchestration you can work out yourself.
 
 ## Spawn prompt — what each agent needs
 
-Card agents run on **Opus** — pass `model: "opus"` EXPLICITLY on every spawn, never
-omit it: an omitted model INHERITS the overseer session's model, and if that session is
-Fable, a batch of card agents burns through Fable token limits doing implementation
-work Opus handles fine. The overseer stays on the session model; the fleet is Opus.
-(A user-named model overrides, as with any argument.)
+**Pin the fleet's model EXPLICITLY on every spawn, never omit it.** An omitted model
+INHERITS the overseer session's model, so a whole batch of card agents silently bills at
+whatever tier the overseer happens to run on — and when that is a top tier, a fleet burns
+through its token limits doing implementation work a cheaper tier handles fine. Pick the
+cheapest tier that implements well and name it; today that is `model: "opus"`. The
+overseer stays on the session model; the fleet is pinned. (A user-named model overrides,
+as with any argument.)
 Self-contained (agents inherit none of your context): repo path + card id + the
 runbook reading list; the claim command (a pre-assigned card is `card move`d, never
 `grab`bed); the assigned slot + branch; the project's verification doctrine restated
@@ -188,7 +152,7 @@ it: by the end of each batch, everything a post-summarization overseer needs —
 state, rulings given, deferred cards, the accumulating user checklist — must live in
 durable surfaces (card comments, PR descriptions, filed follow-ups), never only in
 conversation memory. Then, at every batch boundary (batch review + smoke + doc trim +
-backlog groom done, next batch NOT yet launched), PAUSE via the ask-a-question tool — "continue or
+backlog groom + orphan sweep done, next batch NOT yet launched), PAUSE via the ask-a-question tool — "continue or
 compact?" — which also pops the session up in the desktop app, so it doubles as the
 batch-done notification. If the user picks compact, reply with a ready-to-type
 invocation that names what to keep, e.g.:

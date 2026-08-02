@@ -1,7 +1,7 @@
 ---
 name: review
 description: Spawn a fresh agent to review the current branch diff against main with no prior context, catching logic errors, missed edge cases, convention violations, and naming issues that the working session has gone blind to. Then fix every finding before proceeding.
-argument-hint: (no arguments)
+argument-hint: (nothing = pinned reviewer model) | "with <model>" to override it
 ---
 
 # Branch Diff Review
@@ -19,7 +19,7 @@ If the diff is empty, tell the user and stop.
 
 ## Step 2: Spawn the Reviewer Agent
 
-Use the `Agent` tool with `subagent_type: "general-purpose"` and `model: "opus"`. Always pass `model: "opus"` explicitly — omitting it makes the reviewer inherit the session model, and if the session runs on a pricier model (e.g. Fable) that's wasted money. Never silently upgrade the reviewer past Opus, no matter how important the diff seems. Only use a different model if the user explicitly asked for one when invoking this skill (e.g. "/review with haiku"). The agent must start cold — do **not** summarise your understanding of the changes for it. Hand it the raw diff and let it form its own opinion. That's the entire value of this skill.
+Use the `Agent` tool with `subagent_type: "general-purpose"` and an explicitly pinned `model`. Always pass one — omitting it makes the reviewer inherit the session model, so a session on a pricier tier silently pays that rate for a review a cheaper tier does just as well. Pin the cheapest tier that reviews well; today that is `model: "opus"`. Never silently upgrade past it, no matter how important the diff seems. Only use a different model if the user explicitly asked for one when invoking this skill (e.g. "/review with haiku"). The agent must start cold — do **not** summarise your understanding of the changes for it. Hand it the raw diff and let it form its own opinion. That's the entire value of this skill.
 
 Prompt template:
 
@@ -123,5 +123,10 @@ Mention the card (name + URL or id) in the Step 5 summary so the user can see wh
 ## Notes
 
 - The reviewer agent runs cold by design. Do not pre-digest the changes for it.
+- **Steps 1–5 are domain-agnostic** — they assume only git, a base branch, and the
+  project's own check commands. Step 6 is the only part wired to a specific tracker
+  (Trello, via this repo's CLI). Want just the cold-reviewer pattern? Drop Step 6, or
+  swap in your own tracker's create-card command; nothing earlier in the skill refers
+  to it beyond the Follow-up bucket it consumes.
 - One agent is usually enough. Spawn a second only if the diff is huge (say >2000 lines) and you want to split it by directory — in that case, give each agent a disjoint file list.
 - This skill is for self-review during active work. It is not a replacement for heavier multi-agent review or human PR review.
