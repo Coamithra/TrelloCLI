@@ -1,21 +1,19 @@
 # Ruling on what a batch produced
 
-Companion to [`SKILL.md`](SKILL.md). Read at a batch boundary, before the first ruling —
-this is the part of overseeing least derivable from first principles.
+Companion to [`SKILL.md`](SKILL.md). Read before your first ruling of a run.
 
 ## Discovery is a board diff, not trust in reports
 
-Snapshot the backlog's card ids at triage; after EVERY agent completion — not at batch end
-— re-list and diff against the known set. Agents file cards their reports undersell or
-omit, so a report is a lead, never the inventory. Per-completion matters because the
-bounce-back ruling is only cheap while the filing agent is still warm and resumable.
+A report is a lead, never the inventory — agents file cards their reports undersell or
+omit, so the board diff (cadence in [`SKILL.md`](SKILL.md)) is what finds them. Rule per
+completion, not at batch end: a bounce-back is only cheap while the filing agent is
+still warm and resumable.
 
 ## Every proposal gets an explicit ruling — and "file a card" is not the default
 
-The failure mode, seen live: an agent fixes 14 silently-rejecting debug flags, then files
-"the REST of the flag families still reject silently" — a finish-my-job card. It had the
-pattern, the probe rig and the full context loaded; carding the rest converts an hour of
-warm-context work into a cold research phase for some future agent.
+The failure mode is the finish-my-job card: an agent cards the mechanical remainder of
+its own work, converting warm-context work (pattern, rig and context all loaded) into a
+cold research phase for some future agent.
 
 Four bins, asked in this order.
 
@@ -52,10 +50,13 @@ overhead. Do it in the root checkout, fold it into a sibling's scope, or drop it
 the sweep that found it), a different code area, gated on something, or big enough to
 deserve its own plan review. Test: would you have chartered this card on its own merits
 during triage, or does it exist only because an agent stopped at its card's literal edge?
+An accepted card only the user can do is tagged `[HUMAN REQUIRED]` and joins the
+end-of-run checklist — same rule as triage.
 
 ## Groom the backlog the batch grew
 
 Agents file follow-ups from one card's viewpoint; you have the cross-batch view. Merge
-cards one session could do and verify in one go, close or trim ones already covered by
+cards one session could do and verify in one go (triage's combine rule: each spawn must
+be worth its worktree, plan review and PR), close or trim ones already covered by
 in-flight work, and sanity-check each premise while the context is fresh — a correction
 now is a one-line edit, the same correction next month is a wasted research phase.
