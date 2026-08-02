@@ -50,8 +50,8 @@ themselves:
 These are living documents grown out of real runs, deliberately kept short: they encode
 the surprises (things that actually bit), not the procedures a capable model derives
 itself. **If a rule is one the model would have followed anyway, it doesn't earn its
-lines** — every kept sentence should change behaviour. `farm`'s "Learnings from live runs"
-is the scar tissue of many sessions. Resist adding scaffolding these files don't have —
+lines** — every kept sentence should change behaviour. The scar tissue of many live farming runs
+is folded directly into `farm`'s numbered steps. Resist adding scaffolding these files don't have —
 that's a design decision, not an omission.
 
 The same test applies to *facts about your environment*: anything every session already

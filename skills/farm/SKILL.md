@@ -9,67 +9,45 @@ argument-hint: (nothing = triage whole backlog) | batch size | "only the <topic>
 The design: the most capable model in the run — you — orchestrates parallel agents
 working the backlog. They implement; you check their work, supply the big-picture context
 they lack, and take the complicated problems they hit. You are the **overseer, not an
-implementer**: one background agent per card.
+implementer**: one background agent per card, and **every agent stops after
+research+design and gets its plan reviewed before writing code**.
 
-- **Every agent stops after research+design and gets its plan reviewed before writing
-  code.** Approval is the default outcome; what you add is checking the plan
-  against what the card *actually* asks.
-- **Your approval satisfies the runbook's "align with the user before writing code"**
-  for in-scope work — say so in the spawn prompt. Only scope, product feel, and
-  outward-facing calls still go up to the user.
-- **Batch to your own review bandwidth**, never "spawn the whole backlog".
-- **A card ONLY the user can do** (a deploy, a feel check, their screen) isn't farmed —
-  surface it at triage instead of silently skipping it. Partly theirs? Farm it; the
-  user's part joins the end-of-run checklist.
-- **Agents never rewrite a card's text** — when the work reveals the spec is wrong, the
-  correction goes in a comment.
+## 1 — Triage
 
-## Learnings from live runs (the non-obvious part)
+- Verify each candidate card's facts — against OPEN PRs too, not just the board. Cards
+  drift between filing and pickup; corrections go in the spawn prompt, and agents
+  re-verify the rest.
+- A card ONLY the user can do (a deploy, a feel check, their screen) isn't farmed —
+  surface it instead of silently skipping it. Partly theirs? Farm it; the user's part
+  joins the end-of-run checklist.
+- Snapshot the backlog's card ids — the board diff in [`rulings.md`](rulings.md) needs
+  this baseline.
+- Size the batch to your own review bandwidth, never "the whole backlog". Pre-assign
+  each card a worktree slot and branch name — simultaneous agents racing "pick a free
+  slot" is a known failure — and serialize broad sweeps over the same tree into
+  separate batches.
 
-- **Verify a card's facts at triage — including against OPEN PRs, not just the board.**
-  Cards drift between filing and pickup; put corrections in the spawn prompt and have
-  agents re-verify the rest.
-- **Have agents pilot a sweep small before running it wide, and STOP on a surprise
-  verdict** — a card's claim about how its own work can be verified may itself be wrong.
-- **Pre-assign worktree slot and branch name in every spawn prompt.** Simultaneous
-  agents racing "pick the lowest free slot" is a known failure. Serialize broad sweeps
-  over the same tree into separate batches.
-- **A git failure in the ROOT checkout is probably a sibling shipping this second** —
-  tell agents to wait and retry, never force. Likewise: if a card moved since triage,
-  another session took it — stop and report, don't move it back.
-- **`/review` runs fine from inside a subagent** — have agents run it themselves; if it
-  fails, they say so in their report and you cover it.
-- **Spawn prompts must ban silently-destructive git**: narrate any discard BEFORE doing
-  it, never touch dirty state you didn't create.
-- **One batch-level smoke beats per-card browser passes.** Default to headless; when a
-  card agent hits a real tooling gap, spawn an agent to build the capability rather than
-  letting it bodge around the gap.
-- **Escalate to the user via the ask-a-question tool, never prose** — a question buried
-  in a status report gets missed. The blocked agent stays paused meanwhile; don't rule
-  on the user's behalf.
-- **Rule on every card and proposal that arrives mid-run — "file a card" is not the
-  default outcome.** Read [`rulings.md`](rulings.md) before the first ruling of a batch.
-- **Sweep the in-progress list for orphans at each batch boundary** — a dead or stalled
-  agent leaves its card claimed, and the board can't tell that from healthy work. Match
-  every card to a live agent; for the rest, read the branch first, then finish or return
-  the card. Never re-spawn onto an orphan's half-built worktree blind.
-- **Trim the batch's CLAUDE.md changes.** Agents bloat docs with their change's story:
-  what they didn't end up doing, how it used to work, function-level detail. Keep the
-  durable rule or gotcha, cut the narrative.
-- **Batch user-verification into ONE checklist** at the end of the run, organized so a
-  single pass covers it — not a trickle of per-card test requests.
+## 2 — Spawn
 
-## Spawn prompt
-
-**Pin the fleet's model explicitly on every spawn** — omitted, agents inherit *your*
-tier. Name the cheapest tier that implements well; today that's `model: "opus"`. (A
-user-named model wins.)
+Pin the fleet's model explicitly on every spawn — omitted, agents inherit *your* tier.
+Name the cheapest tier that implements well; today that's `model: "opus"`. (A user-named
+model wins.)
 
 Agents inherit none of your context, so each prompt carries: repo path, card id, the
 runbook reading list, the claim command (a pre-assigned card is `card move`d, never
-`grab`bed), the assigned slot + branch, the project's verification doctrine restated as
-direct instructions — **including anything banned outright**, since rules agents merely
-*read* get under-weighted — your stale-fact corrections, cross-card warnings, and:
+`grab`bed), the slot + branch, your stale-fact corrections and cross-card warnings, and
+the project's verification doctrine restated as direct instructions — rules agents merely
+*read* get under-weighted, so bans are spelled out. These four have all bitten; include
+them every time:
+
+- Never rewrite a card's text — when the work reveals the spec is wrong, the correction
+  goes in a comment.
+- Narrate any git discard BEFORE doing it; never touch dirty state you didn't create.
+- A git failure in the ROOT checkout is probably a sibling shipping this second — wait
+  and retry, never force.
+- If the card isn't where triage saw it, another session took it — stop and report.
+
+And the checkpoint contract:
 
 > CHECKPOINT — MANDATORY: research + design only, then END YOUR TURN with your plan
 > (context, file-by-file changes, verification, out-of-scope). No implementation and no
@@ -79,20 +57,55 @@ direct instructions — **including anything banned outright**, since rules agen
 > paperwork, report with commit hashes. Follow-up work you discover is PROPOSED, not
 > filed — the overseer rules, and often the ruling is "extend your scope and do it now".
 
-## Batch boundaries
+## 3 — Review plans
 
-A long run WILL get its context summarized, and **only the USER can /compact — you have
-no tool for it**. So by each batch's end, everything a post-summarization overseer needs
-(batch state, rulings given, deferred cards, the user checklist) must live in card
-comments, PRs and filed cards, never only in conversation.
+Approval is the default outcome; what you add is checking the plan against what the card
+*actually* asks. Your approval satisfies the runbook's "align with the user before
+writing code" for in-scope work — say so in the approval; only scope, product feel, and
+outward-facing calls go up to the user. Sweeps pilot small before running wide, and STOP
+on a surprise verdict — a card's claim about how its own work can be verified may itself
+be wrong.
 
-Then, with batch review + smoke + doc trim + backlog groom + orphan sweep done and the
-next batch NOT yet launched, PAUSE via the ask-a-question tool — "continue or compact?" —
-which doubles as the batch-done notification. If they pick compact, hand them a
-ready-to-type `/compact` naming what to keep (queue, rulings, user checklist, anything not
-yet durable) and what to drop (shipped cards' play-by-play, plan texts, tool output). Wait
-for their answer before spawning — a batch launched pre-compact re-bloats the window.
+## 4 — While agents run
 
-Review the merged diff yourself before rolling on; you have cross-card context the
-per-card reviews lacked. Spot-check anything other agents consume (the runbook especially)
-as soon as it lands, not at batch end.
+- Rule on every question a stopped agent raises; the agent stays paused while you do.
+- Escalate user-owned calls via the ask-a-question tool, never prose — a question buried
+  in a status report gets missed. Don't rule on the user's behalf.
+- After EVERY agent completion, re-list the backlog and diff against the triage
+  snapshot; rule on anything new per [`rulings.md`](rulings.md) — "file a card" is not
+  the default outcome.
+- Agents run `/review` themselves; if it fails, they say so in their report and you
+  cover it.
+- A card agent hitting a real tooling gap gets a separate agent to build the
+  capability — don't let it bodge around the gap.
+
+## 5 — Batch boundary
+
+In order, before the next batch:
+
+1. **Review the merged diff yourself** — you have cross-card context the per-card
+   reviews lacked. Spot-check anything other agents consume (the runbook especially) as
+   soon as it lands.
+2. **Run the batch smoke** — one batch-level headless smoke beats per-card browser
+   passes.
+3. **Trim the batch's CLAUDE.md changes** — agents bloat docs with their change's story:
+   what they didn't end up doing, how it used to work, function-level detail. Keep the
+   durable rule or gotcha, cut the narrative.
+4. **Groom the backlog the batch grew** — per [`rulings.md`](rulings.md).
+5. **Sweep the in-progress list for orphans** — a dead or stalled agent leaves its card
+   claimed, and the board can't tell that from healthy work. Match every card to a live
+   agent; for the rest, read the branch first, then finish or return the card. Never
+   re-spawn onto an orphan's half-built worktree blind.
+6. **Grow the user checklist** — anything needing the user's hands accumulates into ONE
+   checklist, delivered at end of run and organized so a single pass covers it — never a
+   trickle of per-card test requests.
+7. **PAUSE via the ask-a-question tool: "continue or compact?"** — it doubles as the
+   batch-done notification. Only the USER can /compact; you have no tool for it. If they
+   pick compact, hand them a ready-to-type `/compact` naming what to keep (queue,
+   rulings, user checklist, anything not yet durable) and what to drop (shipped cards'
+   play-by-play, plan texts, tool output). Wait for the answer — a batch launched
+   pre-compact re-bloats the window.
+
+A long run WILL get its context summarized, so by each batch's end everything a
+post-summarization overseer needs — batch state, rulings given, deferred cards, the user
+checklist — lives in card comments, PRs and filed cards, never only in conversation.
