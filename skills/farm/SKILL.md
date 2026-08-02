@@ -72,8 +72,10 @@ can be verified may be wrong.
 Run the overthink check on every plan: **is this the design the agent would build with no
 batch constraints?** Have it name any constraint that shaped the design; the tell of a
 bent one is an estimator, inference, or tunable threshold standing where the
-authoritative side already knows the value. When a constraint of yours shaped the design,
-the fix is to lift or sequence the constraint — not to admire the workaround.
+authoritative side already knows the value. Test named constraints against what you
+verified with the user at triage; a new one you're unsure of goes to the user, and the
+answer joins your running list. When a constraint of yours shaped the design, the fix is
+to lift or sequence it — not to admire the workaround.
 
 ## 4 — While agents run
 
