@@ -26,39 +26,33 @@ implementer**: one background agent per card.
 
 ## Learnings from live runs (the non-obvious part)
 
-- **Verify a card's facts before spawning, and check OPEN PRs, not just the board.**
-  Cards drift between filing and pickup — one card's entire premise turned out to be
-  sitting in someone's unmerged PR. Put corrections in the spawn prompt and have agents
-  re-verify the rest rather than plan on top of it.
-- **A card's claim about its own verification oracle can be wrong.** Have agents pilot a
-  sweep small before running it wide, and STOP on a surprise verdict instead of
-  iterating past it.
+- **Verify a card's facts at triage — including against OPEN PRs, not just the board.**
+  Cards drift between filing and pickup; put corrections in the spawn prompt and have
+  agents re-verify the rest.
+- **Have agents pilot a sweep small before running it wide, and STOP on a surprise
+  verdict** — a card's claim about how its own work can be verified may itself be wrong.
 - **Pre-assign worktree slot and branch name in every spawn prompt.** Simultaneous
   agents racing "pick the lowest free slot" is a known failure. Serialize broad sweeps
   over the same tree into separate batches.
 - **A git failure in the ROOT checkout is probably a sibling shipping this second** —
   tell agents to wait and retry, never force. Likewise: if a card moved since triage,
   another session took it — stop and report, don't move it back.
-- **`/review` runs fine from inside a subagent** — have agents run it themselves. Give
-  them the fallback anyway (say so in the final report, overseer covers it) so a failure
-  doesn't stall the card.
-- **Agents will do silently-destructive git things** (one dropped a stash and tripped
-  the harness's security flag). Put it in the spawn prompt from batch one: narrate any
-  discard BEFORE doing it, never touch dirty state you didn't create.
+- **`/review` runs fine from inside a subagent** — have agents run it themselves; if it
+  fails, they say so in their report and you cover it.
+- **Spawn prompts must ban silently-destructive git**: narrate any discard BEFORE doing
+  it, never touch dirty state you didn't create.
 - **One batch-level smoke beats per-card browser passes.** Default to headless; when a
   card agent hits a real tooling gap, spawn an agent to build the capability rather than
   letting it bodge around the gap.
-- **Escalate via the ask-a-question tool, not prose** — a question buried in a status
-  report gets missed (it happened), and the tool pops the session up on the user's
-  desktop. The blocked agent stays paused while you ask; don't rule on their behalf.
+- **Escalate to the user via the ask-a-question tool, never prose** — a question buried
+  in a status report gets missed. The blocked agent stays paused meanwhile; don't rule
+  on the user's behalf.
 - **Rule on every card and proposal that arrives mid-run — "file a card" is not the
   default outcome.** Read [`rulings.md`](rulings.md) before the first ruling of a batch.
-- **Claim-first orphans cards — sweep the in-progress list at each batch boundary.** An
-  agent that dies or stalls leaves a card claimed with nobody on it, and the board can't
-  tell that from healthy work. Match every in-progress card to a live agent; for the
-  rest, read the branch before touching the card, then finish or return it. Never
-  re-spawn onto an orphan without that — inheriting a half-built worktree is worse than
-  a cold restart.
+- **Sweep the in-progress list for orphans at each batch boundary** — a dead or stalled
+  agent leaves its card claimed, and the board can't tell that from healthy work. Match
+  every card to a live agent; for the rest, read the branch first, then finish or return
+  the card. Never re-spawn onto an orphan's half-built worktree blind.
 - **Trim the batch's CLAUDE.md changes.** Agents bloat docs with their change's story:
   what they didn't end up doing, how it used to work, function-level detail. Keep the
   durable rule or gotcha, cut the narrative.
