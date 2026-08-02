@@ -1,4 +1,4 @@
-# Ruling on the cards agents file
+# Guide for triaging new cards
 
 Companion to [`SKILL.md`](SKILL.md). Read before your first ruling of a run.
 
@@ -10,27 +10,14 @@ cold research phase for some future agent.
 
 Four bins, asked in this order.
 
-**1. Decline — "if it ain't broke."** First, because the other three quietly assume the
-work is worth doing by someone: *what actually breaks if we never do this?* Agents
-systematically over-file here, surfacing a symptom faithfully and proposing a fix without
-ever asking whether it has a victim. The tells: it's transient (a burst at startup that
-settles and never returns), cosmetic (a counter, a log line, an internal name nobody is
-misled by), theoretical (an edge nothing reachable produces), or its own evidence says "no
-adverse effect" in passing and carries on regardless. Record the decline ON the card —
-that's what stops the next agent tripping over the same symptom and re-filing it.
-
-*The catch worth rescuing, and it's easy to miss:* "nothing is broken" is not "nothing is
-lost". If the benign symptom shares a CHANNEL with a real fault — one counter, one log
-line, one error path serving both — declining trains everyone to ignore the alarm that
-would have caught the real thing. The right card is then far SMALLER than the one
-proposed: split the channel so the benign case names itself, and drop the investigation
-half. (Live: a duplicate-spawn counter fired on ordinary respawns AND on a protocol
-mismatch. Filed card — "reproduce the burst and explain it". Useful card — "split the
-counter by cause", which made the repro unnecessary.)
-
-*Taste calls are the user's, not yours.* If the decline turns on how something should FEEL
-or read rather than on whether it works, put the options to them in a sentence. Don't
-quietly bin it, and don't quietly build it.
+**1. Decline — "if it ain't broke."** Asked first because the other three assume the
+work is worth doing: *what actually breaks if we never do this?* Agents over-file
+symptoms that have no victim — don't rabbithole. Record the decline ON the card, or the
+next agent re-files it. Two catches: a benign symptom sharing a channel (one counter,
+log line or error path) with a real fault earns a smaller card — split the channel so
+the benign case names itself, skip the investigation; and a decline that turns on taste
+rather than function is the user's call — put the options to them, don't quietly bin or
+build.
 
 **2. Bounce it back** — "you just do it, same branch or a fresh one" — for a mechanical
 continuation of the work just done: same pattern, same files, same verification rig. An
@@ -46,10 +33,11 @@ during triage, or does it exist only because an agent stopped at its card's lite
 An accepted card only the user can do is tagged `[HUMAN REQUIRED]` and joins the
 end-of-run checklist — same rule as triage.
 
-## Groom the backlog the batch grew
+## Then check it against the board
 
-Agents file follow-ups from one card's viewpoint; you have the cross-batch view. Merge
-cards one session could do and verify in one go (triage's combine rule: each spawn must
-be worth its worktree, plan review and PR), close or trim ones already covered by
-in-flight work, and sanity-check each premise while the context is fresh — a correction
-now is a one-line edit, the same correction next month is a wasted research phase.
+The filer had one card's viewpoint; you have the whole board's. Look for similar cards:
+can this one be combined with another into something one session does and verifies in one
+go (each spawn must be worth its worktree, plan review and PR)? Does in-flight work
+already cover it — close or trim. And sanity-check its premise while the context is
+fresh: a correction now is a one-line edit, the same correction next month is a wasted
+research phase.
