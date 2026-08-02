@@ -17,6 +17,9 @@ research+design and gets its plan reviewed before writing code**.
 - Verify each candidate card's facts — against OPEN PRs too, not just the board. Cards
   drift between filing and pickup; corrections go in the spawn prompt, and agents
   re-verify the rest.
+- A constraint you believe applies (backwards compatibility, a frozen interface) is
+  verified with the user before any spawn prompt states it — a false one taxes every
+  design in the batch.
 - A card ONLY the user can do (a deploy, a feel check, their screen) isn't farmed —
   tag it `[HUMAN REQUIRED]` for future runs and surface it. Partly theirs? Farm it; the
   user's part joins the end-of-run checklist.
@@ -36,7 +39,7 @@ Pin the fleet's model explicitly on every spawn: the cheapest tier that implemen
 
 Agents inherit none of your context, so each prompt carries: repo path, card id, the
 runbook reading list, the slot + branch, your stale-fact corrections and cross-card
-warnings, and the project's verification doctrine. Include these four rules every time:
+warnings, and the project's verification doctrine. Include these five rules every time:
 
 - Never rewrite a card's text — when the work reveals the spec is wrong, the correction
   goes in a comment.
@@ -44,14 +47,8 @@ warnings, and the project's verification doctrine. Include these four rules ever
 - A git failure in the ROOT checkout is probably a sibling shipping this second — wait
   and retry, never force.
 - If the card isn't where triage saw it, another session took it — stop and report.
-
-**Your role is to enable agents, not constrain them — shared-resource conflicts are
-yours to sequence, not theirs to design around.** Told "no wire changes", agents treat
-the fence as a budget and build workarounds inside it rather than ask — even with an
-escape hatch. Say instead: "design as if you own the <shared thing>;
-if your best design touches it, say so at the checkpoint and I'll sequence the edits."
-And verify the domain facts behind any constraint with the user before designs are
-priced on them — one false "backward compatibility matters" taxes a whole batch.
+- Design as if you own any shared resource; if your design touches one, say so at the
+  checkpoint — the overseer sequences the edits, that's what it's for.
 
 And the checkpoint contract:
 
