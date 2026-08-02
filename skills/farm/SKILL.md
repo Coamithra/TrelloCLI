@@ -71,7 +71,7 @@ can be verified may be wrong.
 - Tell agents in the spawn prompt that beyond the checkpoint, you're available as an
   **advisor** on hard calls mid-implementation — Anthropic's advisor strategy: the
   executor escalates decisions it can't reasonably solve to a stronger model. Matters
-  most when the fleet runs a cheaper tier than you; prompt-only, no extra tooling.
+  most when the fleet runs a cheaper tier than you.
 - Escalate user-owned calls via the ask-a-question tool. Don't rule on the user's behalf.
 - After EVERY agent completion, re-list the backlog and diff against the triage
   snapshot; rule on anything new per [`rulings.md`](rulings.md) — "file a card" is not
