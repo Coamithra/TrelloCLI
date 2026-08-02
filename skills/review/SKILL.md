@@ -68,10 +68,9 @@ PATH, skip silently (mention the latter in Step 3). Never dump cards into a defa
 The bar is "is this real feedback?", not "is it important?" — the cosmetic and
 low-priority items are the whole point of the card.
 
-One card — "Review follow-ups: <branch>" — with a checklist item per finding
-(`<file>:<line> — <summary>`), in the leftmost non-Done list; ask if none is obvious.
-The description needs branch, base, HEAD SHA and a one-line "what this branch did" so
-the items make sense cold. Name the card in your Step 3 summary.
+File them in the leftmost non-Done list; ask if none is obvious. Card descriptions need
+branch, base, HEAD SHA and a one-line "what this branch did" so they make sense cold.
+Name the card(s) in your Step 3 summary.
 
 ## Notes
 
