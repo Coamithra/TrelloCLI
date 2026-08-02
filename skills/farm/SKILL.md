@@ -69,9 +69,11 @@ sweeps prove the change on a small sample before running wide; a surprising veri
 result on the pilot means STOP and escalate — the card's own claim about how its work
 can be verified may be wrong.
 
-Have agents name any constraints that shaped their design. Test named constraints
-against what you verified with the user at triage; a new one you're unsure of goes to
-the user, and the answer joins your running list.
+Have agents name any constraints that shaped their design. The tell of an unnamed one:
+an estimator, inference, or tunable threshold standing where the authoritative side
+already knows the value. Test named constraints against what you verified with the user
+at triage; a new one you're unsure of goes to the user, and the answer joins your
+running list.
 
 ## 4 — While agents run
 
