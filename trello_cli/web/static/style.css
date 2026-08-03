@@ -538,6 +538,17 @@ body.dragging .cards { overflow-y: hidden; }
 .due-done-row input { cursor: pointer; }
 .popover .inline-input[type="date"] { color-scheme: dark; }
 
+/* ── Link popover ── */
+/* Monospace: a magnet is a token to copy whole, not prose, and hex reads better
+   fixed-width. It always overflows this field (an input never wraps) — see the
+   scrollLeft reset in openLinkPopover, which keeps the visible end the
+   informative one. */
+.link-field {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.popover-note { color: var(--text-dim); font-size: 12px; margin: 0; }
+
 /* ── Manage-boards panel ── */
 .board-mgmt-hint { color: var(--text-dim); font-size: 12px; margin: 0 0 10px; }
 .board-mgmt-list { display: flex; flex-direction: column; gap: 6px; }

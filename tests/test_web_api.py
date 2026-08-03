@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from trello_cli import magnet
+from trello_cli.web import server as server_mod
 from trello_cli.web.server import create_app
 from tests.conftest import use_local_cli
 
@@ -54,6 +56,60 @@ def test_missing_card_is_404(web):
     client, *_ = web
     r = client.get("/api/cards/ffffffffffffffffffffffff")
     assert r.status_code == 404
+
+
+# ── card magnet (the web UI's 🔗 Link control) ────────────────────────
+
+def test_card_detail_carries_a_magnet(web):
+    """The detail response is where the web client gets the string it copies —
+    built server-side so `magnet.py` stays the only implementation of the
+    grammar."""
+    client, cid, _, bid = web
+    body = client.get(f"/api/cards/{cid}").json()
+    parsed = magnet.parse(body["_magnet"])
+    assert parsed == {
+        "type": "card", "id": cid, "board": bid,
+        "backend": "local", "server": None, "slug": "card",
+    }
+
+
+def test_the_magnet_is_transient_and_never_stored(web, store_root):
+    """Same contract as the upload route's `_attachment`: a response-only key. A
+    stored one would end up in an export and outlive the backend it names."""
+    client, cid, *_ = web
+    assert "_magnet" in client.get(f"/api/cards/{cid}").json()
+    assert "_magnet" not in use_local_cli(store_root).get_card(cid)
+
+
+# The remaining cases are on `_card_magnet` directly: they turn on the backend
+# name, and monkeypatching THAT through the route would also re-point
+# `get_backend()`, i.e. test a different server than the one being described.
+
+@pytest.mark.parametrize("card", [
+    {"id": "a" * 24, "name": "No board"},                    # no idBoard at all
+    {"id": "a" * 24, "idBoard": "short", "name": "Truncated"},  # not a 24-hex id
+])
+def test_a_card_with_no_usable_board_id_gets_no_magnet(card):
+    assert server_mod._card_magnet(card) is None
+
+
+def test_an_http_server_with_no_upstream_url_gets_no_magnet(monkeypatch):
+    """`trello://card/http/…` needs the server segment to resolve anywhere else,
+    so half a token is worse than none. The card still opens; the panel just
+    shows no link (see openLinkPopover)."""
+    monkeypatch.setattr(server_mod.config, "get_backend_name", lambda: "http")
+    monkeypatch.setattr(server_mod.config, "get_server_url", lambda: None)
+    assert server_mod._card_magnet({"id": "a" * 24, "idBoard": "b" * 24}) is None
+
+
+def test_an_http_magnet_carries_the_server_url_and_never_the_token(monkeypatch):
+    monkeypatch.setattr(server_mod.config, "get_backend_name", lambda: "http")
+    monkeypatch.setattr(server_mod.config, "get_server_url",
+                        lambda: "https://trellno.example.com")
+    monkeypatch.setattr(server_mod.config, "get_server_token", lambda: "s3cret")
+    token = server_mod._card_magnet({"id": "a" * 24, "idBoard": "b" * 24})
+    assert magnet.parse(token)["server"] == "https://trellno.example.com"
+    assert "s3cret" not in token
 
 
 def test_valid_card_patch_ok(web):

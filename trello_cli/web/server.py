@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .. import api, config
+from .. import api, config, magnet
 from ..backends.base import Backend
 from . import live
 
@@ -111,6 +111,38 @@ def _guard(fields: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
             status_code=400, detail=f"No updatable fields. Allowed: {sorted(allowed)}"
         )
     return out
+
+
+def _card_magnet(card: dict) -> str | None:
+    """The card's magnet link, or None when one can't be built.
+
+    Built here rather than in `app.js` so `magnet.py` stays the only
+    implementation of the grammar: a JS copy would have to reproduce
+    `slugify`'s NFKD folding and the server percent-encoding, and stay
+    byte-compatible with the Python one forever. The server also already knows
+    the backend name and the upstream server URL; the browser knows neither.
+
+    Never fatal — a card whose magnet can't be built still opens, it just has no
+    link to copy."""
+    board_id = card.get("idBoard")
+    if not board_id or len(board_id) != 24:
+        return None
+    backend = config.get_backend_name()
+    # http magnets carry the *server URL* (never the token, see magnet.py); with
+    # no configured URL the token would be unresolvable anywhere else.
+    server = config.get_server_url() if backend == "http" else None
+    if backend == "http" and not server:
+        return None
+    try:
+        token = magnet.build_card(card["id"], board_id, backend,
+                                  name=card.get("name"), server=server)
+        # build_card validates the backend but not the ids, so round-trip: a
+        # token the parser would reject is worse than no token at all — the
+        # whole point of copying one is that it resolves on the other end.
+        magnet.parse(token)
+        return token
+    except SystemExit:
+        return None
 
 
 def _stream_temp_file(tmp_path: str, media: str, fname: str) -> StreamingResponse:
@@ -311,7 +343,15 @@ def create_app(token: str | None = None, host: str = "127.0.0.1",
     @app.get("/api/cards/{card_id}")
     def get_card(card_id: str) -> dict:
         card = _ok(api.get_card, card_id)
-        return {**card, "comments": _ok(api.get_comments, card_id, limit=20)}
+        # `_magnet` is transient, like the upload route's `_attachment`: it is
+        # never stored and never part of a backend's card dict. This is a
+        # browser-only route (the http backend gets `get_card` over /api/rpc),
+        # so no backend contract moves.
+        return {
+            **card,
+            "comments": _ok(api.get_comments, card_id, limit=20),
+            "_magnet": _card_magnet(card),
+        }
 
     @app.patch("/api/cards/{card_id}")
     def patch_card(card_id: str, fields: dict[str, Any]) -> dict:
