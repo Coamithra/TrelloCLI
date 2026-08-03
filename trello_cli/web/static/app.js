@@ -49,6 +49,24 @@ function setBoardInUrl(boardId) {
   history.replaceState(null, '', url);
 }
 
+// >>> card-url (sliced by tests/test_card_url.py) >>>
+// Reflect the open card in the URL (?card=<id>), so F5 or a bookmark reopens the
+// drawer instead of dropping you back on the bare board. Same contract as
+// setBoardInUrl: replaceState (no history entry — the drawer is not a page) and
+// every other param preserved, ?board= and ?token= included.
+//
+// This param is for THIS browser. The thing you hand to another agent is the
+// magnet (see openLinkPopover): a URL is only usable by someone who can already
+// reach this server and holds a token, while a magnet resolves with no shared
+// state at all.
+function setCardInUrl(cardId) {
+  const url = new URL(location.href);
+  if (cardId) url.searchParams.set('card', cardId);
+  else url.searchParams.delete('card');
+  history.replaceState(null, '', url);
+}
+// <<< card-url <<<
+
 // ── board navigation: starred quick-swap buttons + dropdown ─────────
 // Stars are a client-side preference (per-browser), kept in localStorage as a
 // JSON array of board ids. Starred boards get a quick-swap button in the top
@@ -119,6 +137,11 @@ function renderNav() {
 // the board and re-point the live stream. No-op for an empty/same selection.
 function selectBoard(boardId) {
   if (!boardId || boardId === currentBoardId) return;
+  // A card open in the drawer belongs to the board we're leaving — keeping it
+  // would leave the URL claiming the new board plus a card that isn't on it.
+  // Gated on `openCard` so the manage-boards panel, which shares the drawer and
+  // nulls `openCard`, survives its own reloadBoardsNav() board switch.
+  if (openCard) closeDetail();
   currentBoardId = boardId;
   setBoardInUrl(boardId);
   renderNav();
@@ -770,6 +793,7 @@ function closePopover() {
 function closeDetail() {
   closePopover();
   openCard = null;
+  setCardInUrl(null);
   detailEl.classList.add('hidden');
   overlayEl.classList.add('hidden');
 }
@@ -1385,6 +1409,68 @@ function openDuePopover(anchor) {
   });
 }
 
+// ── link popover (the card's magnet) ───────────────────────────────
+// The one string worth copying out of this UI: a magnet resolves on any machine
+// with no shared state, which is what makes it the thing you paste into an
+// agent's prompt. The page URL is deliberately not offered — it only works for
+// someone already on this server, holding a token.
+//
+// `_magnet` is a transient key on the card-detail response (see server.py); the
+// server builds it so magnet.py stays the only implementation of the grammar.
+// It carries the card NAME as a trailing #slug, which parse() ignores — so a
+// rename in this panel leaves a stale slug on an already-copied token and it
+// still resolves.
+function openLinkPopover(anchor) {
+  const card = openCard;
+  if (!card) return;
+  openPopoverAt(anchor, 'Card link', (body) => {
+    if (!card._magnet) {
+      const p = document.createElement('p');
+      p.className = 'popover-note';
+      p.textContent = 'No link available for this card — the server could not '
+        + 'build one (an http backend with no configured server URL, or a card '
+        + 'with no board id).';
+      body.appendChild(p);
+      return;
+    }
+
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.className = 'inline-input link-field';
+    field.readOnly = true;
+    field.value = card._magnet;
+    field.addEventListener('focus', () => field.select());
+
+    const actions = document.createElement('div');
+    actions.className = 'inline-actions';
+    const copy = document.createElement('button');
+    copy.className = 'btn-primary';
+    copy.textContent = 'Copy';
+    actions.appendChild(copy);
+
+    copy.addEventListener('click', async () => {
+      field.select();
+      try {
+        // Needs a secure context: fine on localhost and on the https deploy,
+        // absent on a plain-http LAN bind — where the text is selected above and
+        // Ctrl+C still works, so say so rather than failing silently.
+        await navigator.clipboard.writeText(card._magnet);
+        setStatus('Link copied');
+      } catch (err) {
+        setStatus('Could not copy automatically — press Ctrl+C', true);
+      }
+    });
+
+    body.append(field, actions);
+    // Selected on open: the popover is useful even where the clipboard API is
+    // unavailable, and the token is long enough that hand-selecting it is a
+    // chore. select() leaves the caret at the end, which scrolls a nowrap field
+    // to its tail — 24 characters of hex, telling you nothing about what you're
+    // looking at. Scroll back so it opens on the `trello://card/<backend>/` end.
+    setTimeout(() => { field.focus(); field.select(); field.scrollLeft = 0; }, 0);
+  });
+}
+
 // ── detail sub-renderers (keep the panel in sync after an edit) ─────
 
 // Merge a server card response into the open card + refresh its board face.
@@ -1573,7 +1659,12 @@ function commentEl(c) {
   return div;
 }
 
-async function openDetail(cardId) {
+// `fromUrl` marks the boot-time restore of ?card=<id>. That id is whatever was
+// last in the address bar — a card since deleted, one hand-edited to junk, or one
+// belonging to a different board — and none of those deserve an error panel over
+// a board that loaded fine. So a restore that misses closes the drawer and drops
+// the param; a click, which can only name a card on screen, still reports.
+async function openDetail(cardId, { fromUrl = false } = {}) {
   const seq = ++detailReqSeq;
   closePopover();
   overlayEl.classList.remove('hidden');
@@ -1582,7 +1673,14 @@ async function openDetail(cardId) {
   try {
     const card = await api(`/api/cards/${cardId}`);
     if (seq !== detailReqSeq) return;  // a different card/panel was opened since (openDetail)
+    // A restored id from another board would render a card the board behind it
+    // doesn't contain (and refreshCardFace would have nothing to patch).
+    if (fromUrl && card.idBoard && card.idBoard !== currentBoardId) {
+      closeDetail();
+      return;
+    }
     openCard = card;
+    setCardInUrl(card.id);
     detailEl.innerHTML = '';
 
     const close = document.createElement('button');
@@ -1627,6 +1725,10 @@ async function openDetail(cardId) {
     attBtn.className = 'btn';
     attBtn.textContent = '📎 Attach';
     attBtn.addEventListener('click', (e) => { e.stopPropagation(); openAttachmentPopover(attBtn); });
+    const linkBtn = document.createElement('button');
+    linkBtn.className = 'btn';
+    linkBtn.textContent = '🔗 Link';
+    linkBtn.addEventListener('click', (e) => { e.stopPropagation(); openLinkPopover(linkBtn); });
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-danger';
     delBtn.textContent = '🗑 Delete';
@@ -1641,7 +1743,7 @@ async function openDetail(cardId) {
         setStatus('Delete failed: ' + err.message, true);
       }
     });
-    toolbar.append(labelBtn, dueBtn, attBtn, delBtn);
+    toolbar.append(labelBtn, dueBtn, attBtn, linkBtn, delBtn);
     detailEl.appendChild(toolbar);
 
     // ── labels (live slot) ──
@@ -1763,6 +1865,7 @@ async function openDetail(cardId) {
     detailEl.appendChild(commentsList);
   } catch (err) {
     if (seq !== detailReqSeq) return;
+    if (fromUrl) { closeDetail(); return; }
     detailEl.innerHTML = '';
     const p = document.createElement('p');
     p.className = 'error';
@@ -1807,6 +1910,7 @@ async function openManageBoards() {
   ++detailReqSeq;  // invalidate any in-flight card detail load for this drawer
   closePopover();
   openCard = null;
+  setCardInUrl(null);  // the panel takes over the drawer; no card is open behind it
   overlayEl.classList.remove('hidden');
   detailEl.classList.remove('hidden');
   detailEl.innerHTML = '<p class="loading">Loading…</p>';
@@ -2048,12 +2152,21 @@ async function init() {
     }
     // Restore the board from ?board=<id> on reload/bookmark; fall back to the
     // first board if it's absent or no longer exists for this backend.
-    const requested = new URLSearchParams(location.search).get('board');
+    const params = new URLSearchParams(location.search);
+    const requested = params.get('board');
     currentBoardId = boards.some((b) => b.id === requested) ? requested : boards[0].id;
     renderNav();
     setBoardInUrl(currentBoardId);
-    loadBoard(currentBoardId);
     initLive(currentBoardId);
+    await loadBoard(currentBoardId);
+    // Then reopen the card the URL names, if any. After the board, so its face
+    // is on screen for the patch-in-place path (refreshCardFace) — and only if
+    // it's on this board, which openDetail checks. The board it names comes from
+    // ?board= alone: every link this UI produces carries both, so inferring the
+    // board from the card would only serve a hand-edited URL, at the price of a
+    // fetch before the first render.
+    const card = params.get('card');
+    if (card) openDetail(card, { fromUrl: true });
   } catch (err) {
     setStatus('Could not load boards: ' + err.message, true);
   }
