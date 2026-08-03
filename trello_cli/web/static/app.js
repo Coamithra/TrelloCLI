@@ -137,11 +137,11 @@ function renderNav() {
 // the board and re-point the live stream. No-op for an empty/same selection.
 function selectBoard(boardId) {
   if (!boardId || boardId === currentBoardId) return;
-  // A card open in the drawer belongs to the board we're leaving — keeping it
-  // would leave the URL claiming the new board plus a card that isn't on it.
-  // Gated on `openCard` so the manage-boards panel, which shares the drawer and
-  // nulls `openCard`, survives its own reloadBoardsNav() board switch.
-  if (openCard) closeDetail();
+  // A card in the drawer belongs to the board we're leaving — keeping it would
+  // leave the URL claiming the new board plus a card that isn't on it. Gated so
+  // the manage-boards panel, which shares the drawer, survives its own
+  // reloadBoardsNav() board switch.
+  if (drawerIsCard) closeDetail();
   currentBoardId = boardId;
   setBoardInUrl(boardId);
   renderNav();
@@ -780,6 +780,10 @@ async function loadBoard(boardId, { quiet = false } = {}) {
 // ── detail drawer (editable, Trello-style) ─────────────────────────
 
 let openCard = null;       // the card dict currently shown in the detail panel
+// True while the drawer belongs to a card — including the load before its dict
+// arrives, which `openCard` alone can't say. The drawer is shared with the
+// manage-boards panel, and only the card use of it is tied to a board.
+let drawerIsCard = false;
 let openPopover = null;    // the floating popover element (label/due), if any
 // Token guarding the drawer against a stale detail/manage response rendering
 // after the user opened a different card (or the manage panel). Bumped by every
@@ -791,8 +795,14 @@ function closePopover() {
 }
 
 function closeDetail() {
+  // Invalidate any in-flight detail load, as openManageBoards does. Without it
+  // a response that lands after the user closed the drawer still runs the
+  // success path — re-showing a card they dismissed and putting it back in the
+  // URL, so a reload reopens it.
+  ++detailReqSeq;
   closePopover();
   openCard = null;
+  drawerIsCard = false;
   setCardInUrl(null);
   detailEl.classList.add('hidden');
   overlayEl.classList.add('hidden');
@@ -1410,10 +1420,13 @@ function openDuePopover(anchor) {
 }
 
 // ── link popover (the card's magnet) ───────────────────────────────
-// The one string worth copying out of this UI: a magnet resolves on any machine
-// with no shared state, which is what makes it the thing you paste into an
-// agent's prompt. The page URL is deliberately not offered — it only works for
-// someone already on this server, holding a token.
+// The one string worth copying out of this UI: a magnet is a whole card
+// reference (backend + board + card), so it resolves from a bare `trello`
+// command with no flags — which is what makes it the thing you paste into an
+// agent's prompt. The page URL is deliberately not offered: it only works for
+// someone already on this server, holding a token. (A `local` magnet still
+// needs the recipient to reach the same store; an `http` one carries the server
+// URL and so travels further.)
 //
 // `_magnet` is a transient key on the card-detail response (see server.py); the
 // server builds it so magnet.py stays the only implementation of the grammar.
@@ -1449,6 +1462,10 @@ function openLinkPopover(anchor) {
     actions.appendChild(copy);
 
     copy.addEventListener('click', async () => {
+      // focus BEFORE select: clicking the button moved focus off the field, and
+      // a selection on an unfocused input is not what Ctrl+C copies — which is
+      // the entire fallback below.
+      field.focus();
       field.select();
       try {
         // Needs a secure context: fine on localhost and on the https deploy,
@@ -1666,6 +1683,13 @@ function commentEl(c) {
 // the param; a click, which can only name a card on screen, still reports.
 async function openDetail(cardId, { fromUrl = false } = {}) {
   const seq = ++detailReqSeq;
+  // Let go of the outgoing card before the fetch. If this one fails (archived
+  // by another agent between the last reload and the click) the drawer would
+  // otherwise show an error for card B while the URL still named card A — and a
+  // reload would reopen A.
+  openCard = null;
+  drawerIsCard = true;
+  setCardInUrl(null);
   closePopover();
   overlayEl.classList.remove('hidden');
   detailEl.classList.remove('hidden');
@@ -1910,6 +1934,7 @@ async function openManageBoards() {
   ++detailReqSeq;  // invalidate any in-flight card detail load for this drawer
   closePopover();
   openCard = null;
+  drawerIsCard = false;
   setCardInUrl(null);  // the panel takes over the drawer; no card is open behind it
   overlayEl.classList.remove('hidden');
   detailEl.classList.remove('hidden');

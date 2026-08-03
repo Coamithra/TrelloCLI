@@ -74,7 +74,8 @@ a popover (`openPopoverAt`, as labels/due do) holding the card's magnet in a rea
 `<input>` (pre-selected) + a Copy button. When `_magnet` is `null` the popover says why
 instead. **No page-URL row**: the browser URL is only reachable by someone who can already
 hit this server *and* has a token, so it is not the thing you hand to an agent — the magnet
-is, and it resolves with no shared state at all.
+is, and it resolves from a bare `trello` command with no flags. (A `local` magnet still
+needs the recipient to reach the same store; an `http` one carries the server URL.)
 
 Copy uses `navigator.clipboard.writeText`, falling back to selecting the input and telling
 the user to press Ctrl+C (the API needs a secure context: fine on `localhost` and on the

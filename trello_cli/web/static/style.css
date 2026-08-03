@@ -539,13 +539,13 @@ body.dragging .cards { overflow-y: hidden; }
 .popover .inline-input[type="date"] { color-scheme: dark; }
 
 /* ── Link popover ── */
-/* Monospace + nowrap: a magnet is a token to copy whole, not prose. It overflows
-   the field horizontally rather than wrapping, so a double-click-drag or the
-   auto-select still yields the entire string. */
+/* Monospace: a magnet is a token to copy whole, not prose, and hex reads better
+   fixed-width. It always overflows this field (an input never wraps) — see the
+   scrollLeft reset in openLinkPopover, which keeps the visible end the
+   informative one. */
 .link-field {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  white-space: nowrap;
 }
 .popover-note { color: var(--text-dim); font-size: 12px; margin: 0; }
 

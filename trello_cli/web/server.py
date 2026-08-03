@@ -134,8 +134,13 @@ def _card_magnet(card: dict) -> str | None:
     if backend == "http" and not server:
         return None
     try:
-        return magnet.build_card(card["id"], board_id, backend,
-                                 name=card.get("name"), server=server)
+        token = magnet.build_card(card["id"], board_id, backend,
+                                  name=card.get("name"), server=server)
+        # build_card validates the backend but not the ids, so round-trip: a
+        # token the parser would reject is worse than no token at all — the
+        # whole point of copying one is that it resolves on the other end.
+        magnet.parse(token)
+        return token
     except SystemExit:
         return None
 
